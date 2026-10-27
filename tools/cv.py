@@ -854,6 +854,333 @@ def cmd_warm(args):
         print("⚠ 该上游未返回缓存命中间接信号 (cached_tokens); 前缀是否入缓存取决于供应商实现, 延迟对比可作旁证")
 
 
+# ==== M2 IMPL (dashboard/watch/serve) ====
+# ------------------------------------------------- dashboard: 账本可视化 (M2)
+
+DASH_TMPL = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<title>Context Vault · token 经济面板</title>
+<style>
+:root{--bg:#0e1116;--card:#171c24;--ink:#e6e9ef;--dim:#8b93a3;--acc:#4f9cf9;--good:#3ecf8e;--warn:#f5a623}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font:14px/1.6 "Segoe UI",system-ui,sans-serif;padding:28px}
+h1{font-size:20px;margin-bottom:2px} .sub{color:var(--dim);font-size:12px;margin-bottom:22px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:26px}
+.card{background:var(--card);border-radius:12px;padding:16px 18px}
+.card .v{font-size:24px;font-weight:700;color:var(--good)} .card .k{color:var(--dim);font-size:12px}
+.card.alt .v{color:var(--acc)}
+h2{font-size:15px;margin:24px 0 12px;color:var(--ink)}
+.bar{display:flex;align-items:center;gap:10px;margin:7px 0}
+.bar .name{width:220px;color:var(--dim);font-size:12px;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar .track{flex:1;background:#1d2430;border-radius:6px;height:18px;position:relative}
+.bar .fill{height:100%;border-radius:6px;background:linear-gradient(90deg,#2d7d46,var(--good))}
+.bar .val{width:130px;font-size:12px;color:var(--ink)}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid #202836}
+th{color:var(--dim);font-weight:500}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
+.ok{background:var(--good)} .err{background:#e5534b} .warm{background:var(--warn)}
+.months{display:flex;align-items:flex-end;gap:6px;height:120px}
+.mcol{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:4px}
+.mcol .stick{width:100%;max-width:46px;background:linear-gradient(180deg,var(--acc),#2a5f9e);border-radius:4px 4px 0 0}
+.mcol .lb{font-size:10px;color:var(--dim)}
+</style></head><body>
+<h1>Context Vault · token 经济面板</h1>
+<div class="sub">本地优先的信任货币账本 · __GENERATED__</div>
+<div class="cards">__CARDS__</div>
+<h2>按模型节省 (明细账)</h2>__BYMODEL__
+<h2>月度节省走势 (__MONTHS__ 个月)</h2><div class="months">__TIMELINE__</div>
+<h2>上游可用性 (最近探测/切换)</h2><table><tr><th></th><th>时间</th><th>profile</th><th>状态</th><th>详情</th></tr>__PROBE__</table>
+<h2>vault 快照资产 (__NSNAP__)</h2><table><tr><th>id</th><th>agent</th><th>块</th><th>入 token</th><th>cache 读</th><th>完整性</th><th>时间</th></tr>__SNAPS__</table>
+</body></html>"""
+
+
+def cmd_dashboard(args):
+    vault = vault_dir(args)
+    conn = db(vault)
+    cards, bymodel, months, probews, snaps = [], [], [], [], []
+    row = conn.execute("SELECT tokens_saved, cost_usd, raw FROM ledger_events "
+                       "WHERE source='headroom-lifetime'").fetchone()
+    raw = json.loads(row["raw"]) if row else {}
+    usd = lambda v: f"${v:,.2f}" if isinstance(v, (int, float)) else "-"
+    total_saved = ((row["cost_usd"] or 0) + (raw.get("cache_savings_usd") or 0)) if row else 0
+    cards.append(f'<div class="card"><div class="v">{usd(total_saved)}</div><div class="k">累计节省 (压缩+缓存)</div></div>')
+    cards.append(f'<div class="card alt"><div class="v">{usd(raw.get("cache_savings_usd"))}</div><div class="k">缓存节省</div></div>')
+    cards.append(f'<div class="card alt"><div class="v">{int(raw.get("total_input_tokens", 0)):,}</div><div class="k">历史总输入 tokens</div></div>')
+    cards.append(f'<div class="card"><div class="v">{int(row["tokens_saved"] or 0):,}</div><div class="k">压缩节省 tokens</div></div>')
+    rows = conn.execute("SELECT model, COUNT(*) n, SUM(tokens_saved) t, SUM(cost_usd) c "
+                        "FROM ledger_events WHERE kind='compression' GROUP BY model ORDER BY c DESC").fetchall()
+    mx = max((r["c"] or 0) for r in rows) if rows else 1
+    for r in rows:
+        w = int(100 * (r["c"] or 0) / mx) if mx else 0
+        bymodel.append(f'<div class="bar"><div class="name">{r["model"]}</div>'
+                       f'<div class="track"><div class="fill" style="width:{w}%"></div></div>'
+                       f'<div class="val">{usd(r["c"] or 0)} · {(r["t"] or 0):,} tok</div></div>')
+    rows = conn.execute("SELECT substr(occurred_at,1,7) m, SUM(cost_usd) c FROM ledger_events "
+                        "WHERE kind='compression' GROUP BY m ORDER BY m").fetchall()
+    mx = max((r["c"] or 0) for r in rows) if rows else 1
+    for r in rows:
+        h = int(100 * (r["c"] or 0) / mx) if mx else 0
+        months.append(f'<div class="mcol"><div class="stick" style="height:{max(h,3)}%" title="{usd(r["c"] or 0)}"></div>'
+                      f'<div class="lb">{r["m"][2:]}</div></div>')
+    for r in conn.execute("SELECT * FROM probe_events ORDER BY id DESC LIMIT 15"):
+        cls = {"ok": "ok", "warm": "warm"}.get(r["status"], "err")
+        detail = (r["missing_models"] or "") or (r["models"] or "")[:60]
+        probews.append(f'<tr><td><span class="dot {cls}"></span></td><td>{r["ts"][:19]}</td>'
+                       f'<td>{r["profile"]}</td><td>{r["status"]}</td><td>{detail}</td></tr>')
+    for r in conn.execute("SELECT * FROM snapshots ORDER BY created_at DESC LIMIT 20"):
+        snaps.append(f'<tr><td>{r["id"]}</td><td>{r["agent"]}</td><td>{r["blocks_total"]}</td>'
+                     f'<td>{r["tokens_in"]:,}</td><td>{r["cache_read"]:,}</td>'
+                     f'<td>{r["completeness"]}</td><td>{str(r["created_at"])[:19]}</td></tr>')
+    html = (DASH_TMPL.replace("__GENERATED__", now_iso())
+            .replace("__CARDS__", "".join(cards))
+            .replace("__BYMODEL__", "".join(bymodel) or '<div class="sub">明细为空</div>')
+            .replace("__MONTHS__", str(len(months)))
+            .replace("__TIMELINE__", "".join(months))
+            .replace("__PROBE__", "".join(probews))
+            .replace("__NSNAP__", str(len(snaps)))
+            .replace("__SNAPS__", "".join(snaps)))
+    out = Path(args.out) if args.out else vault / "dashboard.html"
+    out.write_text(html, encoding="utf-8")
+    print(f"面板已生成: {out.resolve()}")
+    if args.open:
+        subprocess.run(["cmd", "/c", "start", "", str(out.resolve())], shell=False)
+
+
+# ------------------------------------------------- watch: 切换携带会话 (M2)
+
+def active_sessions(hours: float = 8) -> list:
+    cutoff = time.time() - hours * 3600
+    found = []
+    for f in CODEX_SESSIONS.glob("*/*/*/rollout-*.jsonl"):
+        if f.stat().st_mtime > cutoff:
+            found.append(("codex", str(f)))
+    for f in (HOME / ".claude" / "projects").glob("*/*.jsonl"):
+        if f.stat().st_mtime > cutoff:
+            found.append(("claude-code", str(f)))
+    for f in (HOME / ".claude" / "transcripts").glob("*.jsonl"):
+        if f.stat().st_mtime > cutoff:
+            found.append(("claude-transcript", str(f)))
+    return sorted(found, key=lambda x: -Path(x[1]).stat().st_mtime)
+
+
+def toast(title: str, msg: str):
+    esc = msg.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    ps = ("[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, "
+          "ContentType=WindowsRuntime] | Out-Null; "
+          "$x=New-Object Windows.Data.Xml.Dom.XmlDocument; "
+          "$x.LoadXml('<toast><visual><binding template=\"ToastText02\">"
+          f"<text id=\"1\">{title}</text><text id=\"2\">{esc}</text>"
+          "</binding></visual></toast>'); "
+          "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Context Vault')"
+          ".Show([Windows.UI.Notifications.ToastNotification]::new($x))")
+    try:
+        subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps],
+                       capture_output=True, timeout=10)
+    except Exception:
+        pass
+    print(f"\a⚠ {title}: {msg}", file=sys.stderr)
+
+
+def cmd_watch(args):
+    vault = vault_dir(args)
+    prof_p = Path(args.file) if args.file else HEADROOM_DIR / "upstream-profile.json"
+    if not prof_p.exists():
+        raise SystemExit(f"未找到 {prof_p} (Switcher 未安装?)")
+    conn = db(vault)
+    conn.executescript(SCHEMA)
+    last = prof_p.read_text(encoding="utf-8")
+    print(f"守望中: 监听 {prof_p} (当前 "
+          f"{json.loads(last).get('profile', '?')}), 每 {args.interval}s 检查; Ctrl+C 退出")
+    while True:
+        time.sleep(args.interval)
+        try:
+            cur = prof_p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if cur == last:
+            continue
+        last = cur
+        try:
+            prof = json.loads(cur)
+        except ValueError:
+            continue
+        pid = prof.get("profile", "?")
+        acts = active_sessions(args.hours)
+        by_agent = {}
+        for a, _ in acts:
+            by_agent[a] = by_agent.get(a, 0) + 1
+        acts_desc = ", ".join(f"{k}×{v}" for k, v in by_agent.items()) or "无"
+        msg = (f"已切换到 [{pid}]。最近 {args.hours:.0f}h 活跃会话: {acts_desc}。"
+               "携带迁移: cv migrate <会话文件> --target codex|claude")
+        toast("Context Vault · 上游已切换", msg)
+        conn.execute("INSERT INTO probe_events(ts,profile,endpoint,status,http_code,latency_ms,models,missing_models)"
+                     " VALUES(?,?,?,?,?,?,?,?)",
+                     (now_iso(), pid, "switch-detected", "switch", None, None,
+                      json.dumps({"active_sessions": len(acts), "by_agent": by_agent},
+                                 ensure_ascii=False), None))
+        conn.commit()
+        for agent, f in acts[:5]:
+            print(f"  · [{agent}] {f}")
+
+
+# ------------------------------------------------- serve: 常驻服务 + 热索引 (M2)
+
+def tokenize(text: str) -> list:
+    """英文词 + CJK 单字及 bigram (中英混合检索够用)."""
+    out, cur = [], []
+    for ch in text.lower():
+        if ch.isascii() and (ch.isalnum() or ch == "_"):
+            cur.append(ch)
+        else:
+            if cur:
+                out.append("".join(cur))
+                cur = []
+            if "\u4e00" <= ch <= "\u9fff":
+                out.append(ch)
+    if cur:
+        out.append("".join(cur))
+    words = [t for t in out if len(t) >= 2]
+    cjk = [out[i] + out[i + 1] for i in range(len(out) - 1)
+           if len(out[i]) == 1 and len(out[i + 1]) == 1]
+    return words + cjk
+
+
+class VaultIndex:
+    """内存倒排索引: term -> [(sid, block_idx)]; 指纹失效自动重建。"""
+
+    def __init__(self, vault: Path, block_text_fn):
+        self.vault = vault
+        self.block_text = block_text_fn
+        self.fingerprint = None
+        self.index, self.meta, self.envs = {}, {}, {}
+        self.rebuild(force=True)
+
+    def _fp(self) -> str:
+        snap_dir = self.vault / "snapshots"
+        return hashlib.sha256("|".join(f"{f.name}:{int(f.stat().st_mtime)}" for f in
+                                       sorted(snap_dir.glob("cv_*.json"))).encode()).hexdigest()
+
+    def rebuild(self, force=False):
+        fp = self._fp()
+        if not force and fp == self.fingerprint:
+            return
+        self.index, self.meta, self.envs = {}, {}, {}
+        for f in sorted((self.vault / "snapshots").glob("cv_*.json")):
+            try:
+                env = json.loads(f.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                continue
+            sid = f.stem
+            env["_sid"] = sid
+            self.envs[sid] = env
+            self.meta[sid] = {"agent": env["capture"].get("agent"),
+                              "created_at": env.get("created_at"),
+                              "cwd": env["capture"].get("cwd"),
+                              "blocks": env["stats"]["blocks_total"],
+                              "tokens_in": env["stats"]["tokens_in"],
+                              "completeness": env["capture"].get("completeness")}
+            for i, b in enumerate(env["conversation"]):
+                for t in set(tokenize(self.block_text(b))):
+                    self.index.setdefault(t, []).append((sid, i))
+        self.fingerprint = fp
+
+    def search(self, query: str, limit: int) -> dict:
+        from collections import Counter
+        terms = tokenize(query)
+        sc = Counter()
+        for t in terms:
+            for sid, _ in self.index.get(t, []):
+                sc[sid] += 1
+        return {"query": query, "terms": terms,
+                "hits": [{"sid": sid, "score": n, **self.meta[sid]}
+                         for sid, n in sc.most_common(limit)]}
+
+    def context(self, query: str, limit: int) -> dict:
+        from collections import Counter
+        terms = tokenize(query)
+        pairs = Counter()
+        for t in terms:
+            for sid, i in self.index.get(t, []):
+                pairs[(sid, i)] += 1
+        out, seen = [], set()
+        for (sid, i), n in pairs.most_common():
+            if len(out) >= limit:
+                break
+            if sid in seen:
+                continue
+            seen.add(sid)
+            b = self.envs[sid]["conversation"][i]
+            text = self.block_text(b)
+            pos = text.lower().find(terms[0]) if terms else 0
+            start = max(0, pos - 200)
+            out.append({"sid": sid, "block": i, "role": b.get("role") or b["type"],
+                        "score": n, "excerpt": text[start:start + 400],
+                        "cwd": self.meta[sid].get("cwd")})
+        return {"query": query, "results": out}
+
+
+def cmd_serve(args):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import urlparse, parse_qs
+    sys.path.insert(0, str(Path(__file__).parent))
+    from mcp_server import block_text
+    vault = vault_dir(args)
+    idx = VaultIndex(vault, block_text)
+    print(f"vault 热索引就绪: {len(idx.envs)} 快照, {len(idx.index)} 词项")
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _json(self, obj, code=200):
+            body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            u = urlparse(self.path)
+            q = {k: v[0] for k, v in parse_qs(u.query).items()}
+            try:
+                if u.path == "/healthz":
+                    return self._json({"service": "context-vault", "status": "ok",
+                                       "snapshots": len(idx.envs), "terms": len(idx.index)})
+                if u.path == "/search":
+                    idx.rebuild()
+                    return self._json(idx.search(q.get("q", ""), int(q.get("limit", 5))))
+                if u.path == "/context":
+                    idx.rebuild()
+                    return self._json(idx.context(q.get("q", ""), int(q.get("limit", 3))))
+                if u.path == "/recent":
+                    rows = sorted(idx.meta.items(), key=lambda kv: kv[1]["created_at"] or "",
+                                  reverse=True)[:int(q.get("limit", 5))]
+                    return self._json([{"sid": k, **v} for k, v in rows])
+                if u.path == "/stats":
+                    return self._json({"stats": ledger_summary(vault)})
+                if u.path == "/snapshot":
+                    env = idx.envs.get(q.get("id", ""))
+                    if not env:
+                        return self._json({"error": "not found"}, 404)
+                    from collections import Counter
+                    dist = dict(Counter(b["type"] for b in env["conversation"]))
+                    return self._json({"id": q.get("id"), "capture": env["capture"],
+                                       "stats": env["stats"], "block_dist": dist})
+                self._json({"error": "unknown route",
+                            "routes": ["/healthz", "/search?q=", "/context?q=",
+                                       "/recent", "/stats", "/snapshot?id="]}, 404)
+            except Exception as e:
+                self._json({"error": str(e)}, 500)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", args.port), H)
+    print(f"Context Vault 服务已启动: http://127.0.0.1:{args.port} (Ctrl+C 退出)")
+    print("  MCP server 检测到本服务时自动走热索引 (CV_VAULT_SVC 可覆盖地址)")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\n服务已停止")
+
 # ------------------------------------------------- doctor: 环境体检
 
 def cmd_doctor(args):
@@ -934,7 +1261,25 @@ def main(argv=None):
     w.add_argument("--key")
     w.set_defaults(func=cmd_warm)
 
+# ==== M2 REG ====
+
+    dsh = sub.add_parser("dashboard", help="token 经济可视化面板 (自包含 HTML)")
+    dsh.add_argument("--out")
+    dsh.add_argument("--open", action="store_true", help="生成后立即用浏览器打开")
+    dsh.set_defaults(func=cmd_dashboard)
+
+    wt = sub.add_parser("watch", help="守望上游切换: Switcher 换 profile 即提醒携带会话")
+    wt.add_argument("--interval", type=int, default=2)
+    wt.add_argument("--hours", type=float, default=8, help="活跃会话回看窗口 (小时)")
+    wt.add_argument("--file", help="监听目标覆盖 (默认 ~/.headroom/upstream-profile.json; 测试用)")
+    wt.set_defaults(func=cmd_watch)
+
+    sv = sub.add_parser("serve", help="常驻服务: 热索引 + HTTP API (127.0.0.1)")
+    sv.add_argument("--port", type=int, default=8791)
+    sv.set_defaults(func=cmd_serve)
+
     sub.add_parser("doctor").set_defaults(func=cmd_doctor)
+
 
     args = ap.parse_args(argv)
     args.func(args)

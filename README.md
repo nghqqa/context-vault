@@ -44,6 +44,15 @@ python tools/cv.py probe --watch 300       # 每 5 分钟守护
 # 缓存预热 (切换上游前预发历史前缀, M2)
 python tools/cv.py warm --snapshot cv_xxxx --profile myrelay
 python tools/cv.py warm --snapshot cv_xxxx --profile myrelay --prefix-file AGENTS.md  # 精确前缀
+
+# token 经济面板 (自包含 HTML, 零外部依赖)
+python tools/cv.py dashboard --open
+
+# 上游切换守望 (Switcher 换 profile 即弹"携带会话"提醒, 无侵入)
+python tools/cv.py watch
+
+# 常驻服务: 热索引 21x 加速 + HTTP API (可选, MCP 自动联动, 挂了自动回退)
+python tools/cv.py serve
 ```
 
 ### 作为 MCP server 接入（任意 MCP 客户端 = 记忆后端）

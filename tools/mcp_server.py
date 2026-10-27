@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
+import urllib.parse
 from pathlib import Path
 
 SERVER_NAME = "context-vault"
@@ -215,6 +217,61 @@ def t_stats(args_vault) -> str:
 
 # ---------------- MCP 工具表 ----------------
 
+# ---------------- 常驻服务联动 (cv serve) ----------------
+
+SVC_BASE = os.environ.get("CV_VAULT_SVC", "http://127.0.0.1:8791")
+
+
+def _svc_get(path: str, timeout: float = 2.0):
+    import urllib.request
+    req = urllib.request.Request(SVC_BASE + path, headers={"User-Agent": "ContextVault-mcp/0.1"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _via_service(name: str, args_dict: dict):
+    """常驻服务活着时走热索引; 挂了/超时返回 None 回退文件扫描。"""
+    try:
+        if name == "vault_search":
+            r = _svc_get(f"/search?q={urllib.parse.quote(args_dict.get('query', ''))}"
+                         f"&limit={int(args_dict.get('limit', 5))}")
+            if not r["hits"]:
+                return f"未命中: {r['query']} (via 热索引)"
+            lines = [f"搜索 '{r['query']}' 命中 {len(r['hits'])} 个快照 (via 热索引):"]
+            for h in r["hits"]:
+                lines.append(f"  [{h['sid']}] {h['agent']} 得分={h['score']} — "
+                             f"{h.get('cwd', '?')} ({str(h.get('created_at', ''))[:10]})")
+            return "\n".join(lines)
+        if name == "vault_context":
+            r = _svc_get(f"/context?q={urllib.parse.quote(args_dict.get('query', ''))}"
+                         f"&limit={int(args_dict.get('limit', 3))}")
+            if not r["results"]:
+                return f"vault 中无相关上下文: {r['query']}"
+            lines = [f"来自 context-vault 的相关历史上下文 (查询: '{r['query']}', via 热索引):"]
+            for h in r["results"]:
+                lines.append(f"\n--- 快照 {h['sid']} 块#{h['block']} ({h['role']}, cwd={h.get('cwd')}) "
+                             f"相关度={h['score']} ---\n{h['excerpt']}")
+            return "\n".join(lines)[:12000]
+        if name == "vault_recent":
+            r = _svc_get(f"/recent?limit={int(args_dict.get('limit', 5))}")
+            lines = [f"最近 {len(r)} 个快照 (via 热索引):"]
+            for h in r:
+                lines.append(f"  [{h['sid']}] {h['agent']} 块={h.get('blocks')} "
+                             f"入={h.get('tokens_in')} | {str(h.get('created_at', ''))[:19]}")
+            return "\n".join(lines)
+        if name == "vault_stats":
+            r = _svc_get("/stats")["stats"]
+            usd = lambda v: f"${v:,.2f}" if isinstance(v, (int, float)) else "-"
+            return ("token 账本 (context-vault, via 热索引):\n"
+                    f"  快照数: {r.get('snapshots', 0)}\n"
+                    f"  压缩节省: {r.get('lifetime_tokens_saved', 0):,} tokens = "
+                    f"{usd(r.get('lifetime_compression_saved_usd'))}\n"
+                    f"  缓存节省: {usd(r.get('lifetime_cache_saved_usd'))}")
+    except Exception:
+        return None
+    return None  # vault_snapshot 等复杂工具直接走本地, 避免双实现漂移
+
+
 TOOLS = [
     {"name": "vault_search", "description": "在 context-vault 的全部历史会话快照中搜索关键词, 返回命中的快照列表",
      "inputSchema": {"type": "object", "properties": {
@@ -239,6 +296,10 @@ TOOLS = [
 
 
 def dispatch(name: str, args_dict: dict, vault: Path) -> str:
+    # 优先走常驻服务热索引 (cv serve); 失活自动回退本地文件扫描 — 常驻只是加速, 不是依赖
+    svc = _via_service(name, args_dict)
+    if svc is not None:
+        return svc
     if name == "vault_search":
         return t_search(vault, args_dict.get("query", ""), int(args_dict.get("limit", 5)))
     if name == "vault_context":
