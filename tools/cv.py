@@ -663,10 +663,46 @@ def resolve_key(args) -> str | None:
     return None
 
 
-def cmd_probe(args):
-    vault = vault_dir(args)
+def probe_once(vault: Path, profiles: list, key, baseline: dict, verbose=True) -> list:
+    """单轮全 profile 探测; 更新 baseline(dict, 调用方负责持久化)并落库, 返回告警结果。"""
     conn = db(vault)
     conn.executescript(SCHEMA)
+    alerts = []
+    for p in profiles:
+        pid, url = p["id"], models_url(p["openai_api_url"])
+        status, code, ids, ms = fetch_models(url, key)
+        watched, missing = p.get("default_model"), []
+        if status == "ok":
+            if watched and watched not in ids:
+                missing.append(watched)
+            # 仅告警基线中消失的模型; 新增模型不打扰
+            if pid in baseline and baseline[pid]:
+                missing += [m for m in baseline[pid] if m not in ids]
+            missing = list(dict.fromkeys(missing))
+            baseline[pid] = ids
+            if verbose:
+                flag = "✗" if missing else "✓"
+                print(f"{flag} [{pid}] ok http={code} {ms}ms  models={len(ids)}"
+                      + (f"  消失: {missing}" if missing else ""))
+            if missing:
+                alerts.append({"profile": pid, "kind": "model_missing", "detail": missing})
+                notify("上游模型变动", f"[{pid}] 消失: {', '.join(missing)}")
+        else:
+            # 端点异常(网络/鉴权) ≠ 模型下架, 不进入模型消失判定, 防止狼来了效应
+            detail = ids[0] if ids else ""
+            if verbose:
+                print(f"✗ [{pid}] {status} http={code} {ms}ms  端点异常: {detail}")
+            alerts.append({"profile": pid, "kind": "endpoint", "detail": detail})
+            notify("上游端点异常", f"[{pid}] {status} http={code} — 无法判定模型状态")
+        conn.execute("INSERT INTO probe_events(ts,profile,endpoint,status,http_code,latency_ms,models,missing_models)"
+                     " VALUES(?,?,?,?,?,?,?,?)",
+                     (now_iso(), pid, url, status, code, ms, json.dumps(ids), json.dumps(missing)))
+    conn.commit()
+    return alerts
+
+
+def cmd_probe(args):
+    vault = vault_dir(args)
     baseline_p = vault / "probe_baseline.json"
     baseline = json.loads(baseline_p.read_text(encoding="utf-8")) if baseline_p.exists() else {}
     key = resolve_key(args)
@@ -674,32 +710,7 @@ def cmd_probe(args):
     if args.profile:
         profiles = [p for p in profiles if p["id"] == args.profile] or profiles
     while True:
-        for p in profiles:
-            pid, url = p["id"], models_url(p["openai_api_url"])
-            status, code, ids, ms = fetch_models(url, key)
-            watched, missing = p.get("default_model"), []
-            if status == "ok":
-                if watched and watched not in ids:
-                    missing.append(watched)
-                # 仅告警基线中消失的模型; 新增模型不打扰
-                if pid in baseline and baseline[pid]:
-                    missing += [m for m in baseline[pid] if m not in ids]
-                missing = list(dict.fromkeys(missing))
-                baseline[pid] = ids
-                flag = "✗" if missing else "✓"
-                print(f"{flag} [{pid}] ok http={code} {ms}ms  models={len(ids)}"
-                      + (f"  消失: {missing}" if missing else ""))
-                if missing:
-                    notify("上游模型变动", f"[{pid}] 消失: {', '.join(missing)}")
-            else:
-                # 端点异常(网络/鉴权) ≠ 模型下架, 不进入模型消失判定, 防止狼来了效应
-                detail = ids[0] if ids else ""
-                print(f"✗ [{pid}] {status} http={code} {ms}ms  端点异常: {detail}")
-                notify("上游端点异常", f"[{pid}] {status} http={code} — 无法判定模型状态")
-            conn.execute("INSERT INTO probe_events(ts,profile,endpoint,status,http_code,latency_ms,models,missing_models)"
-                         " VALUES(?,?,?,?,?,?,?,?)",
-                         (now_iso(), pid, url, status, code, ms, json.dumps(ids), json.dumps(missing)))
-        conn.commit()
+        probe_once(vault, profiles, key, baseline)
         baseline_p.write_text(json.dumps(baseline, ensure_ascii=False, indent=1), encoding="utf-8")
         if not args.watch:
             break
@@ -1119,14 +1130,13 @@ class VaultIndex:
         return {"query": query, "results": out}
 
 
-def cmd_serve(args):
+def build_vault_server(vault: Path, port: int):
+    """构建热索引 HTTP 服务 (不阻塞); cmd_serve 与 Pro 托盘共用, 避免实现漂移。"""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import urlparse, parse_qs
     sys.path.insert(0, str(Path(__file__).parent))
     from mcp_server import block_text
-    vault = vault_dir(args)
     idx = VaultIndex(vault, block_text)
-    print(f"vault 热索引就绪: {len(idx.envs)} 快照, {len(idx.index)} 词项")
 
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -1173,7 +1183,13 @@ def cmd_serve(args):
             except Exception as e:
                 self._json({"error": str(e)}, 500)
 
-    srv = ThreadingHTTPServer(("127.0.0.1", args.port), H)
+    srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+    return srv, idx
+
+
+def cmd_serve(args):
+    srv, idx = build_vault_server(vault_dir(args), args.port)
+    print(f"vault 热索引就绪: {len(idx.envs)} 快照, {len(idx.index)} 词项")
     print(f"Context Vault 服务已启动: http://127.0.0.1:{args.port} (Ctrl+C 退出)")
     print("  MCP server 检测到本服务时自动走热索引 (CV_VAULT_SVC 可覆盖地址)")
     try:

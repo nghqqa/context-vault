@@ -9,3 +9,7 @@ docs/market-research-2026-10.md
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Pro 闭源层 (托盘程序源码与构建产物, open-core 商业边界)
+pro/
+dist/
