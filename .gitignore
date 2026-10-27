@@ -1,0 +1,11 @@
+# vault 数据 (真实会话快照/账本/探测记录 — 个人资产, 永不入库)
+vault/
+
+# 内部策略文档 (含定价假设与个人环境细节, 不公开)
+docs/BLUEPRINT.md
+docs/market-research-2026-10.md
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
