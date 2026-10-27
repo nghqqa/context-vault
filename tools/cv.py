@@ -624,7 +624,7 @@ def models_url(base: str) -> str:
 
 
 def fetch_models(url: str, key: str | None, timeout: int = 10) -> tuple:
-    req = urllib.request.Request(url)
+    req = urllib.request.Request(url, headers={"User-Agent": "ContextVault/0.1"})
     if key:
         req.add_header("Authorization", f"Bearer {key}")
     t0 = time.time()
@@ -773,6 +773,87 @@ def cmd_ledger_stats(args):
         print(f"  快照累计入token={snap['i'] or 0:,}  总token={snap['t'] or 0:,}")
 
 
+
+# ------------------------------------------------- warm: 缓存预热 (M2, Pro 核心能力)
+
+def chat_url(base: str) -> str:
+    base = base.rstrip("/")
+    if not base.endswith("/v1"):
+        base += "/v1"
+    return base + "/chat/completions"
+
+
+def warm_messages(env: dict, cap_chars: int) -> list:
+    """活上下文 → chat messages (近似前缀; 精确前缀预热用 --prefix-file)。"""
+    live, comp_summary = live_context(env["conversation"])
+    msgs = []
+    if comp_summary:
+        msgs.append({"role": "user", "content": "[context-vault 迁移摘要] " + comp_summary[:4000]})
+    total = 0
+    for b in live:
+        if b["type"] == "text" and b.get("role") in ("user", "assistant"):
+            content = b["content"][:cap_chars]
+            total += len(content)
+            msgs.append({"role": b["role"], "content": content})
+    return msgs
+
+
+def post_chat(url: str, key: str, model: str, messages: list, timeout: int = 120) -> dict:
+    body = json.dumps({"model": model, "messages": messages, "max_tokens": 1,
+                       "temperature": 0}).encode("utf-8")
+    # 自定义 UA 必需: Python-urllib 默认 UA 会被部分 relay 的 CDN 防护拦截 (实测 502)
+    req = urllib.request.Request(url, data=body,
+                                 headers={"Content-Type": "application/json",
+                                          "Authorization": f"Bearer {key}",
+                                          "User-Agent": "ContextVault/0.1"})
+    t0 = time.time()
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8")), int((time.time() - t0) * 1000)
+
+
+def cmd_warm(args):
+    vault = vault_dir(args)
+    env = load_snapshot(vault if isinstance(vault, Path) else args, args.snapshot)
+    profiles = load_profiles()
+    prof = next((p for p in profiles if p["id"] == args.profile), None)
+    if not prof:
+        raise SystemExit(f"profile 不存在: {args.profile} (可用: {[p['id'] for p in profiles]})")
+    key = resolve_key(args)
+    if not key:
+        raise SystemExit("无 API key (设 CV_RELAY_KEY / --key, 或安装 headroom-auth-token.ps1)")
+    model = args.model or prof.get("default_model") or "gpt-5.6-sol"
+    if args.prefix_file:
+        messages = [{"role": "user", "content": Path(args.prefix_file).read_text(encoding="utf-8")[:args.cap]}]
+        mode = f"prefix-file {args.prefix_file}"
+    else:
+        messages = warm_messages(env, args.cap)
+        mode = f"snapshot {args.snapshot} 活上下文"
+    nchars = sum(len(m["content"]) for m in messages)
+    print(f"预热目标: [{prof['id']}] {model}  模式: {mode}  消息={len(messages)} 字符={nchars:,}")
+    url = chat_url(prof["openai_api_url"])
+    # 第一次: 填充缓存
+    r1, ms1 = post_chat(url, key, model, messages)
+    u1 = r1.get("usage", {})
+    print(f"  ① 预热请求: {ms1}ms  usage={json.dumps({k: u1.get(k) for k in ('prompt_tokens','completion_tokens')}, ensure_ascii=False)}")
+    # 第二次: 验证缓存命中
+    r2, ms2 = post_chat(url, key, model, messages)
+    u2 = r2.get("usage", {})
+    cached = (u2.get("prompt_tokens_details") or {}).get("cached_tokens") or u2.get("cached_tokens") or 0
+    print(f"  ② 复验请求: {ms2}ms  prompt={u2.get('prompt_tokens')}  cached={cached}")
+    conn = db(vault)
+    conn.executescript(SCHEMA)
+    conn.execute("INSERT INTO probe_events(ts,profile,endpoint,status,http_code,latency_ms,models,missing_models)"
+                 " VALUES(?,?,?,?,?,?,?,?)",
+                 (now_iso(), prof["id"], url, "warm", 200, ms1, json.dumps(
+                     {"model": model, "messages": len(messages), "chars": nchars,
+                      "prompt_tokens": u2.get("prompt_tokens"), "cached_tokens": cached}), None))
+    conn.commit()
+    if cached:
+        print(f"✓ 缓存已生效: 第二次请求 {cached}/{u2.get('prompt_tokens')} tokens 命中缓存 — 切换后真实会话将直接受益")
+    else:
+        print("⚠ 该上游未返回缓存命中间接信号 (cached_tokens); 前缀是否入缓存取决于供应商实现, 延迟对比可作旁证")
+
+
 # ------------------------------------------------- doctor: 环境体检
 
 def cmd_doctor(args):
@@ -843,6 +924,15 @@ def main(argv=None):
     lsub = lg.add_subparsers(dest="ledger_cmd", required=True)
     lsub.add_parser("import-headroom").set_defaults(func=cmd_ledger_import_headroom)
     lsub.add_parser("stats").set_defaults(func=cmd_ledger_stats)
+
+    w = sub.add_parser("warm", help="缓存预热: 切换上游前预发历史前缀 (M2/Pro)")
+    w.add_argument("--snapshot", required=True, help="快照 id (活上下文作前缀)")
+    w.add_argument("--profile", required=True)
+    w.add_argument("--model")
+    w.add_argument("--prefix-file", help="精确前缀文件 (优先于快照, 供应商缓存按 token 前缀匹配)")
+    w.add_argument("--cap", type=int, default=20000, help="单消息字符上限 (默认 20000)")
+    w.add_argument("--key")
+    w.set_defaults(func=cmd_warm)
 
     sub.add_parser("doctor").set_defaults(func=cmd_doctor)
 

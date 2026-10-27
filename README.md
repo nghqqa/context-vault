@@ -40,7 +40,20 @@ python tools/cv.py ledger stats
 # 上游哨兵（模型消失 = 立即告警 + 数据库留痕）
 python tools/cv.py probe                   # 单次
 python tools/cv.py probe --watch 300       # 每 5 分钟守护
+
+# 缓存预热 (切换上游前预发历史前缀, M2)
+python tools/cv.py warm --snapshot cv_xxxx --profile myrelay
+python tools/cv.py warm --snapshot cv_xxxx --profile myrelay --prefix-file AGENTS.md  # 精确前缀
 ```
+
+### 作为 MCP server 接入（任意 MCP 客户端 = 记忆后端）
+
+```bash
+claude mcp add context-vault -s user -- python /path/to/tools/mcp_server.py --vault /path/to/vault
+# Codex / Cursor 等任何 MCP 客户端同理配置 stdio 命令
+```
+
+提供 5 个工具：`vault_search`（全库搜索）、`vault_context`（记忆检索——新会话开始时拉取相关历史上下文）、`vault_recent`、`vault_snapshot`、`vault_stats`（账本）。零第三方依赖。
 
 ## 真实数据验证（2026-10-27，本机）
 
