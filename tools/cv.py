@@ -39,7 +39,8 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-FORMAT_VERSION = "0.1"   # context-snapshot 格式版本
+FORMAT_VERSION = "0.1"
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # noconsole 进程 spawn 控制台程序不弹窗   # context-snapshot 格式版本
 VERSION = "0.4.0"          # 工具版本 (发布节奏独立于格式)
 TOOL_RESULT_LIMIT = 256 * 1024  # spec §8.2 裁决: 单块截断阈值 256KB
 HOME = Path.home()
@@ -743,7 +744,7 @@ def resolve_key(args) -> str | None:
         try:
             r = subprocess.run(
                 ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
-                capture_output=True, text=True, timeout=8)
+                capture_output=True, text=True, timeout=8, creationflags=NO_WINDOW)
             token = (r.stdout or "").strip().splitlines()
             return token[-1].strip() if token else None
         except Exception:
@@ -756,6 +757,11 @@ def probe_once(vault: Path, profiles: list, key, baseline: dict, verbose=True) -
     conn = db(vault)
     conn.executescript(SCHEMA)
     alerts = []
+    global _PROBE_ALERT_STATE
+    try:
+        _PROBE_ALERT_STATE
+    except NameError:
+        _PROBE_ALERT_STATE = set()  # (profile,kind,签名): 持续同样异常只首弹, 防通知轰炸
     for p in profiles:
         pid, url = p["id"], models_url(p["openai_api_url"])
         status, code, ids, ms = fetch_models(url, key)
@@ -774,14 +780,18 @@ def probe_once(vault: Path, profiles: list, key, baseline: dict, verbose=True) -
                       + (f"  消失: {missing}" if missing else ""))
             if missing:
                 alerts.append({"profile": pid, "kind": "model_missing", "detail": missing})
-                notify("上游模型变动", f"[{pid}] 消失: {', '.join(missing)}")
+                if (pid, "missing", tuple(missing)) not in _PROBE_ALERT_STATE:
+                    _PROBE_ALERT_STATE.add((pid, "missing", tuple(missing)))
+                    notify("上游模型变动", f"[{pid}] 消失: {', '.join(missing)}")
         else:
             # 端点异常(网络/鉴权) ≠ 模型下架, 不进入模型消失判定, 防止狼来了效应
             detail = ids[0] if ids else ""
             if verbose:
                 print(f"✗ [{pid}] {status} http={code} {ms}ms  端点异常: {detail}")
             alerts.append({"profile": pid, "kind": "endpoint", "detail": detail})
-            notify("上游端点异常", f"[{pid}] {status} http={code} — 无法判定模型状态")
+            if (pid, "endpoint", status, code) not in _PROBE_ALERT_STATE:
+                _PROBE_ALERT_STATE.add((pid, "endpoint", status, code))
+                notify("上游端点异常", f"[{pid}] {status} http={code} — 无法判定模型状态")
         conn.execute("INSERT INTO probe_events(ts,profile,endpoint,status,http_code,latency_ms,models,missing_models)"
                      " VALUES(?,?,?,?,?,?,?,?)",
                      (now_iso(), pid, url, status, code, ms, json.dumps(ids), json.dumps(missing)))
@@ -1407,12 +1417,12 @@ def _install_mcp_claude(vault: Path) -> str:
     exe = _claude_exe()
     if not exe:
         return "未找到 claude CLI (跳过)"
-    r = subprocess.run([exe, "mcp", "list"], capture_output=True, text=True)
+    r = subprocess.run([exe, "mcp", "list"], capture_output=True, text=True, creationflags=NO_WINDOW)
     if "context-vault" in (r.stdout or ""):
         return "已安装 (跳过)"
     py, args = _mcp_cmd_parts(vault)
     r = subprocess.run([exe, "mcp", "add", "context-vault", "-s", "user", "--", py] + args,
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, creationflags=NO_WINDOW)
     return "已写入 ~/.claude.json (user scope)" if r.returncode == 0 else f"失败: {(r.stderr or r.stdout)[:120]}"
 
 
@@ -1461,7 +1471,7 @@ def cmd_mcp(args):
         py, args_ = _mcp_cmd_parts(vault)
         print(f"server: {py} {' '.join(args_)}")
         exe = _claude_exe()
-        out = subprocess.run([exe, "mcp", "list"], capture_output=True, text=True).stdout if exe else ""
+        out = subprocess.run([exe, "mcp", "list"], capture_output=True, text=True, creationflags=NO_WINDOW).stdout if exe else ""
         print(f"[claude] {'✓ 已连接' if 'context-vault' in (out or '') else ('✗ 未安装' if exe else '✗ claude CLI 未找到')}")
         codex_cfg = HOME / ".codex" / "config.toml"
         print(f"[codex]  {'✓ 已配置' if codex_cfg.exists() and 'context-vault' in codex_cfg.read_text(encoding='utf-8') else '✗ 未安装'}")
@@ -1476,7 +1486,7 @@ SMIGRATE_CANDIDATES = ("smigrate", os.path.expanduser("~/.local/bin/smigrate"))
 
 def find_smigrate() -> str | None:
     for cand in SMIGRATE_CANDIDATES:
-        if subprocess.run(["cmd", "/c", "where", cand], capture_output=True).returncode == 0            or Path(cand).exists():
+        if subprocess.run(["cmd", "/c", "where", cand], capture_output=True, creationflags=NO_WINDOW).returncode == 0            or Path(cand).exists():
             return cand
     return None
 
@@ -1498,7 +1508,7 @@ def cmd_ingest(args):
         cmd += ["--format", args.format]
     if args.cwd:
         cmd += ["--cwd", args.cwd]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, creationflags=NO_WINDOW)
     if r.returncode != 0 or not tmp_out.exists():
         raise SystemExit(f"smigrate convert 失败: {(r.stderr or r.stdout)[:400]}")
     exported = export_claude_code(tmp_out, args.drop_developer)
@@ -1707,7 +1717,7 @@ def cmd_dashboard(args):
     out.write_text(html, encoding="utf-8")
     print(f"面板已生成: {out.resolve()}")
     if args.open:
-        subprocess.run(["cmd", "/c", "start", "", str(out.resolve())], shell=False)
+        subprocess.run(["cmd", "/c", "start", "", str(out.resolve())], shell=False, creationflags=NO_WINDOW)
 
 
 # ------------------------------------------------- watch: 切换携带会话 (M2)
@@ -1739,7 +1749,7 @@ def toast(title: str, msg: str):
           ".Show([Windows.UI.Notifications.ToastNotification]::new($x))")
     try:
         subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps],
-                       capture_output=True, timeout=10)
+                       capture_output=True, timeout=10, creationflags=NO_WINDOW)
     except Exception:
         pass
     print(f"\a⚠ {title}: {msg}", file=sys.stderr)
