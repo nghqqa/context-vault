@@ -356,3 +356,61 @@ def test_memory_extract_and_search(isolated, monkeypatch):
 
 def tmp_path_maker():
     return Path(__file__).parent  # make_env 只用 tmp 做中转, 任意可写目录均可
+
+
+# ---------------- M3 收尾: fork / audit / 引擎接口 ----------------
+
+def test_fork_lineage(isolated, monkeypatch, capsys):
+    _, vault = isolated
+    env = make_env(Path(__file__).parent)
+    sid = "cv_forksrc1"
+    (vault / "snapshots").mkdir(exist_ok=True)
+    (vault / "snapshots" / f"{sid}.json").write_text(json.dumps(env), encoding="utf-8")
+    from types import SimpleNamespace
+    cv.cmd_fork(SimpleNamespace(vault=str(vault), snapshot_id=sid, message="test fork"))
+    new_sid = [f.stem for f in (vault / "snapshots").glob("cv_*.json") if f.stem != sid][0]
+    forked = json.loads((vault / "snapshots" / f"{new_sid}.json").read_text(encoding="utf-8"))
+    assert forked["lineage"]["fork_of"] == sid
+    assert forked["capture"]["fork_note"] == "test fork"
+    # 原快照不可变: 内容未被改动
+    orig = json.loads((vault / "snapshots" / f"{sid}.json").read_text(encoding="utf-8"))
+    assert orig["lineage"]["fork_of"] is None
+
+
+def test_audit_summary(isolated):
+    _, vault = isolated
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    import sqlite3 as _s
+    for st, miss in (("ok", None), ("ok", None), ("switch", None),
+                     ("http_error", '["gpt-x"]')):
+        conn.execute("INSERT INTO probe_events(ts,profile,endpoint,status,http_code,latency_ms,models,missing_models)"
+                     " VALUES(?,?,?,?,?,?,?,?)",
+                     (f"2026-10-28T0{st.__len__()}:" + "00:00+08:00", "p1", "u", st, 200, 10, "[]", miss))
+    conn.commit()
+    r = cv.audit_summary_and_timeline(vault, "", "all")
+    assert r["summary"]["ok_probes"] == 2
+    assert r["summary"]["switches"] == 1
+    assert r["summary"]["model_missing_events"] == 1
+    assert r["timeline"][0]["day"] == "2026-10-28"
+
+
+def test_memory_engine_protocol():
+    eng = cv.load_memory_engine("rule")
+    assert eng.name == "rule"
+    assert hasattr(eng, "extract") and hasattr(eng, "search")
+    # 动态加载路径: 用本模块内伪造引擎验证 importlib 机制
+    import sys as _s
+    _s.path.insert(0, "tools")
+    fake = "tests_fake_engine:FakeEngine"
+    import types as _t
+    mod = _t.ModuleType("tests_fake_engine")
+    class FakeEngine:
+        name = "fake"
+        def extract(self, env): return [{"kind": "decision", "content": "x",
+                                         "project": "p", "snapshot_id": "s"}]
+        def search(self, vault, q, lim): return []
+    mod.FakeEngine = FakeEngine
+    _s.modules["tests_fake_engine"] = mod
+    e2 = cv.load_memory_engine(fake)
+    assert e2.name == "fake" and e2.extract({})[0]["content"] == "x"

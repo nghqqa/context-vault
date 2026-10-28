@@ -1153,10 +1153,43 @@ def extract_memories(env: dict) -> list:
     return items
 
 
+# ---------------- MemoryEngine 协议 (外部引擎接口位) ----------------
+# 内置 rule 引擎为零依赖默认; 外部引擎 (Supermemory/Graphiti/自定义 embedding 引擎)
+# 通过 CV_MEMORY_ENGINE="path.to.module:ClassName" 或 --engine 加载, 实现同名协议即可
+# 替换提取与检索。高级语义记忆 (embedding) 属 Pro 层规划。
+
+ENGINE_PROTOCOL_DOC = ("MemoryEngine 协议: extract(env: dict) -> list[dict] "
+                       "(kind/content/project/snapshot_id); "
+                       "search(vault, query, limit) -> list[dict] "
+                       "(kind/content/project/snapshot/score)")
+
+
+class RuleMemoryEngine:
+    """内置规则引擎 v0 — extract_memories/memory_search_api 的协议化封装。"""
+    name = "rule"
+
+    def extract(self, env: dict) -> list:
+        return extract_memories(env)
+
+    def search(self, vault: Path, query: str, limit: int) -> list:
+        return memory_search_api(vault, query, limit)
+
+
+def load_memory_engine(name: str):
+    if name == "rule" or not name:
+        return RuleMemoryEngine()
+    mod_path, _, cls_name = name.partition(":")
+    import importlib
+    mod = importlib.import_module(mod_path)
+    return getattr(mod, cls_name or "Engine")()
+
+
 def cmd_memory(args):
     vault = vault_dir(args)
     conn = db(vault)
     conn.executescript(SCHEMA + MEMORY_TABLE)
+    engine_name = args.engine or os.environ.get("CV_MEMORY_ENGINE", "rule")
+    engine = load_memory_engine(engine_name)
     if args.memory_cmd == "extract":
         snaps = load_all_snapshots_pub(vault)
         if args.snapshot:
@@ -1164,16 +1197,20 @@ def cmd_memory(args):
         total = 0
         for env in snaps:
             conn.execute("DELETE FROM memory_items WHERE snapshot_id=?", (env["_sid"],))
-            for it in extract_memories(env):
+            for it in engine.extract(env):
                 conn.execute("INSERT INTO memory_items(created_at,snapshot_id,kind,content,project)"
                              " VALUES(?,?,?,?,?)",
                              (now_iso(), it["snapshot_id"], it["kind"], it["content"], it["project"]))
                 total += 1
         conn.commit()
         by = conn.execute("SELECT kind, COUNT(*) FROM memory_items GROUP BY kind").fetchall()
-        print(f"记忆提取完成: {total} 条 (来自 {len(snaps)} 快照) · "
+        print(f"记忆提取完成: {total} 条 (来自 {len(snaps)} 快照, engine={engine.name}) · "
               + " · ".join(f"{r[0]}×{r[1]}" for r in by))
     elif args.memory_cmd == "search":
+        if engine_name != "rule":
+            for m in engine.search(vault, args.query, args.limit):
+                print(f"[{m['kind']:<10}] {m['content'][:100]}  ({m.get('project') or '?'})")
+            return
         terms = tokenize(args.query)
         rows = conn.execute("SELECT * FROM memory_items").fetchall()
         scored = []
@@ -1232,6 +1269,125 @@ def memory_search_api(vault: Path, query: str, limit: int = 8) -> list:
                      (now_iso(), r["id"]))
     conn.commit()
     return out
+
+
+# ------------------------------------------------- fork: 快照分叉 (M3)
+
+def cmd_fork(args):
+    """在历史节点开分支: 复制快照为新内容寻址实体, lineage.fork_of 指向原快照。
+    原快照不可变; fork 的事实 (fork_of) 写在新实体自己的 lineage 里 (spec §7)。
+    fork 后可 cv import <new-id> 把该节点写入 agent 从此续写。"""
+    vault = vault_dir(args)
+    env = load_snapshot(vault, args.snapshot_id)
+    env["lineage"]["fork_of"] = args.snapshot_id
+    if args.message:
+        env["capture"]["fork_note"] = args.message
+    sid = snapshot_id(env)
+    out = vault / "snapshots" / f"{sid}.json"
+    if out.exists():
+        print(f"该分叉已存在 (幂等): {out.name}")
+    else:
+        out.write_text(json.dumps(env, ensure_ascii=False, indent=1), encoding="utf-8")
+        print(f"已分叉: {args.snapshot_id} → {sid}"
+              + (f" · 备注: {args.message}" if args.message else ""))
+    conn = db(vault)
+    conn.executescript(SCHEMA)
+    register_snapshot(conn, env, sid, out)
+    conn.commit()
+    print(f"  续写: python tools/cv.py import {sid} --target codex|claude --apply")
+
+
+def cmd_tree(args):
+    """展示快照的 lineage 链: 向上追 parent (同源演进), 向下展 fork 子树。"""
+    vault = vault_dir(args)
+    env = load_snapshot(vault, args.snapshot_id)
+    # 向上: parent 链 (sync 增量演进)
+    chain = [args.snapshot_id]
+    cur = env
+    while cur["lineage"].get("parent_snapshot"):
+        p = cur["lineage"]["parent_snapshot"]
+        chain.append(p)
+        ppath = vault / "snapshots" / f"{p}.json"
+        if not ppath.exists():
+            break
+        cur = json.loads(ppath.read_text(encoding="utf-8"))
+    chain.reverse()
+    # 向下: fork 子树 (扫描 lineage.fork_of)
+    children = {}
+    for f in (vault / "snapshots").glob("cv_*.json"):
+        try:
+            e = json.loads(f.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            continue
+        fo = e.get("lineage", {}).get("fork_of")
+        if fo:
+            children.setdefault(fo, []).append(f.stem)
+    print(f"快照 {args.snapshot_id} 的谱系:")
+    for i, sid in enumerate(chain):
+        mark = " → " if i < len(chain) - 1 else " ● "
+        print(f"  {mark}{sid}" + ("  (本快照)" if sid == args.snapshot_id else ""))
+
+    def show_forks(sid, depth=0):
+        for c in children.get(sid, []):
+            print("  " + "    " * depth + f"↳ fork {c}")
+            show_forks(c, depth + 1)
+    show_forks(args.snapshot_id)
+
+
+# ------------------------------------------------- audit: 审计时间线回放 (M3)
+
+def audit_summary_and_timeline(vault: Path, since: str, kind: str, limit: int = 200) -> dict:
+    """统一事件流: probe/switch/warm + 汇总。数据源 probe_events (哨兵/守望/预热全留痕)。"""
+    conn = db(vault)
+    q = "SELECT * FROM probe_events WHERE 1=1"
+    params = []
+    if since:
+        q += " AND ts >= ?"
+        params.append(since)
+    rows = conn.execute(q + " ORDER BY id DESC LIMIT ?", (*params, limit)).fetchall()
+    if kind != "all":
+        rows = [r for r in rows if kind in (r["status"],)]
+    total = conn.execute("SELECT COUNT(*) FROM probe_events").fetchone()[0]
+    model_missing = sum(1 for r in conn.execute(
+        "SELECT missing_models FROM probe_events WHERE missing_models != '[]'"
+        " AND missing_models IS NOT NULL"))
+    switches = conn.execute("SELECT COUNT(*) FROM probe_events WHERE status='switch'").fetchone()[0]
+    ok_probes = conn.execute("SELECT COUNT(*) FROM probe_events WHERE status='ok'").fetchone()[0]
+    err_probes = total - ok_probes - switches
+    # 按天聚合可读时间线
+    by_day = {}
+    for r in rows:
+        day = str(r["ts"])[:10]
+        by_day.setdefault(day, []).append(r)
+    timeline = []
+    for day in sorted(by_day, reverse=True):
+        events = [{"ts": str(r["ts"])[11:19], "profile": r["profile"], "status": r["status"],
+                   "http": r["http_code"], "latency_ms": r["latency_ms"],
+                   "missing": r["missing_models"] if r["missing_models"] not in ("[]", None) else None,
+                   "detail": (r["models"] or "")[:80]}
+                  for r in by_day[day]]
+        timeline.append({"day": day, "events": events})
+    return {"since": since or "(全部)", "total_events": total,
+            "summary": {"ok_probes": ok_probes, "abnormal": err_probes, "switches": switches,
+                        "model_missing_events": model_missing},
+            "timeline": timeline}
+
+
+def cmd_audit(args):
+    vault = vault_dir(args)
+    r = audit_summary_and_timeline(vault, args.since, args.kind)
+    s = r["summary"]
+    print(f"== 审计时间线 ({r['since']} 起, 库内共 {r['total_events']} 事件) ==")
+    print(f"  探测正常 {s['ok_probes']} · 异常 {s['abnormal']} · 切换检测 {s['switches']}"
+          f" · 模型消失事件 {s['model_missing_events']}")
+    for day in r["timeline"][:args.days]:
+        print(f"  {day['day']}  ({len(day['events'])} 事件)")
+        for e in day["events"][:8]:
+            mark = {"ok": "·", "switch": "⇄", "warm": "🔥"}.get(e["status"], "!")
+            extra = f" 消失{e['missing']}" if e["missing"] else (f" {e['detail'][:40]}" if e["status"] == "switch" else "")
+            print(f"    {mark} {e['ts']} [{e['profile']}] {e['status']}{extra}")
+        if len(day["events"]) > 8:
+            print(f"    … 其余 {len(day['events']) - 8} 条 (cv audit --days 更多)")
 
 
 # ------------------------------------------------- mcp install: 一键接入客户端
@@ -2290,6 +2446,9 @@ def build_vault_server(vault: Path, port: int):
                 if u.path == "/healthz":
                     return self._json({"service": "context-vault", "status": "ok",
                                        "snapshots": len(idx.envs), "terms": len(idx.index)})
+                if u.path == "/audit":
+                    return self._json(audit_summary_and_timeline(
+                        vault, q.get("since", ""), "all"))
                 if u.path == "/memory":
                     return self._json({"query": q.get("q", ""),
                                        "memories": memory_search_api(vault, q.get("q", ""),
@@ -2471,10 +2630,24 @@ def main(argv=None):
     sy.add_argument("--root", action="append", help="额外扫描目录 (可多次)")
     sy.set_defaults(func=cmd_sync)
 
+    fk = sub.add_parser("fork", help="在快照节点开分支 (lineage.fork_of)")
+    fk.add_argument("snapshot_id")
+    fk.add_argument("--message", help="分叉备注 (写入 capture.fork_note)")
+    fk.set_defaults(func=cmd_fork)
+    tr = sub.add_parser("tree", help="查看快照谱系 (parent 演进链 + fork 子树)")
+    tr.add_argument("snapshot_id")
+    tr.set_defaults(func=cmd_tree)
+    au = sub.add_parser("audit", help="审计时间线回放 (探测/切换/模型消失 全留痕)")
+    au.add_argument("--since", help="起始时间 (ISO 前缀)")
+    au.add_argument("--kind", default="all", help="过滤: all|ok|switch|warm|model_missing")
+    au.add_argument("--days", type=int, default=7)
+    au.set_defaults(func=cmd_audit)
+
     mem = sub.add_parser("memory", help="M3 记忆层: 从快照提取跨会话记忆")
     msub = mem.add_subparsers(dest="memory_cmd", required=True)
     me = msub.add_parser("extract", help="提取决策/摘要/偏好记忆 (幂等, 重提先删旧)")
     me.add_argument("--snapshot", help="只处理单个快照")
+    me.add_argument("--engine", help="记忆引擎 (默认 rule; 或 module:Class 动态加载)")
     me.set_defaults(func=cmd_memory)
     ms = msub.add_parser("search", help="检索记忆")
     ms.add_argument("query")
