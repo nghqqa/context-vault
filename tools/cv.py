@@ -138,7 +138,19 @@ def detect_format(first: dict, path: Path) -> str:
     if t in ("session_meta", "event_msg", "response_item", "turn_context"):
         return "codex-rollout"
     if t in ("user", "tool_use", "tool_result"):
-        return "claude-transcript"
+        # 标准 Claude Code: user/assistant 行带 message 嵌套; ZCode 变体: 平铺 content
+        return "claude-projects" if "message" in first else "claude-transcript"
+    # 首行可能是 queue-operation/attachment 等辅助行, 扫前 20 行找判别行
+    with open(path, encoding="utf-8") as fh:
+        for i, line in enumerate(fh):
+            if i >= 20:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            if obj.get("type") in ("user", "assistant"):
+                return "claude-projects" if "message" in obj else "claude-transcript"
     raise SystemExit(f"无法识别源格式: {path} (首行 type={t!r})")
 
 
@@ -244,6 +256,70 @@ def export_claude(path: Path, drop_developer: bool) -> dict:
     return {"capture": capture, "conversation": blocks, "stats": stats}
 
 
+def export_claude_code(path: Path, drop_developer: bool) -> dict:
+    """标准 Claude Code 会话 (~/.claude/projects/<cwd码>/<uuid>.jsonl) → 快照。
+    结构经真实 2.1.181 会话验证: user/assistant 行带 message 嵌套;
+    tool_use 在 assistant.content 块数组 (id/name/input), tool_result 在 user 行块数组 (tool_use_id);
+    usage 键: input_tokens / cache_read_input_tokens / cache_creation_input_tokens / output_tokens。"""
+    blocks, stats, dropped = [], zero_stats(), 0
+    capture = {"agent": "claude-code", "source_format": "claude-projects", "provider": None,
+               "model": None, "session_ref": path.stem, "completeness": "full"}
+    for obj in iter_jsonl(path):
+        t = obj.get("type")
+        if t not in ("user", "assistant"):
+            continue  # queue-operation/attachment/last-prompt/system/mode 等辅助行
+        msg = obj.get("message") or {}
+        content = msg.get("content")
+        ts = obj.get("timestamp", "")
+        if t == "user":
+            if isinstance(content, str):
+                blocks.append({"type": "text", "role": "user", "content": content, "ts": ts})
+            elif isinstance(content, list):
+                for b in content:
+                    if b.get("type") == "text":
+                        blocks.append({"type": "text", "role": "user",
+                                       "content": b.get("text", ""), "ts": ts})
+                    elif b.get("type") == "tool_result":
+                        out = b.get("content")
+                        if isinstance(out, list):
+                            out = chr(10).join(x.get("text", "") for x in out if isinstance(x, dict))
+                        text, _ = clip(str(out or ""))
+                        blocks.append({"type": "tool_result", "call_id": b.get("tool_use_id"),
+                                       "content": text, "is_error": False, "ts": ts})
+        else:  # assistant
+            usage = msg.get("usage") or {}
+            if usage:
+                stats["tokens_in"] += int(usage.get("input_tokens", 0) or 0)
+                stats["tokens_out"] += int(usage.get("output_tokens", 0) or 0)
+                stats["cache_read"] += int(usage.get("cache_read_input_tokens", 0) or 0)
+                stats["cache_write"] += int(usage.get("cache_creation_input_tokens", 0) or 0)
+                stats["usage_events"] += 1
+            if not capture.get("model") and msg.get("model"):
+                capture["model"] = msg.get("model")
+            for b in (content or []):
+                bt = b.get("type")
+                if bt == "text":
+                    blocks.append({"type": "text", "role": "assistant",
+                                   "content": b.get("text", ""), "ts": ts})
+                elif bt == "thinking":
+                    summary = b.get("thinking", "") or b.get("text", "") or ""
+                    if summary:
+                        blocks.append({"type": "thinking", "summary": summary, "ts": ts})
+                elif bt == "tool_use":
+                    blocks.append({"type": "tool_call", "call_id": b.get("id"),
+                                   "name": b.get("name"), "namespace": None,
+                                   "arguments": b.get("input"), "ts": ts})
+        if obj.get("cwd") and not capture.get("cwd"):
+            capture["cwd"] = obj.get("cwd")
+        if obj.get("version") and not capture.get("agent_version"):
+            capture["agent_version"] = obj.get("version")
+    if not stats["usage_events"]:
+        capture["completeness"] = "full"  # 内容完整, 只是源不带 usage
+    stats["total_tokens"] = stats["tokens_in"] + stats["tokens_out"] + stats["cache_read"] + stats["cache_write"]
+    stats["blocks_total"], stats["blocks_dropped"] = len(blocks), dropped
+    return {"capture": capture, "conversation": blocks, "stats": stats}
+
+
 def build_envelope(exported: dict) -> dict:
     return {"format_version": FORMAT_VERSION, "created_at": now_iso(),
             "capture": exported["capture"], "conversation": exported["conversation"],
@@ -270,7 +346,9 @@ def register_snapshot(conn, envelope: dict, sid: str, path: Path):
 def cmd_export(args):
     src = Path(args.source).expanduser()
     fmt = detect_format(first_jsonl(src), src)
-    exported = (export_codex if fmt == "codex-rollout" else export_claude)(src, args.drop_developer)
+    exporters = {"codex-rollout": export_codex, "claude-transcript": export_claude,
+                 "claude-projects": export_claude_code}
+    exported = exporters[fmt](src, args.drop_developer)
     envelope = build_envelope(exported)
     sid = snapshot_id(envelope)
     vault = vault_dir(args)
@@ -794,6 +872,179 @@ def cmd_ledger_stats(args):
 
 
 
+# ------------------------------------------------- ledger import-relay: 直连账单端点
+
+def fetch_relay_usage(base: str, key: str, start: str, end: str) -> dict:
+    """OpenAI 兼容 dashboard/billing/usage (new-api/one-api 系普遍支持; 部分中转关闭)。"""
+    base = base.rstrip("/")
+    if not base.endswith("/v1"):
+        base += "/v1"
+    url = f"{base}/dashboard/billing/usage?start_date={start}&end_date={end}"
+    req = urllib.request.Request(url, headers={"User-Agent": "ContextVault/0.1",
+                                               "Authorization": f"Bearer {key}"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise SystemExit(f"该端点未开放 billing API (404) — 实测 999555999 即此情况; "
+                             "此 relay 的账本只能经 headroom 导入")
+        raise SystemExit(f"billing API {e.code}: {e.reason}")
+
+
+def cmd_ledger_import_relay(args):
+    vault = vault_dir(args)
+    conn = db(vault)
+    conn.executescript(SCHEMA)
+    key = resolve_key(args)
+    if not key:
+        raise SystemExit("无 API key (CV_RELAY_KEY / --key / headroom-auth-token)")
+    end = args.end or dt.date.today().isoformat()
+    start = args.start or (dt.date.today() - dt.timedelta(days=args.days)).isoformat()
+    data = fetch_relay_usage(args.url, key, start, end)
+    total = float(data.get("total_usage", 0))  # OpenAI 口径: 美元(cent? openai 为 $, new-api 为 $)
+    conn.execute("INSERT INTO ledger_events(source,occurred_at,kind,model,provider,client,"
+                 "tokens_saved,cost_usd,snapshot_id,raw) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                 ("relay-billing", now_iso(), "relay_usage", None, args.url, None, 0,
+                  total, None, json.dumps({"start": start, "end": end, **data}, ensure_ascii=False)))
+    conn.commit()
+    print(f"[{args.url}] {start} ~ {end}: ${total:,.2f} 已入账 (source=relay-billing)")
+
+
+# ------------------------------------------------- mcp install: 一键接入客户端
+
+def _mcp_cmd_parts(vault: Path) -> tuple:
+    server = (Path(__file__).resolve().parent / "mcp_server.py")
+    py = "python"
+    return py, [str(server), "--vault", str(vault.resolve())]
+
+
+def _claude_exe() -> str | None:
+    import shutil
+    return shutil.which("claude")  # npm .cmd shim 需 which 解析全路径
+
+
+def _install_mcp_claude(vault: Path) -> str:
+    exe = _claude_exe()
+    if not exe:
+        return "未找到 claude CLI (跳过)"
+    r = subprocess.run([exe, "mcp", "list"], capture_output=True, text=True)
+    if "context-vault" in (r.stdout or ""):
+        return "已安装 (跳过)"
+    py, args = _mcp_cmd_parts(vault)
+    r = subprocess.run([exe, "mcp", "add", "context-vault", "-s", "user", "--", py] + args,
+                       capture_output=True, text=True)
+    return "已写入 ~/.claude.json (user scope)" if r.returncode == 0 else f"失败: {(r.stderr or r.stdout)[:120]}"
+
+
+def _install_mcp_codex(vault: Path) -> str:
+    cfg = HOME / ".codex" / "config.toml"
+    if not cfg.parent.exists():
+        return "未找到 ~/.codex (codex 未安装)"
+    text = cfg.read_text(encoding="utf-8")
+    if "context-vault" in text:
+        return "已安装 (跳过)"
+    cfg.with_suffix(".toml.bak-cv").write_text(text, encoding="utf-8")  # 备份
+    py, args = _mcp_cmd_parts(vault)
+    toml = ("\n[mcp_servers.context-vault]\n"
+            f'command = "{py}"\n'
+            "args = [" + ", ".join(f'"{a}"' for a in args) + "]\n")
+    with cfg.open("a", encoding="utf-8") as fh:
+        fh.write(toml)
+    return "已追加到 ~/.codex/config.toml (备份 .bak-cv)"
+
+
+def _install_mcp_cursor(vault: Path) -> str:
+    cfg = Path.home() / ".cursor" / "mcp.json"
+    if not cfg.parent.exists():
+        return "未找到 ~/.cursor (cursor 未安装)"
+    data = {}
+    if cfg.exists():
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        cfg.with_suffix(".json.bak-cv").write_text(json.dumps(data, indent=2), encoding="utf-8")
+    servers = data.setdefault("mcpServers", {})
+    if "context-vault" in servers:
+        return "已安装 (跳过)"
+    py, args = _mcp_cmd_parts(vault)
+    servers["context-vault"] = {"command": py, "args": args}
+    cfg.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return "已写入 ~/.cursor/mcp.json"
+
+
+def cmd_mcp(args):
+    vault = vault_dir(args)
+    clients = {"claude": _install_mcp_claude, "codex": _install_mcp_codex, "cursor": _install_mcp_cursor}
+    if args.mcp_cmd == "install":
+        targets = list(clients) if args.all else [args.client]
+        for c in targets:
+            print(f"[{c}] {clients[c](vault)}")
+    elif args.mcp_cmd == "status":
+        py, args_ = _mcp_cmd_parts(vault)
+        print(f"server: {py} {' '.join(args_)}")
+        exe = _claude_exe()
+        out = subprocess.run([exe, "mcp", "list"], capture_output=True, text=True).stdout if exe else ""
+        print(f"[claude] {'✓ 已连接' if 'context-vault' in (out or '') else ('✗ 未安装' if exe else '✗ claude CLI 未找到')}")
+        codex_cfg = HOME / ".codex" / "config.toml"
+        print(f"[codex]  {'✓ 已配置' if codex_cfg.exists() and 'context-vault' in codex_cfg.read_text(encoding='utf-8') else '✗ 未安装'}")
+        cur = Path.home() / ".cursor" / "mcp.json"
+        print(f"[cursor] {'✓ 已配置' if cur.exists() and 'context-vault' in cur.read_text(encoding='utf-8') else '✗ 未安装'}")
+
+
+# ------------------------------------------------- ingest: 经 session-migrate 接入任意 harness
+
+SMIGRATE_CANDIDATES = ("smigrate", os.path.expanduser("~/.local/bin/smigrate"))
+
+
+def find_smigrate() -> str | None:
+    for cand in SMIGRATE_CANDIDATES:
+        if subprocess.run(["cmd", "/c", "where", cand], capture_output=True).returncode == 0            or Path(cand).exists():
+            return cand
+    return None
+
+
+def cmd_ingest(args):
+    """任意 harness 会话 → 快照。链路: smigrate convert --to claude → claude-projects 适配器。
+    覆盖 smigrate 支持的 17+ harness (opencode/cursor/qwen/kimi/grok/antigravity/pi/omp/...)。"""
+    src_path = Path(args.source).expanduser()
+    if not src_path.exists():
+        raise SystemExit(f"文件不存在: {src_path}")
+    exe = find_smigrate()
+    if not exe:
+        raise SystemExit("未找到 smigrate。安装: uv tool install session-migrate (MIT, Python>=3.11 独立环境)")
+    vault = vault_dir(args)
+    (vault / "ingest").mkdir(parents=True, exist_ok=True)
+    tmp_out = vault / "ingest" / f"sm_{int(time.time())}_{uuid.uuid4().hex[:8]}.jsonl"
+    cmd = [exe, "convert", str(src_path), "--to", "claude", "--output", str(tmp_out)]
+    if args.format:
+        cmd += ["--format", args.format]
+    if args.cwd:
+        cmd += ["--cwd", args.cwd]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if r.returncode != 0 or not tmp_out.exists():
+        raise SystemExit(f"smigrate convert 失败: {(r.stderr or r.stdout)[:400]}")
+    exported = export_claude_code(tmp_out, args.drop_developer)
+    origin = args.format or "harness"
+    exported["capture"]["source_format"] = f"via-smigrate:{origin}"
+    exported["capture"]["agent"] = origin  # 归属原始 harness, 而非 claude 中转层
+    exported["capture"]["origin_path"] = str(src_path)
+    envelope = build_envelope(exported)
+    sid = snapshot_id(envelope)
+    out = vault / "snapshots" / f"{sid}.json"
+    if out.exists():
+        print(f"已存在 (幂等跳过): {out.name}")
+    else:
+        out.write_text(json.dumps(envelope, ensure_ascii=False, indent=1), encoding="utf-8")
+        s = exported["stats"]
+        print(f"已接入 {out.name}  源={exported['capture']['source_format']}  "
+              f"块={s['blocks_total']}  入token={s['tokens_in']}")
+    conn = db(vault)
+    conn.executescript(SCHEMA)
+    register_snapshot(conn, envelope, sid, out)
+    conn.commit()
+    if not args.keep_temp:
+        tmp_out.unlink(missing_ok=True)
+
+
 # ------------------------------------------------- warm: 缓存预热 (M2, Pro 核心能力)
 
 def chat_url(base: str) -> str:
@@ -1139,213 +1390,517 @@ class VaultIndex:
         return {"query": query, "results": out}
 
 
-CONSOLE_HTML = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
+CONSOLE_HTML = r"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Context Vault 控制台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect x='2.5' y='2.5' width='15' height='15' rx='3.5' fill='none' stroke='%232dd4a7' stroke-width='1.7'/%3E%3Crect x='6.5' y='8' width='7' height='6' rx='1' fill='%232dd4a7'/%3E%3Cpath d='M7.5 8V6.5a2.5 2.5 0 0 1 5 0V8' fill='none' stroke='%232dd4a7' stroke-width='1.7' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
-:root{--bg:#0e1116;--card:#171c24;--card2:#1d2430;--ink:#e6e9ef;--dim:#8b93a3;--acc:#4f9cf9;--good:#3ecf8e;--warn:#f5a623;--bad:#e5534b}
+:root{
+  --bg0:#0b1013; --bg1:#10181c; --bg2:#162226; --bg3:#1b2a2f;
+  --line:#1c2a2e; --line-soft:#162125;
+  --ink:#dde9e5; --ink-2:#9fb3ad; --ink-3:#6e837f;
+  --acc:#2dd4a7; --acc-ink:#0a1512; --acc-deep:#0f3b33;
+  --bar:#17594a; --bar-hover:#1e6d5b;
+  --warn:#e2b45c; --err:#e07862; --info:#5ca8dd;
+  --mono:"Cascadia Code",Consolas,"SF Mono",monospace;
+  --sans:"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI",system-ui,sans-serif;
+  --rad:8px; --head-h:56px; --nav-h:46px;
+}
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--ink);font:14px/1.6 "Segoe UI",system-ui,sans-serif}
-header{display:flex;align-items:center;gap:14px;padding:14px 24px;border-bottom:1px solid #1d2430;position:sticky;top:0;background:var(--bg);z-index:5}
-header h1{font-size:16px} header .dot{width:10px;height:10px;border-radius:50%;background:var(--good)}
-#status{color:var(--dim);font-size:12px}
-nav{display:flex;gap:4px;padding:0 24px;margin-top:14px}
-nav button{background:none;border:1px solid transparent;color:var(--dim);padding:8px 16px;border-radius:8px 8px 0 0;cursor:pointer;font-size:13px}
-nav button.on{color:var(--ink);border-color:#1d2430;border-bottom-color:var(--bg);background:var(--card)}
-main{padding:20px 24px;max-width:1100px;margin:0 auto}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:20px}
-.card{background:var(--card);border-radius:12px;padding:14px 16px}
-.card .v{font-size:22px;font-weight:700;color:var(--good)} .card .k{color:var(--dim);font-size:11.5px}
-.card.alt .v{color:var(--acc)}
-h2{font-size:14px;margin:20px 0 10px;color:var(--dim);font-weight:600}
-.bar{display:flex;align-items:center;gap:10px;margin:6px 0}
-.bar .name{width:210px;color:var(--dim);font-size:12px;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.bar .track{flex:1;background:var(--card2);border-radius:6px;height:16px}
-.bar .fill{height:100%;border-radius:6px;background:linear-gradient(90deg,#2d7d46,var(--good))}
-.bar .val{width:140px;font-size:12px}
-.months{display:flex;align-items:flex-end;gap:5px;height:110px}
-.mcol{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:3px}
-.mcol .stick{width:100%;max-width:44px;background:linear-gradient(180deg,var(--acc),#2a5f9e);border-radius:4px 4px 0 0}
-.mcol .lb{font-size:10px;color:var(--dim)}
-.row{background:var(--card);border-radius:10px;padding:12px 16px;margin:8px 0;cursor:pointer}
-.row:hover{background:var(--card2)}
-.row .id{font-family:Consolas,monospace;font-size:13px;color:var(--acc)}
-.row .meta{color:var(--dim);font-size:12px;margin-top:2px}
-.detail{background:var(--card);border-radius:10px;padding:16px 20px;margin:10px 0;display:none}
-.detail.show{display:block}
-.kv{display:grid;grid-template-columns:180px 1fr;gap:4px 12px;font-size:13px}
-.kv b{color:var(--dim);font-weight:500}
-input,select,button.act{background:var(--card2);border:1px solid #2a3342;color:var(--ink);border-radius:8px;padding:8px 12px;font-size:13px;outline:none}
-button.act{cursor:pointer} button.act:hover{border-color:var(--acc)}
-button.pri{background:var(--acc);border-color:var(--acc);color:#fff}
-button.warn{background:#7a4a12;border-color:var(--warn)}
-.migbox{background:var(--card);border-radius:12px;padding:18px 20px;margin-top:12px}
-.flex{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0}
-ul.imm{color:var(--warn);font-size:12.5px;padding-left:18px}
-.ev{display:flex;gap:10px;align-items:baseline;padding:7px 12px;border-bottom:1px solid #1d2430;font-size:12.5px}
-.ev .t{color:var(--dim);font-family:Consolas,monospace;font-size:11.5px;min-width:150px}
-.dot2{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
-.ok{background:var(--good)} .err{background:var(--bad)} .sw{background:var(--warn)} .warm{background:var(--acc)}
-.tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;background:var(--card2);color:var(--dim);margin-left:6px}
-.note{color:var(--dim);font-size:12px;margin-top:8px}
-#toast{position:fixed;bottom:24px;right:24px;background:var(--card);border:1px solid #2a3342;border-radius:10px;padding:12px 18px;display:none;max-width:420px;font-size:13px;box-shadow:0 8px 30px rgba(0,0,0,.5)}
+html{color-scheme:dark}
+body{background:var(--bg0);color:var(--ink);font:14px/1.65 var(--sans);
+  font-feature-settings:"tnum";-webkit-font-smoothing:antialiased}
+::selection{background:var(--acc-deep);color:var(--ink)}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:var(--bg3);border-radius:5px;border:2px solid var(--bg0)}
+::-webkit-scrollbar-thumb:hover{background:#24363c}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4px}
+button{font:inherit;color:inherit}
+
+/* ---------- 顶栏 ---------- */
+header{display:flex;align-items:center;gap:14px;padding:0 28px;height:var(--head-h);
+  border-bottom:1px solid var(--line);background:var(--bg0);position:sticky;top:0;z-index:10}
+.brand{display:flex;align-items:center;gap:10px;font-weight:600;font-size:15px;letter-spacing:.01em;white-space:nowrap}
+.brand svg{display:block}
+.badge{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--ink-2);
+  border:1px solid var(--line);border-radius:99px;padding:3px 11px;background:var(--bg1)}
+.badge .pulse{width:7px;height:7px;border-radius:50%;background:var(--acc);
+  box-shadow:0 0 0 0 rgba(45,212,167,.45);animation:pulse 2.4s ease-out infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(45,212,167,.4)}70%{box-shadow:0 0 0 7px rgba(45,212,167,0)}100%{box-shadow:0 0 0 0 rgba(45,212,167,0)}}
+.badge.err .pulse{background:var(--err);animation:none}
+header .spacer{flex:1}
+.privacy{font-size:12px;color:var(--ink-3);display:flex;align-items:center;gap:6px}
+.privacy svg{opacity:.7}
+
+/* ---------- 导航 (吸顶, 与表头 sticky 位对齐) ---------- */
+nav{display:flex;gap:2px;padding:0 28px;border-bottom:1px solid var(--line);background:var(--bg0);
+  position:sticky;top:var(--head-h);z-index:9;height:var(--nav-h)}
+nav button{background:none;border:none;color:var(--ink-3);padding:0 14px;cursor:pointer;
+  font-size:13.5px;position:relative;transition:color .15s ease;display:flex;align-items:center;gap:7px;
+  height:var(--nav-h)}
+nav button svg{opacity:.75}
+nav button:hover{color:var(--ink-2)}
+nav button.on{color:var(--ink);font-weight:600}
+nav button.on::after{content:"";position:absolute;left:12px;right:12px;bottom:-1px;height:2px;
+  background:var(--acc);border-radius:2px 2px 0 0}
+
+main{padding:26px 28px 60px;max-width:1120px;margin:0 auto}
+section{animation:fadein .18s ease-out}
+@keyframes fadein{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+h2{font-size:12px;font-weight:600;color:var(--ink-3);letter-spacing:.08em;
+  margin:26px 0 10px;text-transform:uppercase}
+main > section > h2:first-child{margin-top:0}
+
+/* ---------- 数据带 (主指标) ---------- */
+.statband{display:flex;flex-wrap:wrap;align-items:baseline;column-gap:44px;row-gap:18px;
+  padding:6px 0 22px;border-bottom:1px solid var(--line-soft)}
+.stat .v{font-family:var(--mono);font-size:27px;font-weight:600;letter-spacing:-.01em;
+  font-variant-numeric:tabular-nums;color:var(--acc);line-height:1.2}
+.stat .v.neutral{color:var(--ink)}
+.stat .k{font-size:12px;color:var(--ink-3);margin-top:2px}
+
+/* ---------- 表格 ---------- */
+.tbl-wrap{width:100%}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{font-size:11.5px;font-weight:600;color:var(--ink-3);text-align:left;letter-spacing:.05em;
+  text-transform:uppercase;padding:8px 12px;border-bottom:1px solid var(--line);
+  background:var(--bg1);position:sticky;top:calc(var(--head-h) + var(--nav-h))}
+td{padding:9px 12px;border-bottom:1px solid var(--line-soft);vertical-align:baseline}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+td.mono{font-family:var(--mono);font-size:12.5px}
+.linklike{background:none;border:none;padding:0;cursor:pointer;text-align:left}
+.sid{color:var(--acc);font-family:var(--mono);font-size:12.5px}
+.sid:hover{text-decoration:underline;text-underline-offset:3px}
+.chip{display:inline-block;font-size:11px;padding:1px 8px;border-radius:5px;
+  background:var(--bg2);color:var(--ink-2);border:1px solid var(--line)}
+.chip.warn{color:var(--warn);border-color:#4a3b1e}
+.chip.ok{color:var(--acc);border-color:#1d4a40}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:2px;vertical-align:1px}
+.dot.ok{background:var(--acc)} .dot.err{background:var(--err)} .dot.warm{background:var(--info)} .dot.sw{background:var(--warn)}
+td .sub{color:var(--ink-3);font-size:12px}
+
+/* ---------- 月度走势 ---------- */
+.months{display:flex;gap:6px;height:132px;padding:4px 0 0}
+.mcol{flex:1;position:relative;min-width:0}
+.mcol .stick{position:absolute;left:50%;bottom:22px;width:100%;max-width:46px;
+  height:3%;max-height:calc(100% - 26px);background:var(--bar);border-radius:3px 3px 0 0;
+  border-top:2px solid var(--acc);transform:translateX(-50%) scaleY(1);transform-origin:bottom;
+  animation:grow .5s cubic-bezier(.2,.7,.3,1) backwards;animation-delay:calc(var(--i,0)*40ms);
+  transition:background .15s ease}
+@keyframes grow{from{transform:translateX(-50%) scaleY(0)}}
+.mcol .stick:hover{background:var(--bar-hover)}
+.mcol .lb{position:absolute;left:0;right:0;bottom:0;text-align:center;
+  font-size:10.5px;color:var(--ink-3);font-variant-numeric:tabular-nums}
+
+/* ---------- 表单与按钮 ---------- */
+.controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+input,select{background:var(--bg1);border:1px solid var(--line);color:var(--ink);
+  border-radius:var(--rad);padding:8px 12px;font-size:13.5px;outline:none;
+  transition:border-color .15s ease,background .15s ease}
+input::placeholder{color:var(--ink-3)}
+input:focus,select:focus{border-color:var(--acc);background:var(--bg2)}
+input{flex:1;min-width:260px}
+.btn{display:inline-flex;align-items:center;gap:7px;background:var(--bg2);border:1px solid var(--line);
+  border-radius:var(--rad);padding:8px 14px;font-size:13.5px;cursor:pointer;
+  transition:border-color .15s ease,background .15s ease,transform .1s ease}
+.btn:hover{border-color:#2a4046;background:var(--bg3)}
+.btn:active{transform:translateY(1px)}
+.btn.primary{background:var(--acc);border-color:var(--acc);color:var(--acc-ink);font-weight:600}
+.btn.primary:hover{background:#43e0b6;border-color:#43e0b6}
+.btn.danger{background:none;border-color:#5a4020;color:var(--warn)}
+.btn.danger:hover{background:#241b0e;border-color:var(--warn)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+
+/* ---------- 面板 ---------- */
+.panel{background:var(--bg1);border:1px solid var(--line);border-radius:10px;padding:20px 22px;margin:12px 0}
+.panel > b{font-size:14px}
+.kv{display:grid;grid-template-columns:190px 1fr;gap:5px 14px;font-size:13px;margin-top:10px}
+.kv b{color:var(--ink-3);font-weight:500}
+.kv span{font-variant-numeric:tabular-nums}
+.immlist{list-style:none;margin-top:12px;border-top:1px solid var(--line-soft);padding-top:10px}
+.immlist li{display:flex;gap:9px;font-size:12.5px;color:var(--ink-2);padding:3.5px 0}
+.immlist li svg{flex:none;margin-top:3px}
+.immlist li.good{color:var(--acc)}
+.note{color:var(--ink-3);font-size:12.5px;margin-top:10px;line-height:1.7}
+.empty{padding:36px 20px;text-align:center;color:var(--ink-3);font-size:13px;
+  border:1px dashed var(--line);border-radius:10px;line-height:2}
+.empty code{font-family:var(--mono);font-size:12px;color:var(--ink-2);
+  background:var(--bg1);padding:2px 7px;border-radius:5px}
+.empty svg{display:block;margin:0 auto 6px}
+.empty .btn{margin-top:12px}
+
+/* ---------- 快照详情抽屉 ---------- */
+.backdrop{position:fixed;inset:0;background:rgba(3,7,9,.55);opacity:0;
+  transition:opacity .22s ease;z-index:40}
+.backdrop.show{opacity:1}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(460px,94vw);background:var(--bg1);
+  border-left:1px solid var(--line);z-index:41;overflow-y:auto;padding:20px 24px 28px;
+  transform:translateX(28px);opacity:0;
+  transition:transform .24s cubic-bezier(.2,.7,.3,1),opacity .2s ease;
+  box-shadow:-18px 0 50px rgba(0,0,0,.45)}
+.drawer.show{transform:none;opacity:1}
+.dw-head{display:flex;align-items:flex-start;gap:12px}
+.dw-head h3{font-size:15px;font-weight:600;margin-top:3px}
+.dw-sub{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);word-break:break-all;margin:2px 0 0}
+.dw-close{margin-left:auto;flex:none;background:none;border:1px solid transparent;border-radius:6px;
+  color:var(--ink-3);cursor:pointer;padding:5px;display:inline-flex}
+.dw-close:hover{color:var(--ink);border-color:var(--line);background:var(--bg2)}
+.dw-chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:14px 0 2px}
+.drawer h3.sec{font-size:12px;font-weight:600;color:var(--ink-3);letter-spacing:.06em;
+  text-transform:uppercase;margin:20px 0 8px}
+.drawer .immlist{border-top:none;padding-top:2px}
+.dw-actions{display:flex;gap:10px;margin-top:22px;padding-top:16px;border-top:1px solid var(--line-soft)}
+
+/* ---------- 骨架 ---------- */
+.skel{height:13px;border-radius:5px;background:linear-gradient(90deg,var(--bg2) 25%,var(--bg3) 50%,var(--bg2) 75%);
+  background-size:200% 100%;animation:shimmer 1.3s linear infinite;margin:10px 0}
+@keyframes shimmer{to{background-position:-200% 0}}
+
+/* ---------- toast ---------- */
+#toast{position:fixed;bottom:26px;right:26px;background:var(--bg2);border:1px solid var(--line);
+  border-radius:10px;padding:13px 18px;max-width:440px;font-size:13px;line-height:1.6;
+  box-shadow:0 10px 34px rgba(0,0,0,.55);transform:translateY(8px);opacity:0;
+  transition:transform .18s ease,opacity .18s ease;pointer-events:none;z-index:50}
+#toast.show{transform:none;opacity:1}
+#toast.err{border-color:#5a3229;background:#1d1310}
+
+/* ---------- 动效偏好 ---------- */
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important}
+}
+
+/* ---------- 窄屏 ---------- */
+@media(max-width:900px){
+  header{padding:0 16px}
+  .privacy{display:none}
+  nav{padding:0 8px}
+  main{padding:20px 16px 60px}
+  .statband{column-gap:28px}
+  .tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .tbl-wrap table{min-width:640px}
+  .tbl-wrap th{position:static}
+  .kv{grid-template-columns:132px 1fr}
+}
 </style></head><body>
-<header><span class="dot"></span><h1>Context Vault 控制台</h1>
-<span id="status">连接中…</span>
-<span style="flex:1"></span>
-<span style="color:var(--dim);font-size:12px">本地回环 · 数据不出机器</span></header>
-<nav>
-<button data-t="ov" class="on">概览</button>
-<button data-t="snap">快照资产</button>
-<button data-t="mig">迁移工作台</button>
-<button data-t="probe">哨兵时间线</button>
+<header>
+  <div class="brand">
+    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+      <rect x="2.5" y="2.5" width="15" height="15" rx="3.5" stroke="#2dd4a7" stroke-width="1.7"/>
+      <rect x="6.5" y="8" width="7" height="6" rx="1" fill="#2dd4a7"/>
+      <path d="M7.5 8V6.5a2.5 2.5 0 0 1 5 0V8" stroke="#2dd4a7" stroke-width="1.7" stroke-linecap="round"/>
+    </svg>
+    Context Vault
+  </div>
+  <span class="badge" id="status"><span class="pulse"></span>连接中</span>
+  <span class="spacer"></span>
+  <span class="privacy">
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+      <rect x="3" y="7" width="10" height="7" rx="1.5" stroke="currentColor" stroke-width="1.4"/>
+      <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" stroke="currentColor" stroke-width="1.4"/>
+    </svg>
+    本地回环 · 数据不出机器
+  </span>
+</header>
+<nav aria-label="控制台分区">
+  <button data-t="ov" class="on" aria-current="page">
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 13.5h12M4 13.5V8m4 5.5V3.5m4 10V6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+    概览</button>
+  <button data-t="snap">
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><ellipse cx="7" cy="7" rx="4.5" ry="4.5" stroke="currentColor" stroke-width="1.6"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+    快照资产</button>
+  <button data-t="mig">
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 8h11m0 0-3.5-3.5M13 8l-3.5 3.5M14 2.5v11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity=".4"/><path d="M2 8h9m0 0-3-3M11 8l-3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    迁移</button>
+  <button data-t="probe">
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" opacity=".45"/><circle cx="8" cy="8" r="2.6" stroke="currentColor" stroke-width="1.6"/><path d="M8 1.6V4M8 12v2.4M1.6 8H4M12 8h2.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+    哨兵</button>
 </nav>
 <main>
 <section id="t-ov">
-  <div class="cards" id="ov-cards"></div>
+  <div class="statband" id="ov-band"><div class="skel" style="width:220px"></div><div class="skel" style="width:160px"></div><div class="skel" style="width:160px"></div></div>
   <h2>月度节省走势</h2><div class="months" id="ov-months"></div>
-  <h2>按模型节省 (明细账)</h2><div id="ov-models"></div>
+  <h2>按模型明细</h2><div id="ov-models"></div>
 </section>
+
 <section id="t-snap" style="display:none">
-  <div class="flex"><input id="snap-q" placeholder="搜索全部历史会话 (如 MergePilot / 时序预测)" style="flex:1;min-width:280px">
-  <button class="act" onclick="snapSearch()">搜索</button>
-  <button class="act" onclick="loadSnaps()">最近列表</button></div>
-  <div id="snap-list"><div class="note">加载中…</div></div>
-  <div class="detail" id="snap-detail"></div>
+  <div class="controls">
+    <input id="snap-q" placeholder="搜索全部历史会话 — 项目名、模型、任务关键词…" onkeydown="if(event.key==='Enter')snapSearch()">
+    <button class="btn" onclick="snapSearch()">搜索</button>
+    <button class="btn" onclick="loadSnaps()">最近</button>
+  </div>
+  <div id="snap-list"></div>
 </section>
+
 <section id="t-mig" style="display:none">
-  <div class="migbox">
+  <div class="panel">
     <b>把历史会话迁移到另一个 agent</b>
-    <div class="flex" style="margin-top:12px">
-      <select id="mig-sid" style="min-width:280px"></select>
+    <div class="controls" style="margin-top:14px;margin-bottom:4px">
+      <select id="mig-sid" style="flex:1;min-width:260px"></select>
       <select id="mig-target"><option value="codex">→ Codex</option><option value="claude">→ Claude Code</option></select>
-      <button class="act pri" onclick="migPreview()">预览</button>
+      <button class="btn primary" onclick="migPreview()">预览迁移</button>
     </div>
     <div id="mig-preview"></div>
-    <div class="flex" id="mig-actions" style="display:none">
-      <button class="act" onclick="migGo(false)">生成到 outbox (安全)</button>
-      <button class="act warn" onclick="migGo(true)">写入真实会话目录</button>
+    <div class="controls" id="mig-actions" style="display:none;margin-top:6px">
+      <button class="btn" onclick="migGo(false)">生成到 outbox（安全）</button>
+      <button class="btn danger" onclick="migGo(true)">写入目标会话目录</button>
     </div>
-    <div class="note">stateless replay 语义: 压缩边界后为活上下文, 摘要注入为新会话首条消息。写入真实目录后用 codex resume / claude --resume 恢复。</div>
+    <div class="note">stateless replay：压缩边界之后为活上下文，摘要将注入为新会话首条消息。<br>
+    写入后用 <b>codex resume</b> / <b>claude --resume</b> 恢复会话。</div>
   </div>
 </section>
+
 <section id="t-probe" style="display:none">
-  <div class="flex"><button class="act pri" onclick="probeNow()">立即探测上游</button>
-  <span class="note" id="probe-last"></span></div>
-  <div id="probe-list" style="margin-top:10px"></div>
+  <div class="controls">
+    <button class="btn primary" onclick="probeNow()">立即探测上游</button>
+    <span class="note" id="probe-last" style="margin:0"></span>
+  </div>
+  <div id="probe-list"></div>
 </section>
 </main>
-<div id="toast"></div>
+<div id="toast" role="status" aria-live="polite"></div>
+<div class="backdrop" id="backdrop" hidden></div>
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="dw-title" hidden>
+  <div class="dw-head">
+    <div style="min-width:0">
+      <h3 id="dw-title">快照详情</h3>
+      <p class="dw-sub" id="dw-sub"></p>
+    </div>
+    <button class="dw-close" id="dw-close" aria-label="关闭详情" onclick="closeDrawer()">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3.5 3.5l9 9m0-9-9 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+  <div id="dw-body"></div>
+</aside>
 <script>
 const $=s=>document.querySelector(s);
-const usd=v=>v==null?"-":"$"+(+v).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
+const usd=v=>v==null?"—":"$"+(+v).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
 const num=v=>(+v||0).toLocaleString();
-function toast(m){const t=$("#toast");t.textContent=m;t.style.display="block";setTimeout(()=>t.style.display="none",5000)}
-async function api(p,opt){const r=await fetch(p,opt);if(!r.ok)throw new Error((await r.json().catch(()=>({}))).error||r.status);return r.json()}
-document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{
-  document.querySelectorAll("nav button").forEach(x=>x.classList.remove("on"));b.classList.add("on");
-  ["ov","snap","mig","probe"].forEach(t=>$("#t-"+t).style.display=t===b.dataset.t?"":"none");
-  if(b.dataset.t==="mig"&&!$("#mig-sid").options.length)fillMig();
-  if(b.dataset.t==="probe"&&!$("#probe-list").children.length)loadProbe();
-});
+const bn=v=>{v=+v||0;return v>=1e9?(v/1e9).toFixed(2)+"B":v>=1e6?(v/1e6).toFixed(1)+"M":num(v)};
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const ftime=s=>{if(!s)return"—";const d=new Date(s);return isNaN(d)?String(s).slice(0,19)
+  :d.toLocaleString("zh-CN",{year:"2-digit",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})};
+const frel=s=>{if(!s)return"";const d=new Date(s);if(isNaN(d))return String(s).slice(0,19);
+  const m=Math.round((Date.now()-d.getTime())/6e4);
+  return m<1?"刚刚":m<60?m+" 分钟前":m<1440?Math.round(m/60)+" 小时前":Math.round(m/1440)+" 天前"};
+const shortSid=s=>String(s||"").length>18?String(s).slice(0,12)+"…"+String(s).slice(-4):String(s||"");
+let toastTimer;
+function toast(m,err){const t=$("#toast");t.textContent=m;t.classList.toggle("err",!!err);t.classList.add("show");
+  clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove("show"),5200)}
+async function api(p,opt){const r=await fetch(p,opt);
+  if(!r.ok)throw new Error((await r.json().catch(()=>({}))).error||r.status);return r.json()}
+
+const WARN='<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 2L15 14H1L8 2Z" stroke="#e2b45c" stroke-width="1.5" stroke-linejoin="round"/><path d="M8 6.5v3.5M8 12v.5" stroke="#e2b45c" stroke-width="1.5" stroke-linecap="round"/></svg>';
+const GOOD='<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.3" stroke="#2dd4a7" stroke-width="1.5"/><path d="M5.4 8.2l1.8 1.8 3.4-3.8" stroke="#2dd4a7" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const errEmpty=(msg,retry)=>'<div class="empty">'+WARN+esc(msg)+
+  (retry?'<br><button class="btn" onclick="'+retry+'">重试</button>':"")+"</div>";
+
+/* 单元格允许裸字符串或 {t,num} 对象 — 两种写法都渲染, 避免 undefined */
+const cell=c=>(c&&typeof c==="object")?c:{t:c};
+const table=(heads,rows)=>{if(!rows||!rows.length)return"";
+  const hs=heads.map((h,i)=>{const c=cell(rows[0][i]);return "<th"+(c.num?' class="num"':"")+">"+h+"</th>"}).join("");
+  const bs=rows.map(r=>"<tr>"+r.map(c0=>{const c=cell(c0);return "<td"+(c.num?' class="num"':"")+">"+c.t+"</td>"}).join("")+"</tr>").join("");
+  return '<div class="tbl-wrap"><table><thead><tr>'+hs+"</tr></thead><tbody>"+bs+"</tbody></table></div>"};
+
+function setTab(t){
+  document.querySelectorAll("nav button").forEach(x=>{const on=x.dataset.t===t;
+    x.classList.toggle("on",on);on?x.setAttribute("aria-current","page"):x.removeAttribute("aria-current")});
+  ["ov","snap","mig","probe"].forEach(k=>$("#t-"+k).style.display=k===t?"":"none");
+  if(t==="mig"&&!$("#mig-sid").options.length)fillMig();
+  if(t==="probe"&&!$("#probe-list").dataset.loaded)loadProbe();
+}
+document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>setTab(b.dataset.t));
+
 async function boot(){
   try{const h=await api("/healthz");
-    $("#status").textContent="服务正常 · "+h.snapshots+" 快照 · "+num(h.terms)+" 索引词项";}catch(e){$("#status").textContent="服务异常: "+e}
+    $("#status").innerHTML='<span class="pulse"></span>服务正常 · '+h.snapshots+" 快照 · "+num(h.terms)+" 索引词项";
+  }catch(e){const s=$("#status");s.classList.add("err");s.innerHTML="<span class='pulse'></span>服务异常"}
   loadOv();loadSnaps();
 }
+const stat=(v,k,cls="")=>'<div class="stat"><div class="v '+cls+'">'+v+'</div><div class="k">'+k+"</div></div>";
+const kv=(k,v)=>"<b>"+k+"</b><span>"+(v==null?"—":v)+"</span>";
+
 async function loadOv(){
   try{const d=await api("/ledger");const lt=d.lifetime||{};
     const total=(lt.saved_usd||0)+(lt.cache_savings_usd||0);
-    $("#ov-cards").innerHTML=
-      card(usd(total),"累计节省 (压缩+缓存)")+card(usd(lt.cache_savings_usd),"缓存节省","alt")+
-      card(num(lt.total_input_tokens),"历史总输入 tokens","alt")+card(num(lt.tokens_saved),"压缩节省 tokens");
-    const mx=Math.max(...d.monthly.map(m=>m.c||0),1);
-    $("#ov-months").innerHTML=d.monthly.map(m=>'<div class="mcol"><div class="stick" style="height:'+
-      Math.max(100*(m.c||0)/mx,3)+'%" title="'+usd(m.c)+'"></div><div class="lb">'+m.m.slice(2)+'</div></div>').join("")||'<div class="note">无月度数据</div>';
-    const mm=Math.max(...d.by_model.map(m=>m.c||0),1);
-    $("#ov-models").innerHTML=d.by_model.map(m=>'<div class="bar"><div class="name">'+m.model+
-      '</div><div class="track"><div class="fill" style="width:'+Math.round(100*(m.c||0)/mm)+'%"></div></div><div class="val">'+
-      usd(m.c)+" · "+num(m.t)+" tok</div></div>").join("")||'<div class="note">无明细</div>';
-  }catch(e){$("#ov-cards").innerHTML='<div class="note">账本为空 — 先运行 cv ledger import-headroom</div>'}
+    $("#ov-band").innerHTML=
+      stat(usd(total),"累计节省（压缩 + 缓存）")+
+      stat(usd(lt.saved_usd),"压缩节省","neutral")+
+      stat(usd(lt.cache_savings_usd),"缓存节省","neutral")+
+      stat(bn(lt.total_input_tokens),"历史总输入 tokens","neutral");
+    const ms=d.monthly||[];
+    if(!ms.length)$("#ov-months").innerHTML='<div class="empty">暂无月度数据<br>导入账本 <code>cv ledger import-headroom</code></div>';
+    else{
+      const mx=Math.max(...ms.map(m=>m.c||0),1);
+      $("#ov-months").innerHTML=ms.map((m,i)=>'<div class="mcol"><div class="stick" style="height:'+
+        Math.max(100*(m.c||0)/mx,3).toFixed(2)+'%;--i:'+i+'" title="'+esc(m.m+" · "+usd(m.c))+
+        '"></div><div class="lb">'+esc(m.m.slice(2))+"</div></div>").join("");
+    }
+    $("#ov-models").innerHTML=table(["模型","事件","节省 tokens","节省金额"],
+      (d.by_model||[]).map(m=>["<span class='mono'>"+esc(m.model||"未知模型")+"</span>",
+        {t:num(m.n),num:1},{t:num(m.t),num:1},{t:usd(m.c),num:1}]))
+      ||'<div class="empty">账本明细为空</div>';
+  }catch(e){
+    $("#ov-band").innerHTML=errEmpty("账本加载失败："+e.message,"loadOv()");
+    $("#ov-months").innerHTML="";$("#ov-models").innerHTML="";
+  }
 }
-const card=(v,k,cls="")=>'<div class="card '+cls+'"><div class="v">'+v+'</div><div class="k">'+k+"</div></div>";
+
+const sidBtn=sid=>"<button class='linklike sid' title=\""+sid+"\" onclick=\"snapDetail('"+sid+"')\">"+shortSid(sid)+"</button>";
+const agentCell=r=>"<span class='chip'>"+esc(r.agent||"?")+"</span>";
+const whenCell=r=>"<span class='sub'>"+ftime(r.created_at)+"<br>"+esc(r.cwd||"—")+"</span>";
+const compCell=r=>r.completeness&&r.completeness!=="full"
+  ?"<span class='chip warn'>"+esc(r.completeness)+"</span>"
+  :"<span style='color:var(--ink-3)'>完整</span>";
+
 async function loadSnaps(){
-  const rows=await api("/recent?limit=30").catch(()=>[]);
-  $("#snap-list").innerHTML=rows.map(r=>'<div class="row" onclick="snapDetail(\\''+r.sid+'\\')">'+
-    '<span class="id">'+r.sid+"</span><span class='tag'>"+(r.agent||"?")+"</span><span class='tag'>"+
-    num(r.blocks)+" 块</span><span class='tag'>"+num(r.tokens_in)+" 入 tok</span>"+
-    (r.completeness&&r.completeness!=="full"?'<span class="tag" style="color:var(--warn)">'+r.completeness+"</span>":"")+
-    '<div class="meta">'+(r.cwd||"?")+" · "+String(r.created_at||"").slice(0,19)+"</div></div>").join("")
-    ||'<div class="note">vault 为空 — cv export 导入会话</div>';
-  fillMig();
+  try{
+    const rows=await api("/recent?limit=30");
+    $("#snap-list").innerHTML=table(["快照","来源","块数","入 tokens","完整性","时间 / 目录"],
+      rows.map(r=>[sidBtn(r.sid),agentCell(r),{t:num(r.blocks),num:1},{t:bn(r.tokens_in),num:1},
+        compCell(r),whenCell(r)]))
+      ||'<div class="empty">vault 还是空的<br>导出第一个会话 <code>python tools/cv.py export ~/.codex/sessions/…/rollout-*.jsonl</code></div>';
+    fillMig(rows);
+  }catch(e){$("#snap-list").innerHTML=errEmpty("快照列表加载失败："+e.message,"loadSnaps()")}
 }
 async function snapSearch(){
   const q=$("#snap-q").value.trim();if(!q)return loadSnaps();
-  const d=await api("/search?q="+encodeURIComponent(q)+"&limit=20");
-  $("#snap-list").innerHTML=d.hits.map(h=>'<div class="row" onclick="snapDetail(\\''+h.sid+'\\')">'+
-    '<span class="id">'+h.sid+"</span><span class='tag'>"+h.agent+"</span><span class='tag'>得分 "+h.score+
-    "</span><div class='meta'>"+(h.cwd||"?")+" · "+String(h.created_at||"").slice(0,10)+"</div></div>").join("")
-    ||'<div class="note">未命中: '+q+"</div>";
+  $("#snap-list").innerHTML='<div class="skel" style="width:40%"></div><div class="skel" style="width:70%"></div>';
+  try{
+    const d=await api("/search?q="+encodeURIComponent(q)+"&limit=20");
+    $("#snap-list").innerHTML=table(["快照","来源","得分","时间 / 目录"],
+      d.hits.map(h=>[sidBtn(h.sid),agentCell(h),{t:num(h.score),num:1},whenCell(h)]))
+      ||'<div class="empty">没有命中「'+esc(q)+'」<br>换个关键词试试 — 项目名、文件路径、任务描述都行</div>';
+  }catch(e){$("#snap-list").innerHTML=errEmpty("搜索失败："+e.message,"snapSearch()")}
 }
+
+/* ---------- 快照详情抽屉 ---------- */
+let drawerOpen=false,lastFocus=null;
+function openDrawer(){
+  if(drawerOpen)return;drawerOpen=true;lastFocus=document.activeElement;
+  const d=$("#drawer"),b=$("#backdrop");d.hidden=false;b.hidden=false;
+  void d.offsetHeight; /* 同步 reflow 触发过渡, 不依赖 rAF (隐藏页 rAF 不触发) */
+  d.classList.add("show");b.classList.add("show");
+  $("#dw-close").focus();
+}
+function closeDrawer(){
+  if(!drawerOpen)return;drawerOpen=false;
+  const d=$("#drawer"),b=$("#backdrop");
+  d.classList.remove("show");b.classList.remove("show");
+  setTimeout(()=>{d.hidden=true;b.hidden=true},240);
+  if(lastFocus&&lastFocus.focus)lastFocus.focus();
+}
+document.addEventListener("keydown",e=>{if(e.key==="Escape")closeDrawer()});
+$("#backdrop").addEventListener("click",closeDrawer);
+
 async function snapDetail(sid){
-  const d=await api("/snapshot?id="+sid);const p=await api("/preview?id="+sid).catch(()=>({}));
-  const el=$("#snap-detail");el.classList.add("show");
-  el.innerHTML="<b>"+sid+"</b><div class='kv' style='margin-top:8px'>"+
-    kv("来源",d.capture.agent+" ("+d.capture.source_format+")")+
-    kv("cwd",d.capture.cwd||"-")+kv("完整性",d.capture.completeness)+
-    kv("token 入/出/cache读",num(d.stats.tokens_in)+" / "+num(d.stats.tokens_out)+" / "+num(d.stats.cache_read))+
-    kv("块分布",Object.entries(d.block_dist).map(([k,v])=>k+"×"+v).join("  "))+
-    (p.live_blocks!=null?kv("活上下文",p.live_blocks+" 块 · ~"+num(p.live_tokens_est)+" tok"+(p.compactions?" · "+p.compactions+" 次压缩后":"")):"")+
-    "</div>";
-  el.scrollIntoView({behavior:"smooth"});
+  openDrawer();
+  $("#dw-sub").textContent=sid;
+  $("#dw-body").innerHTML='<div class="skel" style="width:55%"></div><div class="skel" style="width:82%"></div><div class="skel" style="width:64%"></div><div class="skel" style="width:76%"></div>';
+  try{
+    const [d,p]=await Promise.all([api("/snapshot?id="+sid),api("/preview?id="+sid).catch(()=>null)]);
+    const c=d.capture||{},s=d.stats||{};
+    const imm=[];
+    if(p){
+      if(p.no_assistant)imm.push("assistant 文本缺失（源转录不含）— 目标会话只有 user / tool 视角");
+      if(p.thinking)imm.push("thinking ×"+p.thinking+" — 仅明文摘要可迁移，加密推理不可移植");
+      if(p.agent_messages)imm.push("agent_message ×"+p.agent_messages+" — 降级为带标注的文本");
+      if(p.dropped_source)imm.push("源文件被丢弃行 ×"+p.dropped_source+"（developer 注入 / 无移植语义）");
+    }
+    const dist=Object.entries(d.block_dist||{}).map(([k,v])=>"<span class='chip'>"+esc(k)+" ×"+num(v)+"</span>").join(" ");
+    $("#dw-body").innerHTML=
+      "<div class='dw-chips'>"+
+      (c.agent?"<span class='chip'>"+esc(c.agent)+"</span>":"")+
+      (c.completeness&&c.completeness!=="full"?"<span class='chip warn'>"+esc(c.completeness)+"</span>":"<span class='chip ok'>完整</span>")+
+      "<span class='sub'>"+ftime(c.created_at)+"</span></div>"+
+      "<div class='kv'>"+
+      kv("项目目录",esc(c.cwd||"—"))+
+      (p?kv("活上下文",num(p.live_blocks)+" 块 · ~"+num(p.live_tokens_est)+" tokens"+(p.compactions?"（"+p.compactions+" 次压缩边界之后）":"")):"")+
+      (p?kv("历史累计输入",num(p.history_tokens_in)+" tokens"):"")+
+      kv("块总数",num(s.blocks_total)+" 块"+(s.blocks_dropped?" · 丢弃 "+num(s.blocks_dropped):""))+
+      "</div>"+
+      "<h3 class='sec'>块构成</h3><div class='dw-chips'>"+(dist||"<span class='sub'>—</span>")+"</div>"+
+      (p?"<h3 class='sec'>可迁移性</h3><ul class='immlist'>"+
+        (imm.length?imm.map(i=>"<li>"+WARN+i+"</li>").join(""):"<li class='good'>"+GOOD+"无可迁移性损失</li>")+"</ul>":"")+
+      "<div class='dw-actions'>"+
+      "<button class='btn primary' onclick=\"toMig('"+sid+"')\">迁移此快照 →</button>"+
+      "<button class='btn' onclick=\"copySid('"+sid+"')\">复制 SID</button></div>";
+  }catch(e){$("#dw-body").innerHTML=errEmpty("详情加载失败："+e.message,"snapDetail('"+sid+"')")}
 }
-const kv=(k,v)=>"<b>"+k+"</b><span>"+(v==null?"-":v)+"</span>";
-async function fillMig(){
-  const rows=await api("/recent?limit=50").catch(()=>[]);
-  $("#mig-sid").innerHTML=rows.map(r=>'<option value="'+r.sid+'">'+r.sid.slice(0,18)+"… · "+r.agent+" · "+
-    num(r.blocks)+" 块 · "+String(r.created_at||"").slice(0,10)+"</option>").join("");
+function copySid(sid){navigator.clipboard&&navigator.clipboard.writeText(sid).then(
+  ()=>toast("已复制完整 SID")).catch(()=>toast("复制失败",1))}
+async function toMig(sid){
+  closeDrawer();setTab("mig");
+  if(!$("#mig-sid").options.length)await fillMig();
+  const has=[...$("#mig-sid").options].some(o=>o.value===sid);
+  if(has)$("#mig-sid").value=sid;
+  migPreview();
+}
+
+async function fillMig(rows){
+  if(!rows)rows=await api("/recent?limit=50").catch(()=>[]);
+  $("#mig-sid").innerHTML=rows.map(r=>'<option value="'+r.sid+'">'+esc(shortSid(r.sid))+" · "+
+    esc(r.agent||"?")+" · "+num(r.blocks)+" 块 · "+ftime(r.created_at)+"</option>").join("");
 }
 async function migPreview(){
-  const id=$("#mig-sid").value;if(!id)return toast("无快照可选");
-  const p=await api("/preview?id="+id);
-  const imm=[];
-  if(p.no_assistant)imm.push("assistant 文本缺失 (源转录不含) — 目标会话只有 user/tool 视角");
-  if(p.thinking)imm.push("thinking×"+p.thinking+" — 仅明文摘要可迁移");
-  if(p.agent_messages)imm.push("agent_message×"+p.agent_messages+" — 降级为标注文本");
-  if(p.dropped_source)imm.push("源被丢弃行 ×"+p.dropped_source+" (无移植语义)");
-  $("#mig-preview").innerHTML="<div class='kv'>"+
-    kv("活上下文",p.live_blocks+" 块 (~"+num(p.live_tokens_est)+" tok)"+(p.compactions?" · "+p.compactions+" 次压缩边界后":""))+
-    kv("活上下文构成",Object.entries(p.live_dist).map(([k,v])=>k+"×"+v).join("  "))+
-    kv("历史累计 token 入",num(p.history_tokens_in))+"</div>"+
-    "<ul class='imm'>"+(imm.length?imm.map(i=>"<li>"+i+"</li>").join(""):"<li style='color:var(--good)'>(无可迁移性损失)</li>")+"</ul>";
-  $("#mig-actions").style.display="flex";
+  const id=$("#mig-sid").value;if(!id)return toast("vault 为空，无快照可迁移",1);
+  try{
+    const p=await api("/preview?id="+id);
+    const imm=[];
+    if(p.no_assistant)imm.push("assistant 文本缺失（源转录不含）— 目标会话只有 user / tool 视角");
+    if(p.thinking)imm.push("thinking ×"+p.thinking+" — 仅明文摘要可迁移，加密推理不可移植");
+    if(p.agent_messages)imm.push("agent_message ×"+p.agent_messages+" — 降级为带标注的文本");
+    if(p.dropped_source)imm.push("源文件被丢弃行 ×"+p.dropped_source+"（developer 注入 / 无移植语义）");
+    $("#mig-preview").innerHTML=
+      '<div class="kv">'+
+      kv("活上下文",p.live_blocks+" 块 · ~"+num(p.live_tokens_est)+" tokens"+(p.compactions?"（"+p.compactions+" 次压缩边界之后）":""))+
+      kv("构成",Object.entries(p.live_dist).map(([k,v])=>esc(k)+" ×"+num(v)).join("　"))+
+      kv("历史累计输入",num(p.history_tokens_in)+" tokens")+"</div>"+
+      '<ul class="immlist">'+(imm.length?imm.map(i=>"<li>"+WARN+i+"</li>").join(""):"<li class='good'>"+GOOD+"无可迁移性损失</li>")+"</ul>";
+    $("#mig-actions").style.display="flex";
+  }catch(e){$("#mig-preview").innerHTML=errEmpty("预览失败："+e.message);$("#mig-actions").style.display="none"}
 }
 async function migGo(apply){
   const id=$("#mig-sid").value,t=$("#mig-target").value;
-  if(apply&&!confirm("确认写入真实会话目录?\\n"+id+" → "+t+"\\n(目标 agent 下次 resume 可见)"))return;
+  if(apply&&!confirm("确认写入目标会话目录？\n\n"+id+"\n→ "+(t==="codex"?"Codex":"Claude Code")+
+    "\n\n目标 agent 的 resume 列表将出现此会话。"))return;
+  const btns=document.querySelectorAll("#mig-actions .btn");btns.forEach(b=>b.disabled=true);
   try{const r=await api("/migrate",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({id:id,target:t,apply:apply})});
-    toast((r.applied?"已写入会话目录: ":"已生成到 outbox: ")+r.dest.split("\\").pop().split("/").pop()+
-      " ("+r.lines+" 行"+(r.dropped?", 丢弃 "+r.dropped:"")+")"+(r.new_sid?" · session "+r.new_sid.slice(0,8):""));
-  }catch(e){toast("迁移失败: "+e.message)}
+    const name=r.dest.split("\\").pop().split("/").pop();
+    toast((r.applied?"已写入会话目录：":"已生成到 outbox：")+name+"（"+num(r.lines)+" 行"+
+      (r.dropped?"，丢弃 "+r.dropped:"")+"）"+(r.new_sid?" · session "+r.new_sid.slice(0,8)+"…":""));
+  }catch(e){toast("迁移失败："+e.message,1)}
+  btns.forEach(b=>b.disabled=false);
 }
+
 async function loadProbe(){
-  const rows=await api("/probe_events?limit=100").catch(()=>[]);
-  $("#probe-last").textContent=rows.length?"最近事件: "+String(rows[0].ts).slice(0,19):"";
-  const cls=s=>s==="ok"?"ok":(s==="warm"?"warm":(s==="switch"?"sw":"err"));
-  $("#probe-list").innerHTML=rows.map(r=>'<div class="ev"><span class="dot2 '+cls(r.status)+'"></span>'+
-    '<span class="t">'+String(r.ts).slice(0,19)+"</span><b style='min-width:90px'>"+r.profile+"</b><span style='color:var(--dim)'>"+
-    r.status+(r.http_code?" · http "+r.http_code:"")+(r.latency_ms?" · "+r.latency_ms+"ms":"")+"</span>"+
-    (r.missing_models&&r.missing_models!=="[]"?'<span style="color:var(--bad)">消失: '+r.missing_models+"</span>":"")+"</div>").join("")
-    ||'<div class="note">暂无事件 — 点"立即探测"或等哨兵周期</div>';
+  const el=$("#probe-list");el.innerHTML='<div class="skel" style="width:60%"></div><div class="skel" style="width:45%"></div>';
+  try{
+    const rows=await api("/probe_events?limit=100");
+    $("#probe-last").textContent=rows.length?"最近事件 · "+frel(rows[0].ts):"";
+    const cls=s=>s==="ok"?"ok":(s==="warm"||s==="probe"?"warm":(s==="switch"?"sw":"err"));
+    el.innerHTML=table(["","时间","profile","状态","详情"],
+      rows.map(r=>["<span class='dot "+cls(r.status)+"'></span>",
+        "<span class='mono'>"+ftime(r.ts)+"</span>","<b style='font-weight:500'>"+esc(r.profile)+"</b>",
+        esc(r.status)+(r.http_code?" · "+r.http_code:"")+(r.latency_ms?" · "+r.latency_ms+"ms":""),
+        r.missing_models&&r.missing_models!=="[]"?"<span style='color:var(--err)'>消失 "+esc(r.missing_models)+"</span>":
+          (r.status==="switch"?("<span class='sub'>切换检测 · "+shortModels(r.models)+"</span>"):"")]))
+      ||'<div class="empty">暂无事件<br>点「立即探测上游」或等哨兵周期（托盘模式下每 5 分钟自动探测）</div>';
+    el.dataset.loaded=1;
+  }catch(e){el.innerHTML=errEmpty("哨兵事件加载失败："+e.message,"loadProbe()")}
 }
+const shortModels=s=>{try{const m=JSON.parse(s);return m.by_agent?Object.entries(m.by_agent).map(([k,v])=>k+"×"+v).join(" · ")+" 活跃会话":""}catch(e){return""}};
 async function probeNow(){
+  const b=document.querySelector("#t-probe .btn.primary");if(b)b.disabled=true;
   toast("探测中…");
   try{const r=await api("/probe",{method:"POST"});
-    toast(r.alerts&&r.alerts.length?JSON.stringify(r.alerts):"探测完成: 全部上游正常");loadProbe();
-  }catch(e){toast("探测失败: "+e.message)}
+    const bad=r.alerts&&r.alerts.length;
+    toast(bad?"发现异常："+r.alerts.map(a=>"["+a.profile+"] "+(a.kind==="model_missing"?"模型消失 "+a.detail:a.kind)).join("；"):"探测完成：全部上游正常",bad);
+    delete $("#probe-list").dataset.loaded;loadProbe();
+  }catch(e){toast("探测失败："+e.message,1)}
+  if(b)b.disabled=false;
 }
-boot();setInterval(loadProbe,30000);
+boot();setInterval(()=>{if($("#t-probe").style.display!=="none"){delete $("#probe-list").dataset.loaded;loadProbe()}},30000);
 </script></body></html>"""
 
 
@@ -1559,9 +2114,32 @@ def main(argv=None):
     pr.add_argument("--key", help="API key (缺省读 CV_RELAY_KEY 环境变量)")
     pr.set_defaults(func=cmd_probe)
 
+    mc = sub.add_parser("mcp", help="MCP 记忆后端一键接入客户端")
+    msub = mc.add_subparsers(dest="mcp_cmd", required=True)
+    mi = msub.add_parser("install")
+    mi.add_argument("--client", choices=["claude", "codex", "cursor"], default="claude")
+    mi.add_argument("--all", action="store_true", help="接入全部已安装的客户端")
+    mi.set_defaults(func=cmd_mcp)
+    msub.add_parser("status").set_defaults(func=cmd_mcp)
+
+    ig = sub.add_parser("ingest", help="接入任意 harness 会话 (经 smigrate, 17+ 种)")
+    ig.add_argument("source", help="会话文件 / 导出 bundle (opencode/cursor/qwen/kimi/grok/...)")
+    ig.add_argument("--format", help="源格式覆盖 (歧义时, 如 opencode vs kilo)")
+    ig.add_argument("--cwd", help="覆盖会话 cwd")
+    ig.add_argument("--drop-developer", action="store_true")
+    ig.add_argument("--keep-temp", action="store_true", help="保留 claude 中转文件 (调试)")
+    ig.set_defaults(func=cmd_ingest)
+
     lg = sub.add_parser("ledger", help="token 账本")
     lsub = lg.add_subparsers(dest="ledger_cmd", required=True)
     lsub.add_parser("import-headroom").set_defaults(func=cmd_ledger_import_headroom)
+    lr = lsub.add_parser("import-relay", help="直连 relay billing API (OpenAI 兼容端点)")
+    lr.add_argument("--url", required=True, help="relay base url (如 https://api.example.com)")
+    lr.add_argument("--start")
+    lr.add_argument("--end")
+    lr.add_argument("--days", type=int, default=30)
+    lr.add_argument("--key")
+    lr.set_defaults(func=cmd_ledger_import_relay)
     lsub.add_parser("stats").set_defaults(func=cmd_ledger_stats)
 
     w = sub.add_parser("warm", help="缓存预热: 切换上游前预发历史前缀 (M2/Pro)")

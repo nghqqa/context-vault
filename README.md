@@ -64,6 +64,10 @@ python tools/cv.py serve     # 浏览器打开 http://127.0.0.1:8791
 
 纯本地回环、单文件、零外部依赖。Pro 托盘版（ContextVault.exe）把控制台与哨兵/守望/热索引打包成 Windows 常驻程序。
 
+# 接入任意其他 harness 会话 (经 session-migrate, 17+: opencode/cursor/qwen/kimi/grok/antigravity/...)
+# 依赖: uv tool install session-migrate
+python tools/cv.py ingest <会话文件> [--format opencode]
+
 ### 作为 MCP server 接入（任意 MCP 客户端 = 记忆后端）
 
 ```bash
@@ -72,6 +76,13 @@ claude mcp add context-vault -s user -- python /path/to/tools/mcp_server.py --va
 ```
 
 提供 5 个工具：`vault_search`（全库搜索）、`vault_context`（记忆检索——新会话开始时拉取相关历史上下文）、`vault_recent`、`vault_snapshot`、`vault_stats`（账本）。零第三方依赖。
+
+一键接入全部客户端（claude CLI / Codex config.toml / Cursor mcp.json，写入前自动备份）：
+
+```bash
+python tools/cv.py mcp install --all
+python tools/cv.py mcp status
+```
 
 ## 真实数据验证（2026-10-27，本机）
 
