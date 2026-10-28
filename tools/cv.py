@@ -894,6 +894,15 @@ def cmd_ledger_stats(args):
         print("== 按模型 (明细) ==")
         for r in rows:
             print(f"  {r['model']:<24} 事件={r['n']:<6} 省={r['t'] or 0:>12,} tok  {fmt_usd(r['c'] or 0)}")
+    zx = conn.execute("SELECT COUNT(*) n, model FROM ledger_events WHERE kind='zcode_usage'"
+                      " GROUP BY model ORDER BY n DESC").fetchall()
+    if zx:
+        tot = conn.execute("SELECT COUNT(*) n, SUM(CAST(json_extract(raw,'$.input') AS INT)) i,"
+                           " SUM(CAST(json_extract(raw,'$.cache_read') AS INT)) cr"
+                           " FROM ledger_events WHERE kind='zcode_usage'").fetchone()
+        print(f"== zcode 用量 ({tot['n']} 次调用, 审计直读) ==")
+        print(f"  入 {tot['i'] or 0:,} · cache读 {tot['cr'] or 0:,}"
+              f" · 模型: {', '.join(r['model'] for r in zx[:3])}")
     own = owned_stats(vault_dir(args))
     if own["snapshots"]:
         print(f"== vault 自有账本 ({own['snapshots']} 快照, 零外部依赖) ==")
@@ -948,6 +957,58 @@ def fetch_relay_web_logs(base: str, token: str, user_id: str | None,
 
 
 QUOTA_PER_USD = 500000  # new-api 默认换算; 各站倍率不同, 入账标"估算"
+
+
+def cmd_ledger_import_zcode(args):
+    """Zcode 用量入账: ~/.zcode/cli/rollout/model-io-*.jsonl (每行一次模型调用, camelCase usage)。
+    当前版 Zcode 主对话不落盘 (model-io 只存审计: system/tools 模板 + 截断 response + 完整 usage),
+    故只做账本源; 订阅制无单价, cost 留空 (诚实)。requestId 幂等去重。"""
+    vault = vault_dir(args)
+    io_dir = HOME / ".zcode" / "cli" / "rollout"
+    files = sorted(io_dir.glob("model-io-*.jsonl")) if io_dir.exists() else []
+    if not files:
+        raise SystemExit("未找到 ~/.zcode/cli/rollout/model-io-*.jsonl (zcode 未使用?)")
+    conn = db(vault)
+    conn.executescript(SCHEMA)
+    seen = set()
+    for (rawj,) in conn.execute("SELECT raw FROM ledger_events WHERE kind='zcode_usage'"):
+        try:
+            seen.add(json.loads(rawj).get("requestId"))
+        except (ValueError, TypeError):
+            pass
+    n = 0
+    agg = {}
+    for f in files:
+        for l in open(f, encoding="utf-8"):
+            try:
+                o = json.loads(l)
+            except ValueError:
+                continue
+            rid = o.get("requestId")
+            if not rid or rid in seen:
+                continue
+            seen.add(rid)
+            resp = o.get("response") or {}
+            u = resp.get("usage") or {}
+            model = (o.get("model") or {}).get("modelId") or resp.get("modelId") or "zcode"
+            tin = int(u.get("inputTokens") or 0)
+            tout = int(u.get("outputTokens") or 0)
+            tcr = int(u.get("cacheReadTokens") or 0)
+            tcw = int(u.get("cacheWriteTokens") or 0)
+            conn.execute("INSERT INTO ledger_events(source,occurred_at,kind,model,provider,client,"
+                         "tokens_saved,cost_usd,snapshot_id,raw) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                         ("zcode-modelio", o.get("completedAt") or now_iso(), "zcode_usage",
+                          model, (o.get("model") or {}).get("providerId"), "zcode", 0, None, None,
+                          json.dumps({"requestId": rid, "input": tin, "output": tout,
+                                      "cache_read": tcr, "cache_write": tcw,
+                                      "duration_ms": o.get("durationMs")}, ensure_ascii=False)))
+            a = agg.setdefault(model, [0, 0, 0, 0])
+            a[0] += tin; a[1] += tout; a[2] += tcr; a[3] += tcw
+            n += 1
+    conn.commit()
+    print(f"zcode 用量入账: {n} 条新记录 (requestId 幂等)")
+    for m, (i, o_, cr, cw) in sorted(agg.items(), key=lambda kv: -kv[1][0]):
+        print(f"  {m:<12} 入 {i:>12,} · 出 {o_:>9,} · cache读 {cr:>13,} · cache写 {cw:,}")
 
 
 def cmd_ledger_import_relay(args):
@@ -2686,6 +2747,8 @@ def main(argv=None):
     lg = sub.add_parser("ledger", help="token 账本")
     lsub = lg.add_subparsers(dest="ledger_cmd", required=True)
     lsub.add_parser("import-headroom").set_defaults(func=cmd_ledger_import_headroom)
+    lz = lsub.add_parser("import-zcode", help="Zcode 用量入账 (model-io 审计, requestId 幂等)")
+    lz.set_defaults(func=cmd_ledger_import_zcode)
     lr = lsub.add_parser("import-relay", help="直连 relay 拉账 (billing API 或 new-api web 日志)")
     lr.add_argument("--url", required=True, help="relay base url (如 https://api.example.com)")
     lr.add_argument("--mode", choices=["billing", "web"], default="billing",
