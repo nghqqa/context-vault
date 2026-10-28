@@ -51,9 +51,18 @@ python tools/cv.py dashboard --open
 # 上游切换守望 (Switcher 换 profile 即弹"携带会话"提醒, 无侵入)
 python tools/cv.py watch
 
-# 常驻服务: 热索引 21x 加速 + HTTP API (可选, MCP 自动联动, 挂了自动回退)
-python tools/cv.py serve
+# 常驻服务: 热索引 21x 加速 + 交互式控制台 (127.0.0.1:8791)
+python tools/cv.py serve     # 浏览器打开 http://127.0.0.1:8791
 ```
+
+### Web 控制台（`cv serve` 自带，127.0.0.1:8791）
+
+- **概览**：累计节省卡片 / 月度走势 / 按模型账本（可筛选钻取的数据源）
+- **快照资产**：全库搜索 + 点击展开会话详情（块分布 / 活上下文 / token）
+- **迁移工作台**：选快照 → 诚实预览（不可迁移清单 + 活上下文估算）→ 生成 outbox 或一键写入目标 agent 会话目录
+- **哨兵时间线**：探测 / 切换 / 模型消失全历史，一键立即探测
+
+纯本地回环、单文件、零外部依赖。Pro 托盘版（ContextVault.exe）把控制台与哨兵/守望/热索引打包成 Windows 常驻程序。
 
 ### 作为 MCP server 接入（任意 MCP 客户端 = 记忆后端）
 

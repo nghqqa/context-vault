@@ -555,29 +555,38 @@ def claude_project_dir(cwd: str) -> Path:
     return CLAUDE_PROJECTS / re.sub(r"[^A-Za-z0-9-]", "-", cwd.replace("\\", "/"))
 
 
-def cmd_import(args):
-    env = load_snapshot(args, args.snapshot_id)
-    vault = vault_dir(args)
+def do_import(vault: Path, sid: str, target: str, apply: bool, strip_thinking=False) -> dict:
+    """迁移执行核心 (CLI 与控制台 HTTP 共用)。返回 {lines, dropped, dest, new_sid, applied}。"""
+    env = load_snapshot(vault, sid)
     (vault / "outbox").mkdir(parents=True, exist_ok=True)
-    if args.target == "codex":
-        lines, dropped, sid, name = blocks_to_codex(env, args.strip_thinking)
+    if target == "codex":
+        lines, dropped, new_sid, name = blocks_to_codex(env, strip_thinking)
         dest = vault / "outbox" / name
-        if args.apply:
+        if apply:
             day = dt.datetime.now()
             dest = CODEX_SESSIONS / f"{day:%Y}" / f"{day:%m}" / f"{day:%d}" / name
             dest.parent.mkdir(parents=True, exist_ok=True)
-        print(f"(session_id: {sid})")
     else:
-        lines, dropped = blocks_to_claude(env, args.strip_thinking)
+        lines, dropped = blocks_to_claude(env, strip_thinking)
         name = f"{uuid.uuid4()}.jsonl"
         cwd = env["capture"].get("cwd") or str(Path.cwd())
-        dest = vault / "outbox" / f"claude-{args.snapshot_id}-{name}"
-        if args.apply:
+        dest = vault / "outbox" / f"claude-{sid}-{name}"
+        if apply:
             dest = claude_project_dir(cwd) / name
             dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text("\n".join(json.dumps(l, ensure_ascii=False) for l in lines) + "\n", encoding="utf-8")
-    where = "已写入真实会话目录" if args.apply else "dry-run (vault/outbox/, 加 --apply 才写真实会话目录)"
-    print(f"导入 {len(lines)} 行 → {dest}" + (f"  (丢弃无法配对的 tool_result×{dropped})" if dropped else ""))
+    return {"lines": len(lines), "dropped": dropped, "dest": str(dest),
+            "new_sid": new_sid if target == "codex" else None, "applied": apply}
+
+
+def cmd_import(args):
+    vault = vault_dir(args)
+    r = do_import(vault, args.snapshot_id, args.target, args.apply, args.strip_thinking)
+    if r["new_sid"]:
+        print(f"(session_id: {r['new_sid']})")
+    where = "已写入真实会话目录" if r["applied"] else "dry-run (vault/outbox/, 加 --apply 才写真实会话目录)"
+    print(f"导入 {r['lines']} 行 → {r['dest']}"
+          + (f"  (丢弃无法配对的 tool_result×{r['dropped']})" if r["dropped"] else ""))
     print(f"  {where}")
     if args.target == "codex" and args.apply:
         print("  验证: codex resume --last 或 codex resume <session-id>")
@@ -1130,6 +1139,220 @@ class VaultIndex:
         return {"query": query, "results": out}
 
 
+CONSOLE_HTML = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Context Vault 控制台</title>
+<style>
+:root{--bg:#0e1116;--card:#171c24;--card2:#1d2430;--ink:#e6e9ef;--dim:#8b93a3;--acc:#4f9cf9;--good:#3ecf8e;--warn:#f5a623;--bad:#e5534b}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font:14px/1.6 "Segoe UI",system-ui,sans-serif}
+header{display:flex;align-items:center;gap:14px;padding:14px 24px;border-bottom:1px solid #1d2430;position:sticky;top:0;background:var(--bg);z-index:5}
+header h1{font-size:16px} header .dot{width:10px;height:10px;border-radius:50%;background:var(--good)}
+#status{color:var(--dim);font-size:12px}
+nav{display:flex;gap:4px;padding:0 24px;margin-top:14px}
+nav button{background:none;border:1px solid transparent;color:var(--dim);padding:8px 16px;border-radius:8px 8px 0 0;cursor:pointer;font-size:13px}
+nav button.on{color:var(--ink);border-color:#1d2430;border-bottom-color:var(--bg);background:var(--card)}
+main{padding:20px 24px;max-width:1100px;margin:0 auto}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:20px}
+.card{background:var(--card);border-radius:12px;padding:14px 16px}
+.card .v{font-size:22px;font-weight:700;color:var(--good)} .card .k{color:var(--dim);font-size:11.5px}
+.card.alt .v{color:var(--acc)}
+h2{font-size:14px;margin:20px 0 10px;color:var(--dim);font-weight:600}
+.bar{display:flex;align-items:center;gap:10px;margin:6px 0}
+.bar .name{width:210px;color:var(--dim);font-size:12px;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar .track{flex:1;background:var(--card2);border-radius:6px;height:16px}
+.bar .fill{height:100%;border-radius:6px;background:linear-gradient(90deg,#2d7d46,var(--good))}
+.bar .val{width:140px;font-size:12px}
+.months{display:flex;align-items:flex-end;gap:5px;height:110px}
+.mcol{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:3px}
+.mcol .stick{width:100%;max-width:44px;background:linear-gradient(180deg,var(--acc),#2a5f9e);border-radius:4px 4px 0 0}
+.mcol .lb{font-size:10px;color:var(--dim)}
+.row{background:var(--card);border-radius:10px;padding:12px 16px;margin:8px 0;cursor:pointer}
+.row:hover{background:var(--card2)}
+.row .id{font-family:Consolas,monospace;font-size:13px;color:var(--acc)}
+.row .meta{color:var(--dim);font-size:12px;margin-top:2px}
+.detail{background:var(--card);border-radius:10px;padding:16px 20px;margin:10px 0;display:none}
+.detail.show{display:block}
+.kv{display:grid;grid-template-columns:180px 1fr;gap:4px 12px;font-size:13px}
+.kv b{color:var(--dim);font-weight:500}
+input,select,button.act{background:var(--card2);border:1px solid #2a3342;color:var(--ink);border-radius:8px;padding:8px 12px;font-size:13px;outline:none}
+button.act{cursor:pointer} button.act:hover{border-color:var(--acc)}
+button.pri{background:var(--acc);border-color:var(--acc);color:#fff}
+button.warn{background:#7a4a12;border-color:var(--warn)}
+.migbox{background:var(--card);border-radius:12px;padding:18px 20px;margin-top:12px}
+.flex{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0}
+ul.imm{color:var(--warn);font-size:12.5px;padding-left:18px}
+.ev{display:flex;gap:10px;align-items:baseline;padding:7px 12px;border-bottom:1px solid #1d2430;font-size:12.5px}
+.ev .t{color:var(--dim);font-family:Consolas,monospace;font-size:11.5px;min-width:150px}
+.dot2{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.ok{background:var(--good)} .err{background:var(--bad)} .sw{background:var(--warn)} .warm{background:var(--acc)}
+.tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;background:var(--card2);color:var(--dim);margin-left:6px}
+.note{color:var(--dim);font-size:12px;margin-top:8px}
+#toast{position:fixed;bottom:24px;right:24px;background:var(--card);border:1px solid #2a3342;border-radius:10px;padding:12px 18px;display:none;max-width:420px;font-size:13px;box-shadow:0 8px 30px rgba(0,0,0,.5)}
+</style></head><body>
+<header><span class="dot"></span><h1>Context Vault 控制台</h1>
+<span id="status">连接中…</span>
+<span style="flex:1"></span>
+<span style="color:var(--dim);font-size:12px">本地回环 · 数据不出机器</span></header>
+<nav>
+<button data-t="ov" class="on">概览</button>
+<button data-t="snap">快照资产</button>
+<button data-t="mig">迁移工作台</button>
+<button data-t="probe">哨兵时间线</button>
+</nav>
+<main>
+<section id="t-ov">
+  <div class="cards" id="ov-cards"></div>
+  <h2>月度节省走势</h2><div class="months" id="ov-months"></div>
+  <h2>按模型节省 (明细账)</h2><div id="ov-models"></div>
+</section>
+<section id="t-snap" style="display:none">
+  <div class="flex"><input id="snap-q" placeholder="搜索全部历史会话 (如 MergePilot / 时序预测)" style="flex:1;min-width:280px">
+  <button class="act" onclick="snapSearch()">搜索</button>
+  <button class="act" onclick="loadSnaps()">最近列表</button></div>
+  <div id="snap-list"><div class="note">加载中…</div></div>
+  <div class="detail" id="snap-detail"></div>
+</section>
+<section id="t-mig" style="display:none">
+  <div class="migbox">
+    <b>把历史会话迁移到另一个 agent</b>
+    <div class="flex" style="margin-top:12px">
+      <select id="mig-sid" style="min-width:280px"></select>
+      <select id="mig-target"><option value="codex">→ Codex</option><option value="claude">→ Claude Code</option></select>
+      <button class="act pri" onclick="migPreview()">预览</button>
+    </div>
+    <div id="mig-preview"></div>
+    <div class="flex" id="mig-actions" style="display:none">
+      <button class="act" onclick="migGo(false)">生成到 outbox (安全)</button>
+      <button class="act warn" onclick="migGo(true)">写入真实会话目录</button>
+    </div>
+    <div class="note">stateless replay 语义: 压缩边界后为活上下文, 摘要注入为新会话首条消息。写入真实目录后用 codex resume / claude --resume 恢复。</div>
+  </div>
+</section>
+<section id="t-probe" style="display:none">
+  <div class="flex"><button class="act pri" onclick="probeNow()">立即探测上游</button>
+  <span class="note" id="probe-last"></span></div>
+  <div id="probe-list" style="margin-top:10px"></div>
+</section>
+</main>
+<div id="toast"></div>
+<script>
+const $=s=>document.querySelector(s);
+const usd=v=>v==null?"-":"$"+(+v).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
+const num=v=>(+v||0).toLocaleString();
+function toast(m){const t=$("#toast");t.textContent=m;t.style.display="block";setTimeout(()=>t.style.display="none",5000)}
+async function api(p,opt){const r=await fetch(p,opt);if(!r.ok)throw new Error((await r.json().catch(()=>({}))).error||r.status);return r.json()}
+document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{
+  document.querySelectorAll("nav button").forEach(x=>x.classList.remove("on"));b.classList.add("on");
+  ["ov","snap","mig","probe"].forEach(t=>$("#t-"+t).style.display=t===b.dataset.t?"":"none");
+  if(b.dataset.t==="mig"&&!$("#mig-sid").options.length)fillMig();
+  if(b.dataset.t==="probe"&&!$("#probe-list").children.length)loadProbe();
+});
+async function boot(){
+  try{const h=await api("/healthz");
+    $("#status").textContent="服务正常 · "+h.snapshots+" 快照 · "+num(h.terms)+" 索引词项";}catch(e){$("#status").textContent="服务异常: "+e}
+  loadOv();loadSnaps();
+}
+async function loadOv(){
+  try{const d=await api("/ledger");const lt=d.lifetime||{};
+    const total=(lt.saved_usd||0)+(lt.cache_savings_usd||0);
+    $("#ov-cards").innerHTML=
+      card(usd(total),"累计节省 (压缩+缓存)")+card(usd(lt.cache_savings_usd),"缓存节省","alt")+
+      card(num(lt.total_input_tokens),"历史总输入 tokens","alt")+card(num(lt.tokens_saved),"压缩节省 tokens");
+    const mx=Math.max(...d.monthly.map(m=>m.c||0),1);
+    $("#ov-months").innerHTML=d.monthly.map(m=>'<div class="mcol"><div class="stick" style="height:'+
+      Math.max(100*(m.c||0)/mx,3)+'%" title="'+usd(m.c)+'"></div><div class="lb">'+m.m.slice(2)+'</div></div>').join("")||'<div class="note">无月度数据</div>';
+    const mm=Math.max(...d.by_model.map(m=>m.c||0),1);
+    $("#ov-models").innerHTML=d.by_model.map(m=>'<div class="bar"><div class="name">'+m.model+
+      '</div><div class="track"><div class="fill" style="width:'+Math.round(100*(m.c||0)/mm)+'%"></div></div><div class="val">'+
+      usd(m.c)+" · "+num(m.t)+" tok</div></div>").join("")||'<div class="note">无明细</div>';
+  }catch(e){$("#ov-cards").innerHTML='<div class="note">账本为空 — 先运行 cv ledger import-headroom</div>'}
+}
+const card=(v,k,cls="")=>'<div class="card '+cls+'"><div class="v">'+v+'</div><div class="k">'+k+"</div></div>";
+async function loadSnaps(){
+  const rows=await api("/recent?limit=30").catch(()=>[]);
+  $("#snap-list").innerHTML=rows.map(r=>'<div class="row" onclick="snapDetail(\\''+r.sid+'\\')">'+
+    '<span class="id">'+r.sid+"</span><span class='tag'>"+(r.agent||"?")+"</span><span class='tag'>"+
+    num(r.blocks)+" 块</span><span class='tag'>"+num(r.tokens_in)+" 入 tok</span>"+
+    (r.completeness&&r.completeness!=="full"?'<span class="tag" style="color:var(--warn)">'+r.completeness+"</span>":"")+
+    '<div class="meta">'+(r.cwd||"?")+" · "+String(r.created_at||"").slice(0,19)+"</div></div>").join("")
+    ||'<div class="note">vault 为空 — cv export 导入会话</div>';
+  fillMig();
+}
+async function snapSearch(){
+  const q=$("#snap-q").value.trim();if(!q)return loadSnaps();
+  const d=await api("/search?q="+encodeURIComponent(q)+"&limit=20");
+  $("#snap-list").innerHTML=d.hits.map(h=>'<div class="row" onclick="snapDetail(\\''+h.sid+'\\')">'+
+    '<span class="id">'+h.sid+"</span><span class='tag'>"+h.agent+"</span><span class='tag'>得分 "+h.score+
+    "</span><div class='meta'>"+(h.cwd||"?")+" · "+String(h.created_at||"").slice(0,10)+"</div></div>").join("")
+    ||'<div class="note">未命中: '+q+"</div>";
+}
+async function snapDetail(sid){
+  const d=await api("/snapshot?id="+sid);const p=await api("/preview?id="+sid).catch(()=>({}));
+  const el=$("#snap-detail");el.classList.add("show");
+  el.innerHTML="<b>"+sid+"</b><div class='kv' style='margin-top:8px'>"+
+    kv("来源",d.capture.agent+" ("+d.capture.source_format+")")+
+    kv("cwd",d.capture.cwd||"-")+kv("完整性",d.capture.completeness)+
+    kv("token 入/出/cache读",num(d.stats.tokens_in)+" / "+num(d.stats.tokens_out)+" / "+num(d.stats.cache_read))+
+    kv("块分布",Object.entries(d.block_dist).map(([k,v])=>k+"×"+v).join("  "))+
+    (p.live_blocks!=null?kv("活上下文",p.live_blocks+" 块 · ~"+num(p.live_tokens_est)+" tok"+(p.compactions?" · "+p.compactions+" 次压缩后":"")):"")+
+    "</div>";
+  el.scrollIntoView({behavior:"smooth"});
+}
+const kv=(k,v)=>"<b>"+k+"</b><span>"+(v==null?"-":v)+"</span>";
+async function fillMig(){
+  const rows=await api("/recent?limit=50").catch(()=>[]);
+  $("#mig-sid").innerHTML=rows.map(r=>'<option value="'+r.sid+'">'+r.sid.slice(0,18)+"… · "+r.agent+" · "+
+    num(r.blocks)+" 块 · "+String(r.created_at||"").slice(0,10)+"</option>").join("");
+}
+async function migPreview(){
+  const id=$("#mig-sid").value;if(!id)return toast("无快照可选");
+  const p=await api("/preview?id="+id);
+  const imm=[];
+  if(p.no_assistant)imm.push("assistant 文本缺失 (源转录不含) — 目标会话只有 user/tool 视角");
+  if(p.thinking)imm.push("thinking×"+p.thinking+" — 仅明文摘要可迁移");
+  if(p.agent_messages)imm.push("agent_message×"+p.agent_messages+" — 降级为标注文本");
+  if(p.dropped_source)imm.push("源被丢弃行 ×"+p.dropped_source+" (无移植语义)");
+  $("#mig-preview").innerHTML="<div class='kv'>"+
+    kv("活上下文",p.live_blocks+" 块 (~"+num(p.live_tokens_est)+" tok)"+(p.compactions?" · "+p.compactions+" 次压缩边界后":""))+
+    kv("活上下文构成",Object.entries(p.live_dist).map(([k,v])=>k+"×"+v).join("  "))+
+    kv("历史累计 token 入",num(p.history_tokens_in))+"</div>"+
+    "<ul class='imm'>"+(imm.length?imm.map(i=>"<li>"+i+"</li>").join(""):"<li style='color:var(--good)'>(无可迁移性损失)</li>")+"</ul>";
+  $("#mig-actions").style.display="flex";
+}
+async function migGo(apply){
+  const id=$("#mig-sid").value,t=$("#mig-target").value;
+  if(apply&&!confirm("确认写入真实会话目录?\\n"+id+" → "+t+"\\n(目标 agent 下次 resume 可见)"))return;
+  try{const r=await api("/migrate",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({id:id,target:t,apply:apply})});
+    toast((r.applied?"已写入会话目录: ":"已生成到 outbox: ")+r.dest.split("\\").pop().split("/").pop()+
+      " ("+r.lines+" 行"+(r.dropped?", 丢弃 "+r.dropped:"")+")"+(r.new_sid?" · session "+r.new_sid.slice(0,8):""));
+  }catch(e){toast("迁移失败: "+e.message)}
+}
+async function loadProbe(){
+  const rows=await api("/probe_events?limit=100").catch(()=>[]);
+  $("#probe-last").textContent=rows.length?"最近事件: "+String(rows[0].ts).slice(0,19):"";
+  const cls=s=>s==="ok"?"ok":(s==="warm"?"warm":(s==="switch"?"sw":"err"));
+  $("#probe-list").innerHTML=rows.map(r=>'<div class="ev"><span class="dot2 '+cls(r.status)+'"></span>'+
+    '<span class="t">'+String(r.ts).slice(0,19)+"</span><b style='min-width:90px'>"+r.profile+"</b><span style='color:var(--dim)'>"+
+    r.status+(r.http_code?" · http "+r.http_code:"")+(r.latency_ms?" · "+r.latency_ms+"ms":"")+"</span>"+
+    (r.missing_models&&r.missing_models!=="[]"?'<span style="color:var(--bad)">消失: '+r.missing_models+"</span>":"")+"</div>").join("")
+    ||'<div class="note">暂无事件 — 点"立即探测"或等哨兵周期</div>';
+}
+async function probeNow(){
+  toast("探测中…");
+  try{const r=await api("/probe",{method:"POST"});
+    toast(r.alerts&&r.alerts.length?JSON.stringify(r.alerts):"探测完成: 全部上游正常");loadProbe();
+  }catch(e){toast("探测失败: "+e.message)}
+}
+boot();setInterval(loadProbe,30000);
+</script></body></html>"""
+
+
+class _KeyStub:
+    key = None
+
+
 def build_vault_server(vault: Path, port: int):
     """构建热索引 HTTP 服务 (不阻塞); cmd_serve 与 Pro 托盘共用, 避免实现漂移。"""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1154,9 +1377,59 @@ def build_vault_server(vault: Path, port: int):
             u = urlparse(self.path)
             q = {k: v[0] for k, v in parse_qs(u.query).items()}
             try:
+                if u.path == "/":
+                    body = CONSOLE_HTML.encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 if u.path == "/healthz":
                     return self._json({"service": "context-vault", "status": "ok",
                                        "snapshots": len(idx.envs), "terms": len(idx.index)})
+                if u.path == "/probe_events":
+                    conn = db(vault)
+                    rows = conn.execute("SELECT ts,profile,status,http_code,latency_ms,models,missing_models"
+                                        " FROM probe_events ORDER BY id DESC LIMIT ?",
+                                        (int(q.get("limit", 100)),)).fetchall()
+                    return self._json([dict(r) for r in rows])
+                if u.path == "/ledger":
+                    conn = db(vault)
+                    lt = conn.execute("SELECT tokens_saved, cost_usd, raw FROM ledger_events"
+                                      " WHERE source='headroom-lifetime'").fetchone()
+                    by_model = conn.execute("SELECT model, COUNT(*) n, SUM(tokens_saved) t, SUM(cost_usd) c"
+                                            " FROM ledger_events WHERE kind='compression'"
+                                            " GROUP BY model ORDER BY c DESC").fetchall()
+                    monthly = conn.execute("SELECT substr(occurred_at,1,7) m, SUM(cost_usd) c"
+                                           " FROM ledger_events WHERE kind='compression'"
+                                           " GROUP BY m ORDER BY m").fetchall()
+                    raw = json.loads(lt["raw"]) if lt else {}
+                    return self._json({"lifetime": {"tokens_saved": lt["tokens_saved"] if lt else 0,
+                                                    "saved_usd": lt["cost_usd"] if lt else 0, **raw},
+                                       "by_model": [dict(r) for r in by_model],
+                                       "monthly": [dict(r) for r in monthly]})
+                if u.path == "/preview":
+                    env2 = idx.envs.get(q.get("id", ""))
+                    if not env2:
+                        return self._json({"error": "not found"}, 404)
+                    from collections import Counter
+                    blocks = env2["conversation"]
+                    dist = dict(Counter(b["type"] for b in blocks))
+                    live, comp = live_context(blocks)
+                    live_dist = dict(Counter(b["type"] for b in live))
+                    s = env2["stats"]
+                    return self._json({"id": q.get("id"), "agent": env2["capture"].get("agent"),
+                                       "completeness": env2["capture"].get("completeness"),
+                                       "cwd": env2["capture"].get("cwd"),
+                                       "block_dist": dist, "live_blocks": len(live),
+                                       "live_dist": live_dist, "compactions": dist.get("compaction", 0),
+                                       "live_tokens_est": estimate_tokens(live),
+                                       "history_tokens_in": s["tokens_in"],
+                                       "thinking": dist.get("thinking", 0),
+                                       "agent_messages": dist.get("agent_message", 0),
+                                       "dropped_source": s["blocks_dropped"],
+                                       "no_assistant": env2["capture"].get("completeness") == "no_assistant_text"})
                 if u.path == "/search":
                     idx.rebuild()
                     return self._json(idx.search(q.get("q", ""), int(q.get("limit", 5))))
@@ -1178,8 +1451,31 @@ def build_vault_server(vault: Path, port: int):
                     return self._json({"id": q.get("id"), "capture": env["capture"],
                                        "stats": env["stats"], "block_dist": dist})
                 self._json({"error": "unknown route",
-                            "routes": ["/healthz", "/search?q=", "/context?q=",
-                                       "/recent", "/stats", "/snapshot?id="]}, 404)
+                            "routes": ["/", "/healthz", "/search?q=", "/context?q=", "/preview?id=",
+                                       "/recent", "/stats", "/snapshot?id=", "/ledger", "/probe_events",
+                                       "POST /migrate", "POST /probe"]}, 404)
+            except Exception as e:
+                self._json({"error": str(e)}, 500)
+
+        def do_POST(self):
+            import urllib.parse as _up
+            u = _up.urlparse(self.path)
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
+                if u.path == "/migrate":
+                    r = do_import(vault, body.get("id", ""), body.get("target", "codex"),
+                                  bool(body.get("apply")))
+                    return self._json(r)
+                if u.path == "/probe":
+                    baseline_p = vault / "probe_baseline.json"
+                    baseline = json.loads(baseline_p.read_text(encoding="utf-8")) if baseline_p.exists() else {}
+                    alerts = probe_once(vault, load_profiles(), resolve_key(_KeyStub()), baseline,
+                                        verbose=False)
+                    baseline_p.write_text(json.dumps(baseline, ensure_ascii=False, indent=1),
+                                          encoding="utf-8")
+                    return self._json({"alerts": alerts})
+                self._json({"error": "unknown route"}, 404)
             except Exception as e:
                 self._json({"error": str(e)}, 500)
 
