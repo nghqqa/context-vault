@@ -1092,6 +1092,148 @@ def cmd_sync(args):
           f" · 空会话 {n_empty} | vault 总快照 {total} | 耗时 {time.time()-t0:.1f}s")
 
 
+# ------------------------------------------------- memory: M3 记忆层 (零依赖规则引擎 v0)
+
+MEMORY_TABLE = """
+CREATE TABLE IF NOT EXISTS memory_items(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, snapshot_id TEXT,
+  kind TEXT, content TEXT, project TEXT,
+  hits INTEGER DEFAULT 0, last_used TEXT);
+CREATE INDEX IF NOT EXISTS idx_memory_snap ON memory_items(snapshot_id);
+CREATE INDEX IF NOT EXISTS idx_memory_kind ON memory_items(kind);
+"""
+
+# 提取规则 v0: 诚实规则式, 不假装语义理解; 外部引擎 (Supermemory/Graphiti) 走
+# MemoryEngine 接口位 (高级语义记忆 = Pro 空间), 内置引擎为零依赖默认实现.
+DECISION_MARKERS = ("决定", "决策", "采用", "方案是", "结论是", "结论：", "选型",
+                    "我们选", "定了", "agreed", "we decide", "let's go with",
+                    "chose", "final answer", "the plan is")
+PREFERENCE_MARKERS = ("不要", "必须", "总是", "记住", "以后都", "每次都",
+                      "never ", "always ", "remember to", "from now on")
+MAX_MEMORY_PER_SNAPSHOT = 40
+
+
+def extract_memories(env: dict) -> list:
+    """从单个快照提取记忆条目: decision (assistant 决策句) / summary (压缩摘要)
+    / preference (user 指令模式)。每条带块索引溯源 (raw 里 idx)。"""
+    items, sid = [], env.get("_sid") or "?"
+    project = None
+    cwd = env["capture"].get("cwd")
+    if cwd:
+        project = str(cwd).rstrip("\\").rsplit("\\", 1)[-1] or str(cwd)
+    seen = set()
+    for i, b in enumerate(env["conversation"]):
+        kind, text = None, ""
+        if b["type"] == "compaction":
+            kind, text = "summary", b.get("summary", "")
+        elif b["type"] == "text" and b.get("role") == "assistant":
+            text = b.get("content", "")
+            kind = "decision" if any(m in text.lower() for m in DECISION_MARKERS) else None
+        elif b["type"] == "text" and b.get("role") == "user":
+            text = b.get("content", "")
+            kind = "preference" if any(m in text.lower() for m in PREFERENCE_MARKERS) else None
+        if not kind or not text:
+            continue
+        # 句级切分: 只取命中标记的句子 (±上下文一句), 控制颗粒度
+        for sent in text.replace("\r", "").split("\n"):
+            s = sent.strip()
+            if not (12 <= len(s) <= 400):
+                continue
+            low = s.lower()
+            if kind == "summary" or any(m in low for m in DECISION_MARKERS) \
+               or (kind == "preference" and any(m in low[:24] for m in PREFERENCE_MARKERS)):
+                key = s[:120]
+                if key in seen:
+                    continue
+                seen.add(key)
+                items.append({"snapshot_id": sid, "kind": kind, "content": s,
+                              "project": project, "block_idx": i})
+        if len(items) >= MAX_MEMORY_PER_SNAPSHOT:
+            break
+    return items
+
+
+def cmd_memory(args):
+    vault = vault_dir(args)
+    conn = db(vault)
+    conn.executescript(SCHEMA + MEMORY_TABLE)
+    if args.memory_cmd == "extract":
+        snaps = load_all_snapshots_pub(vault)
+        if args.snapshot:
+            snaps = [e for e in snaps if e["_sid"] == args.snapshot]
+        total = 0
+        for env in snaps:
+            conn.execute("DELETE FROM memory_items WHERE snapshot_id=?", (env["_sid"],))
+            for it in extract_memories(env):
+                conn.execute("INSERT INTO memory_items(created_at,snapshot_id,kind,content,project)"
+                             " VALUES(?,?,?,?,?)",
+                             (now_iso(), it["snapshot_id"], it["kind"], it["content"], it["project"]))
+                total += 1
+        conn.commit()
+        by = conn.execute("SELECT kind, COUNT(*) FROM memory_items GROUP BY kind").fetchall()
+        print(f"记忆提取完成: {total} 条 (来自 {len(snaps)} 快照) · "
+              + " · ".join(f"{r[0]}×{r[1]}" for r in by))
+    elif args.memory_cmd == "search":
+        terms = tokenize(args.query)
+        rows = conn.execute("SELECT * FROM memory_items").fetchall()
+        scored = []
+        for r in rows:
+            low = r["content"].lower()
+            n = sum(low.count(t) for t in terms)
+            if n:
+                scored.append((n + (3 if r["kind"] == "summary" else 0), r))
+        scored.sort(key=lambda x: -x[0])
+        if not scored:
+            print(f"无相关记忆: {args.query}")
+            return
+        for n, r in scored[:args.limit]:
+            print(f"[{r['kind']:<10}] {r['content'][:100]}  ({r['project'] or '?'})")
+            conn.execute("UPDATE memory_items SET hits=hits+1, last_used=? WHERE id=?",
+                         (now_iso(), r["id"]))
+        conn.commit()
+    elif args.memory_cmd == "list":
+        q = "SELECT kind, COUNT(*) n FROM memory_items GROUP BY kind"
+        for r in conn.execute(q):
+            print(f"  {r[0]:<10} ×{r[1]}")
+        for r in conn.execute("SELECT * FROM memory_items ORDER BY id DESC LIMIT ?", (args.limit,)):
+            print(f"[{r['kind']:<10}] {r['content'][:90]}  ({r['project'] or '?'})")
+
+
+def load_all_snapshots_pub(vault: Path) -> list:
+    out = []
+    for f in sorted((vault / "snapshots").glob("cv_*.json")):
+        try:
+            env = json.loads(f.read_text(encoding="utf-8"))
+            env["_sid"] = f.stem
+            out.append(env)
+        except (ValueError, OSError):
+            continue
+    return out
+
+
+def memory_search_api(vault: Path, query: str, limit: int = 8) -> list:
+    """serve /memory 与 MCP vault_remember 共用。"""
+    conn = db(vault)
+    conn.executescript(SCHEMA + MEMORY_TABLE)
+    terms = tokenize(query)
+    rows = conn.execute("SELECT * FROM memory_items").fetchall()
+    scored = []
+    for r in rows:
+        low = r["content"].lower()
+        n = sum(low.count(t) for t in terms)
+        if n:
+            scored.append((n + (3 if r["kind"] == "summary" else 0), r))
+    scored.sort(key=lambda x: -x[0])
+    out = []
+    for n, r in scored[:limit]:
+        out.append({"kind": r["kind"], "content": r["content"], "project": r["project"],
+                    "snapshot": r["snapshot_id"], "score": n})
+        conn.execute("UPDATE memory_items SET hits=hits+1, last_used=? WHERE id=?",
+                     (now_iso(), r["id"]))
+    conn.commit()
+    return out
+
+
 # ------------------------------------------------- mcp install: 一键接入客户端
 
 def _mcp_cmd_parts(vault: Path) -> tuple:
@@ -2148,6 +2290,10 @@ def build_vault_server(vault: Path, port: int):
                 if u.path == "/healthz":
                     return self._json({"service": "context-vault", "status": "ok",
                                        "snapshots": len(idx.envs), "terms": len(idx.index)})
+                if u.path == "/memory":
+                    return self._json({"query": q.get("q", ""),
+                                       "memories": memory_search_api(vault, q.get("q", ""),
+                                                                     int(q.get("limit", 8)))})
                 if u.path == "/probe_events":
                     conn = db(vault)
                     rows = conn.execute("SELECT ts,profile,status,http_code,latency_ms,models,missing_models"
@@ -2324,6 +2470,19 @@ def main(argv=None):
     sy = sub.add_parser("sync", help="自动入库: 扫描全部本地会话源, 增量导出 (mtime 水位 + lineage)")
     sy.add_argument("--root", action="append", help="额外扫描目录 (可多次)")
     sy.set_defaults(func=cmd_sync)
+
+    mem = sub.add_parser("memory", help="M3 记忆层: 从快照提取跨会话记忆")
+    msub = mem.add_subparsers(dest="memory_cmd", required=True)
+    me = msub.add_parser("extract", help="提取决策/摘要/偏好记忆 (幂等, 重提先删旧)")
+    me.add_argument("--snapshot", help="只处理单个快照")
+    me.set_defaults(func=cmd_memory)
+    ms = msub.add_parser("search", help="检索记忆")
+    ms.add_argument("query")
+    ms.add_argument("--limit", type=int, default=8)
+    ms.set_defaults(func=cmd_memory)
+    ml = msub.add_parser("list", help="最近记忆")
+    ml.add_argument("--limit", type=int, default=20)
+    ml.set_defaults(func=cmd_memory)
 
     mc = sub.add_parser("mcp", help="MCP 记忆后端一键接入客户端")
     msub = mc.add_subparsers(dest="mcp_cmd", required=True)

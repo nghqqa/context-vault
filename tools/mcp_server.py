@@ -290,9 +290,35 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "id": {"type": "string", "description": "快照 id (cv_ 开头)"}},
          "required": ["id"]}},
+    {"name": "vault_remember", "description": "检索跨会话的长期记忆 (历史决策/项目结论/用户偏好, 由快照自动提取) — 新任务开始时先问一句'关于 X 我们之前定过什么'",
+     "inputSchema": {"type": "object", "properties": {
+         "query": {"type": "string", "description": "主题关键词 (如 'RBAC 方案' / 'dataset1 调参')"},
+         "limit": {"type": "integer", "default": 6}}, "required": ["query"]}},
     {"name": "vault_stats", "description": "token 账本汇总 (累计节省/缓存节省/快照数)",
      "inputSchema": {"type": "object", "properties": {}}},
 ]
+
+
+def t_remember(vault: Path, query: str, limit: int) -> str:
+    try:  # 常驻服务热路径
+        r = _svc_get(f"/memory?q={urllib.parse.quote(query)}&limit={limit}")
+        ms = r["memories"]
+    except Exception:
+        ms = _local_memory(vault, query, limit)
+    if not ms:
+        return f"vault 中没有关于「{query}」的记忆。可先运行: python tools/cv.py memory extract"
+    lines = [f"跨会话记忆 ({query}) — 来自 context-vault 历史快照的自动提取:"]
+    for m in ms:
+        lines.append(f"  [{m['kind']}] {m['content'][:200]}\n"
+                     f"      (项目 {m.get('project') or '?'} · 快照 {m.get('snapshot', '')[:18]})")
+    lines.append("引用时注明来源快照; 记忆为规则提取, 关键决策请回读原快照核实。")
+    return "\n".join(lines)[:9000]
+
+
+def _local_memory(vault: Path, query: str, limit: int) -> list:
+    sys.path.insert(0, str(Path(__file__).parent))
+    import cv as _cv
+    return _cv.memory_search_api(vault, query, limit)
 
 
 def dispatch(name: str, args_dict: dict, vault: Path) -> str:
@@ -308,6 +334,8 @@ def dispatch(name: str, args_dict: dict, vault: Path) -> str:
         return t_recent(vault, int(args_dict.get("limit", 5)))
     if name == "vault_snapshot":
         return t_snapshot(vault, args_dict.get("id", ""))
+    if name == "vault_remember":
+        return t_remember(vault, args_dict.get("query", ""), int(args_dict.get("limit", 6)))
     if name == "vault_stats":
         return t_stats(vault)
     raise ValueError(f"未知工具: {name}")

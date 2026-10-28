@@ -319,3 +319,40 @@ def test_owned_stats_zero_external(isolated):
     assert own["tokens_in"] == 100 and own["cache_read"] == 60
     assert own["cache_hit_rate"] == 0.6
     assert own["by_agent"][0]["agent"] == "codex"
+
+
+# ---------------- M3 记忆层 ----------------
+
+def test_memory_extract_and_search(isolated, monkeypatch):
+    _, vault = isolated
+    env = make_env(tmp_path_maker(), "codex-rollout")
+    env["conversation"].append({"type": "text", "role": "assistant",
+                                "content": "结论：我们决定采用单实例自托管方案", "ts": ""})
+    env["conversation"].insert(0, {"type": "compaction", "summary": "早前讨论了缓存策略并确定 TTL=300",
+                                   "replaced_blocks": [0, 0], "ts": ""})
+    env["conversation"].append({"type": "text", "role": "user",
+                                "content": "记住：以后所有提交都必须带签名", "ts": ""})
+    sid = "cv_memtest1"
+    (vault / "snapshots").mkdir(exist_ok=True)
+    (vault / "snapshots" / f"{sid}.json").write_text(json.dumps(env), encoding="utf-8")
+    import cv as _cv
+    items = _cv.extract_memories({**env, "_sid": sid, "capture": {"cwd": "D:\proj"}})
+    kinds = {i["kind"] for i in items}
+    assert kinds == {"summary", "decision", "preference"}
+    dec = [i for i in items if i["kind"] == "decision"]
+    assert any("单实例自托管" in i["content"] for i in dec)
+    assert all(i["project"] == "proj" for i in items)
+
+    conn = _cv.db(vault)
+    conn.executescript(_cv.SCHEMA + _cv.MEMORY_TABLE)
+    for it in items:
+        conn.execute("INSERT INTO memory_items(created_at,snapshot_id,kind,content,project)"
+                     " VALUES(?,?,?,?,?)", ("t", sid, it["kind"], it["content"], it["project"]))
+    conn.commit()
+    hits = _cv.memory_search_api(vault, "自托管 方案", 5)
+    assert hits and any("单实例" in h["content"] for h in hits)
+    assert all(h["snapshot"] == sid for h in hits)
+
+
+def tmp_path_maker():
+    return Path(__file__).parent  # make_env 只用 tmp 做中转, 任意可写目录均可

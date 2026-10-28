@@ -80,7 +80,11 @@ claude mcp add context-vault -s user -- python /path/to/tools/mcp_server.py --va
 # Codex / Cursor 等任何 MCP 客户端同理配置 stdio 命令
 ```
 
-提供 5 个工具：`vault_search`（全库搜索）、`vault_context`（记忆检索——新会话开始时拉取相关历史上下文）、`vault_recent`、`vault_snapshot`、`vault_stats`（账本）。零第三方依赖。
+提供 6 个工具：`vault_search`（全库搜索）、`vault_context`（相关上下文摘录）、**`vault_remember`（跨会话长期记忆——历史决策/项目结论/用户偏好，新任务开始时先问"关于 X 我们之前定过什么"）**、`vault_recent`、`vault_snapshot`、`vault_stats`。零第三方依赖。
+
+# 跨会话记忆 (M3): 从历史快照自动提取决策/摘要/偏好
+python tools/cv.py memory extract         # 176 快照实测提取 338 条记忆
+python tools/cv.py memory search "RBAC 方案"
 
 一键接入全部客户端（claude CLI / Codex config.toml / Cursor mcp.json，写入前自动备份）：
 
