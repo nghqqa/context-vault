@@ -89,6 +89,26 @@ claude mcp add context-vault -s user -- python /path/to/tools/mcp_server.py --va
 2. **诚实优于完整**——快照带 `completeness` 标记（如 Claude 转录不含 assistant 文本就明说）；迁移 diff 列出不可迁移项清单，不假装无损。
 3. **stateless replay 语义**——服务端状态不可搬运，压缩边界之后才是活上下文，摘要注入为新会话首条消息。
 
+## 依赖与数据源（架构边界）
+
+**Context Vault 的核心功能零外部依赖**（纯 Python 标准库，不需要 headroom）：
+
+- 会话快照资产库（export / list / diff / fork）
+- 双向迁移（Claude Code ↔ Codex）
+- MCP 记忆后端 + Web 控制台 + 热索引服务
+- 快照自带的 token 账本钩子（直接提取自 Codex `token_usage_record` 等源文件）
+
+**以下功能是 headroom（通路层代理）的增强，没有它也能用替代配置：**
+
+| 功能 | headroom 提供 | 无 headroom 的替代 |
+|---|---|---|
+| 省钱账本导入 | `~/.headroom/savings_events.jsonl` + `proxy_savings.json` | 暂无（路线图：直连 relay usage API） |
+| 上游探测/预热 的 relay 发现 | `switcher-profiles.json` | 环境变量 `CV_RELAY_PROFILES='[{"id":"x","openai_api_url":"https://…","default_model":"…"}]'` |
+| 探测/预热 的认证 | `headroom-auth-token.ps1` 自动取 token | 环境变量 `CV_RELAY_KEY` |
+| 切换守望 | 监听 Switcher 写的 `upstream-profile.json` | 任何程序写该文件均触发；或用 `cv watch --file` 监听任意配置 |
+
+架构铁律：**headroom 卸载/停用，Vault 资产一个字节不丢**，仅上表增强项降级。账本历史一经导入即永久归属 vault。
+
 ## 与现有工具的关系
 
 - **txcript / session-migrate / Codex `/import`**：转换器，一次性搬运。Context Vault 的快照格式与 txcript 六块模型有[互操作映射](docs/snapshot-format.md#4-与-txcript-六块模型的映射互操作承诺)；需要更多 harness（Cursor/opencode 等）时，它们是 Vault 的上游适配器。
