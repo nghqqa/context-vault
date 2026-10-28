@@ -892,7 +892,84 @@ def fetch_relay_usage(base: str, key: str, start: str, end: str) -> dict:
         raise SystemExit(f"billing API {e.code}: {e.reason}")
 
 
+def fetch_relay_web_logs(base: str, token: str, user_id: str | None,
+                           path: str, start_ts: int, page_size: int = 100) -> list:
+    """new-api / one-api 系 web 消费日志 (/api/log/self, 系统访问令牌认证)。
+    999555999 前端为 Next.js(neko 系), 实际路径若不同可用 --log-path 覆盖。"""
+    base = base.rstrip("/")
+    out, page = [], 0
+    while True:
+        url = f"{base}{path}?p={page}&page_size={page_size}&type=0&start_timestamp={start_ts}"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "ContextVault/0.1", "Authorization": token,
+            **({"New-Api-User": user_id} if user_id else {})})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        items = (data.get("data") or {}).get("items") or data.get("data") or []
+        if not isinstance(items, list) or not items:
+            break
+        out += items
+        if len(items) < page_size:
+            break
+        page += 1
+    return out
+
+
+QUOTA_PER_USD = 500000  # new-api 默认换算; 各站倍率不同, 入账标"估算"
+
+
 def cmd_ledger_import_relay(args):
+    vault = vault_dir(args)
+    conn = db(vault)
+    conn.executescript(SCHEMA)
+    key = resolve_key(args)
+    if args.mode == "web":
+        token = args.token or os.environ.get("CV_RELAY_WEB_TOKEN")
+        if not token:
+            raise SystemExit("web 模式需要系统访问令牌: --token 或 CV_RELAY_WEB_TOKEN"
+                             "(中转站 web 个人设置里生成; 999555999 面板待提供令牌后对号入座)")
+        wm_p = vault / "relay_watermark.json"
+        wm = json.loads(wm_p.read_text(encoding="utf-8")) if wm_p.exists() else {}
+        last_ts = int(wm.get(args.url, 0))
+        logs = fetch_relay_web_logs(args.url, token, args.user_id, args.log_path, last_ts)
+        n = 0
+        for item in logs:
+            ts = int(item.get("created_at", 0))
+            quota = int(item.get("quota", 0) or 0)
+            conn.execute("INSERT INTO ledger_events(source,occurred_at,kind,model,provider,client,"
+                         "tokens_saved,cost_usd,snapshot_id,raw) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                         ("relay-web", dt.datetime.fromtimestamp(ts).astimezone().isoformat(timespec="seconds")
+                          if ts else now_iso(), "relay_log", item.get("model_name"), args.url,
+                          item.get("channel") or None, 0, round(quota / QUOTA_PER_USD, 6), None,
+                         json.dumps({"prompt_tokens": item.get("prompt_tokens"),
+                                     "completion_tokens": item.get("completion_tokens"),
+                                     "quota": quota, "use_time": item.get("use_time"),
+                                     "cost_basis": "quota/500k 估算"}, ensure_ascii=False)))
+            n += 1
+            last_ts = max(last_ts, ts)
+        wm[args.url] = last_ts
+        wm_p.write_text(json.dumps(wm), encoding="utf-8")
+        conn.commit()
+        total = sum(int(i.get("quota", 0) or 0) for i in logs)
+        print(f"[{args.url}] 拉取 {n} 条消费记录, ~${total / QUOTA_PER_USD:,.2f} (quota 估算) 已入账; "
+              f"水位 {last_ts} (下次增量)")
+        return
+    # billing API 模式 (原逻辑)
+    end = args.end or dt.date.today().isoformat()
+    start = args.start or (dt.date.today() - dt.timedelta(days=args.days)).isoformat()
+    if not key:
+        raise SystemExit("无 API key (CV_RELAY_KEY / --key / headroom-auth-token)")
+    data = fetch_relay_usage(args.url, key, start, end)
+    total = float(data.get("total_usage", 0))
+    conn.execute("INSERT INTO ledger_events(source,occurred_at,kind,model,provider,client,"
+                 "tokens_saved,cost_usd,snapshot_id,raw) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                 ("relay-billing", now_iso(), "relay_usage", None, args.url, None, 0,
+                  total, None, json.dumps({"start": start, "end": end, **data}, ensure_ascii=False)))
+    conn.commit()
+    print(f"[{args.url}] {start} ~ {end}: ${total:,.2f} 已入账 (source=relay-billing)")
+
+
+
     vault = vault_dir(args)
     conn = db(vault)
     conn.executescript(SCHEMA)
@@ -2133,8 +2210,13 @@ def main(argv=None):
     lg = sub.add_parser("ledger", help="token 账本")
     lsub = lg.add_subparsers(dest="ledger_cmd", required=True)
     lsub.add_parser("import-headroom").set_defaults(func=cmd_ledger_import_headroom)
-    lr = lsub.add_parser("import-relay", help="直连 relay billing API (OpenAI 兼容端点)")
+    lr = lsub.add_parser("import-relay", help="直连 relay 拉账 (billing API 或 new-api web 日志)")
     lr.add_argument("--url", required=True, help="relay base url (如 https://api.example.com)")
+    lr.add_argument("--mode", choices=["billing", "web"], default="billing",
+                    help="billing=OpenAI兼容端点; web=new-api 系消费日志 (系统访问令牌)")
+    lr.add_argument("--token", help="web 模式: 系统访问令牌")
+    lr.add_argument("--user-id", help="web 模式: new-api 用户 id (New-Api-User 头)")
+    lr.add_argument("--log-path", default="/api/log/self", help="web 模式: 日志端点路径覆盖")
     lr.add_argument("--start")
     lr.add_argument("--end")
     lr.add_argument("--days", type=int, default=30)
