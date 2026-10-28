@@ -988,6 +988,88 @@ def cmd_ledger_import_relay(args):
     print(f"[{args.url}] {start} ~ {end}: ${total:,.2f} 已入账 (source=relay-billing)")
 
 
+# ------------------------------------------------- sync: 自动入库 (增量 + lineage)
+
+SYNC_TABLE = """
+CREATE TABLE IF NOT EXISTS sync_sources(
+  path TEXT PRIMARY KEY, mtime REAL, size INTEGER, snapshot_id TEXT, synced_at TEXT);
+"""
+
+
+def scan_sources(extra_roots: list | None = None) -> list:
+    """扫描本机全部会话源 (只读)。返回 [Path, ...]。"""
+    roots = [("codex", CODEX_SESSIONS.glob("*/*/*/rollout-*.jsonl")),
+             ("claude-projects", (HOME / ".claude" / "projects").glob("*/*.jsonl")),
+             ("claude-transcripts", (HOME / ".claude" / "transcripts").glob("*.jsonl"))]
+    for r in (extra_roots or []):
+        p = Path(r).expanduser()
+        roots.append((f"extra:{p.name}", p.rglob("*.jsonl")))
+    files = []
+    for _, it in roots:
+        for f in it:
+            try:
+                if f.is_file() and f.stat().st_size > 0:
+                    files.append(f)
+            except OSError:
+                continue
+    return files
+
+
+def sync_one(conn, vault: Path, path: Path) -> str:
+    """单文件入库: 新增/更新(带 lineage)/跳过。返回状态。"""
+    st = path.stat()
+    row = conn.execute("SELECT mtime, size, snapshot_id FROM sync_sources WHERE path=?",
+                       (str(path),)).fetchone()
+    if row and abs(row["mtime"] - st.st_mtime) < 1 and row["size"] == st.st_size:
+        return "skip"
+    fmt = detect_format(first_jsonl(path), path)
+    exporters = {"codex-rollout": export_codex, "claude-transcript": export_claude,
+                 "claude-projects": export_claude_code}
+    exported = exporters[fmt](path, False)
+    envelope = build_envelope(exported)
+    if exported["stats"]["blocks_total"] == 0:
+        return "empty"  # 辅助文件/空会话不入库
+    if row and row["snapshot_id"]:
+        envelope["lineage"]["parent_snapshot"] = row["snapshot_id"]  # 同源演进 → 会话树
+    sid = snapshot_id(envelope)
+    out = vault / "snapshots" / f"{sid}.json"
+    if not out.exists():
+        out.write_text(json.dumps(envelope, ensure_ascii=False, indent=1), encoding="utf-8")
+    register_snapshot(conn, envelope, sid, out)
+    conn.execute("INSERT OR REPLACE INTO sync_sources(path,mtime,size,snapshot_id,synced_at)"
+                 " VALUES(?,?,?,?,?)", (str(path), st.st_mtime, st.st_size, sid, now_iso()))
+    return "update" if row else "new"
+
+
+def cmd_sync(args):
+    vault = vault_dir(args)
+    (vault / "snapshots").mkdir(parents=True, exist_ok=True)
+    conn = db(vault)
+    conn.executescript(SCHEMA + SYNC_TABLE)
+    files = scan_sources(args.root)
+    n_new = n_upd = n_skip = n_empty = 0
+    t0 = time.time()
+    for f in sorted(files):
+        try:
+            r = sync_one(conn, vault, f)
+        except (SystemExit, Exception) as e:
+            print(f"  ! 跳过 {f.name}: {str(e)[:80]}")
+            n_skip += 1
+            continue
+        if r == "new":
+            n_new += 1
+        elif r == "update":
+            n_upd += 1
+        elif r == "empty":
+            n_empty += 1
+        else:
+            n_skip += 1
+    conn.commit()
+    total = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+    print(f"sync 完成: 新增 {n_new} · 更新 {n_upd} · 跳过 {n_skip}(未变/异常)"
+          f" · 空会话 {n_empty} | vault 总快照 {total} | 耗时 {time.time()-t0:.1f}s")
+
+
 # ------------------------------------------------- mcp install: 一键接入客户端
 
 def _mcp_cmd_parts(vault: Path) -> tuple:
@@ -2190,6 +2272,10 @@ def main(argv=None):
     pr.add_argument("--watch", type=int, help="循环间隔秒数 (缺省单次)")
     pr.add_argument("--key", help="API key (缺省读 CV_RELAY_KEY 环境变量)")
     pr.set_defaults(func=cmd_probe)
+
+    sy = sub.add_parser("sync", help="自动入库: 扫描全部本地会话源, 增量导出 (mtime 水位 + lineage)")
+    sy.add_argument("--root", action="append", help="额外扫描目录 (可多次)")
+    sy.set_defaults(func=cmd_sync)
 
     mc = sub.add_parser("mcp", help="MCP 记忆后端一键接入客户端")
     msub = mc.add_subparsers(dest="mcp_cmd", required=True)

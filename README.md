@@ -25,6 +25,9 @@
 python tools/cv.py init
 python tools/cv.py doctor                  # 环境体检
 
+# 自动入库: 扫描全部本地会话源, mtime 增量 + 自动 lineage (会话树)
+python tools/cv.py sync                  # 首次回填 173 个会话实测 1.6s, 二次 0.0s
+
 # 导出会话为资产（只读源文件，幂等）
 python tools/cv.py export ~/.codex/sessions/2026/10/20/rollout-xxxx.jsonl
 python tools/cv.py export ~/.claude/transcripts/ses_xxxx.jsonl
