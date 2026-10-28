@@ -39,7 +39,8 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-FORMAT_VERSION = "0.1"
+FORMAT_VERSION = "0.1"   # context-snapshot 格式版本
+VERSION = "0.4.0"          # 工具版本 (发布节奏独立于格式)
 TOOL_RESULT_LIMIT = 256 * 1024  # spec §8.2 裁决: 单块截断阈值 256KB
 HOME = Path.home()
 HEADROOM_DIR = HOME / ".headroom"
@@ -2231,6 +2232,7 @@ def cmd_doctor(args):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="cv", description="Context Vault — 本地优先上下文资产库")
+    ap.add_argument("--version", action="version", version=f"context-vault {VERSION}")
     ap.add_argument("--vault", default="vault", help="vault 目录 (默认 ./vault)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 

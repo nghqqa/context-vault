@@ -1,5 +1,7 @@
 # Context Vault
 
+[![CI](https://github.com/nghqqa/context-vault/actions/workflows/ci.yml/badge.svg)](https://github.com/nghqqa/context-vault/actions/workflows/ci.yml)
+
 > **给个人开发者的本地优先上下文资产库**：会话可迁移、token 账本可查证、上游变动早知道。
 
 你的 AI 编程会话上下文是你最值钱的工作资产——但它锁在每家 agent 的私有格式里，换模型/换中转站/换工具就清零重来。Context Vault 把它变成**你自己机器上的中立资产**。
