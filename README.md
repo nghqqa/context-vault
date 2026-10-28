@@ -69,9 +69,15 @@ python tools/cv.py serve     # 浏览器打开 http://127.0.0.1:8791
 
 纯本地回环、单文件、零外部依赖。Pro 托盘版（ContextVault.exe）把控制台与哨兵/守望/热索引打包成 Windows 常驻程序。
 
-# 接入任意其他 harness 会话 (经 session-migrate, 17+: opencode/cursor/qwen/kimi/grok/antigravity/...)
+# 接入任意其他 harness 会话 (读: 19 种格式, 经 session-migrate)
 # 依赖: uv tool install session-migrate
 python tools/cv.py ingest <会话文件> [--format opencode]
+
+# 快照 → 任意 harness (写: 18 目标, 同样经 session-migrate)
+python tools/cv.py export-harness cv_xxxx --to opencode   # 目标: claude codex pi omp opencode
+                                                           # copilot antigravity cursor vibe muse
+                                                           # qwen kimi grok kilo openhands hermes
+                                                           # mastracode devin
 
 ### 作为 MCP server 接入（任意 MCP 客户端 = 记忆后端）
 
@@ -148,6 +154,16 @@ python tools/cv.py mcp status
 - **M3** 记忆引擎嵌入（Supermemory/Graphiti，存储归 Vault）· OTel 遥测出口 · 审计时间线回放
 
 快照格式规范：[docs/snapshot-format.md](docs/snapshot-format.md)（context-snapshot v0.1，含 txcript 六块模型互操作映射）。
+
+## harness 支持矩阵
+
+| 通道 | 覆盖 |
+|---|---|
+| 原生读+写（真机验证） | Codex · Claude Code · Zcode 旧版转录 |
+| 桥接读（`cv ingest`，19 格式） | opencode · cursor · qwen · kimi · grok · antigravity · copilot · devin · hermes · kilo · mastracode · muse · omp · pi · vibe · openhands … |
+| 桥接写（`cv export-harness`，18 目标） | 同上清单 |
+| 账本数据源 | headroom · relay billing API · Zcode 用量审计 |
+| 无法支持 | 加密存储的 harness（如 Windsurf——本地会话加密，无格式可适配） |
 
 ## 许可
 

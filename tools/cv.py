@@ -1344,6 +1344,37 @@ def memory_search_api(vault: Path, query: str, limit: int = 8) -> list:
 
 # ------------------------------------------------- fork: 快照分叉 (M3)
 
+SMIGRATE_TARGETS = ("claude", "codex", "pi", "omp", "opencode", "copilot", "antigravity",
+                    "cursor", "vibe", "muse", "qwen", "kimi", "grok", "kilo", "openhands",
+                    "hermes", "mastracode", "devin")
+
+
+def cmd_export_harness(args):
+    """快照 → 任意 harness 会话 (写入侧桥接, 18 目标)。
+    链路: 快照 → 生成 claude 会话(经 do_import, stateless replay 语义) → smigrate convert --to。
+    产物落 vault/outbox/ (由用户放入目标 harness; 写入其会话目录涉及各家私有布局, 不自动落盘)。"""
+    if args.to not in SMIGRATE_TARGETS:
+        raise SystemExit(f"不支持的目标 {args.to}; 可选: {', '.join(SMIGRATE_TARGETS)}")
+    exe = find_smigrate()
+    if not exe:
+        raise SystemExit("未找到 smigrate: uv tool install session-migrate")
+    vault = vault_dir(args)
+    (vault / "outbox").mkdir(parents=True, exist_ok=True)
+    # ① 快照 → claude 中转 (复用已验证的 do_import)
+    mid = do_import(vault, args.snapshot_id, "claude", apply=False)
+    # ② claude → 目标 harness
+    ts = int(time.time())
+    ext = {"claude": "jsonl", "codex": "jsonl"}.get(args.to, "json")
+    out = vault / "outbox" / f"harness-{args.to}-{args.snapshot_id[:14]}-{ts}.{ext}"
+    r = subprocess.run([exe, "convert", mid["dest"], "--to", args.to,
+                        "--output", str(out)], capture_output=True, text=True,
+                       timeout=300, creationflags=NO_WINDOW)
+    if r.returncode != 0 or not out.exists():
+        raise SystemExit(f"smigrate convert 失败: {(r.stderr or r.stdout)[:300]}")
+    print(f"已导出 → {args.to}: {out}")
+    print(f"  ({mid['lines']} 行会话, stateless replay; 按目标 harness 的方式导入该文件即可)")
+
+
 def cmd_fork(args):
     """在历史节点开分支: 复制快照为新内容寻址实体, lineage.fork_of 指向原快照。
     原快照不可变; fork 的事实 (fork_of) 写在新实体自己的 lineage 里 (spec §7)。
@@ -2701,6 +2732,10 @@ def main(argv=None):
     sy.add_argument("--root", action="append", help="额外扫描目录 (可多次)")
     sy.set_defaults(func=cmd_sync)
 
+    eh = sub.add_parser("export-harness", help="快照 → 任意 harness 会话文件 (18 目标, 经 smigrate)")
+    eh.add_argument("snapshot_id")
+    eh.add_argument("--to", required=True, choices=SMIGRATE_TARGETS)
+    eh.set_defaults(func=cmd_export_harness)
     fk = sub.add_parser("fork", help="在快照节点开分支 (lineage.fork_of)")
     fk.add_argument("snapshot_id")
     fk.add_argument("--message", help="分叉备注 (写入 capture.fork_note)")
