@@ -846,6 +846,24 @@ def cmd_ledger_import_headroom(args):
     print(f"账本导入完成: 明细 {n1} 条 (savings_events) + 汇总 1 条 (lifetime)")
 
 
+def owned_stats(vault: Path) -> dict:
+    """Vault 自有账本: 全部快照的 token 消耗聚合 (零外部依赖, 人人开箱即有)。
+    与 headroom lifetime (压缩/缓存节省金额) 分轨: 那是通路层增强, 这是资产层自有数据。"""
+    conn = db(vault)
+    r = conn.execute("SELECT COUNT(*) n, COALESCE(SUM(tokens_in),0) i, COALESCE(SUM(tokens_out),0) o,"
+                     " COALESCE(SUM(cache_read),0) cr, COALESCE(SUM(cache_write),0) cw,"
+                     " COALESCE(SUM(total_tokens),0) t FROM snapshots").fetchone()
+    by_agent = conn.execute("SELECT agent, COUNT(*) n, SUM(tokens_in) i FROM snapshots"
+                            " GROUP BY agent ORDER BY i DESC").fetchall()
+    hit = (r["cr"] / (r["i"] or 1))
+    return {"snapshots": r["n"], "tokens_in": r["i"], "tokens_out": r["o"],
+            "cache_read": r["cr"], "cache_write": r["cw"], "total_tokens": r["t"],
+            "cache_hit_rate": round(hit, 3),
+            "by_agent": [{"agent": a["agent"], "snapshots": a["n"], "tokens_in": a["i"]}
+                         for a in by_agent],
+            "source": "vault-owned (from agent session usage records)"}
+
+
 def fmt_usd(x):
     return f"${x:,.2f}" if isinstance(x, (int, float)) else "-"
 
@@ -866,10 +884,13 @@ def cmd_ledger_stats(args):
         print("== 按模型 (明细) ==")
         for r in rows:
             print(f"  {r['model']:<24} 事件={r['n']:<6} 省={r['t'] or 0:>12,} tok  {fmt_usd(r['c'] or 0)}")
-    snap = conn.execute("SELECT COUNT(*) n, SUM(tokens_in) i, SUM(total_tokens) t FROM snapshots").fetchone()
-    if snap and snap["n"]:
-        print(f"== vault 快照 ({snap['n']} 个) ==")
-        print(f"  快照累计入token={snap['i'] or 0:,}  总token={snap['t'] or 0:,}")
+    own = owned_stats(vault_dir(args))
+    if own["snapshots"]:
+        print(f"== vault 自有账本 ({own['snapshots']} 快照, 零外部依赖) ==")
+        print(f"  会话累计消耗: 入 {own['tokens_in']:,} · 出 {own['tokens_out']:,} · "
+              f"cache 读 {own['cache_read']:,} (命中率 {own['cache_hit_rate']*100:.0f}%)")
+        for a in own["by_agent"][:5]:
+            print(f"    {a['agent']:<16} {a['snapshots']:>3} 会话 · {a['tokens_in'] or 0:>13,} tok")
 
 
 
@@ -1333,11 +1354,25 @@ def cmd_dashboard(args):
                        "WHERE source='headroom-lifetime'").fetchone()
     raw = json.loads(row["raw"]) if row else {}
     usd = lambda v: f"${v:,.2f}" if isinstance(v, (int, float)) else "-"
-    total_saved = ((row["cost_usd"] or 0) + (raw.get("cache_savings_usd") or 0)) if row else 0
-    cards.append(f'<div class="card"><div class="v">{usd(total_saved)}</div><div class="k">累计节省 (压缩+缓存)</div></div>')
-    cards.append(f'<div class="card alt"><div class="v">{usd(raw.get("cache_savings_usd"))}</div><div class="k">缓存节省</div></div>')
-    cards.append(f'<div class="card alt"><div class="v">{int(raw.get("total_input_tokens", 0)):,}</div><div class="k">历史总输入 tokens</div></div>')
-    cards.append(f'<div class="card"><div class="v">{int(row["tokens_saved"] or 0):,}</div><div class="k">压缩节省 tokens</div></div>')
+    # 自有账本卡 (零外部依赖, 人人开箱即有) — headroom 未装时仍是主视觉
+    own = owned_stats(vault)
+    if own["snapshots"]:
+        cards.append(f'<div class="card"><div class="v">{own["tokens_in"]/(10**6):,.0f}M</div>'
+                     f'<div class="k">会话累计消耗 tokens ({own["snapshots"]} 快照 · 自有)</div></div>')
+        cards.append(f'<div class="card alt"><div class="v">{own["cache_hit_rate"]*100:.0f}%</div>'
+                     f'<div class="k">缓存命中率 (cache读 {own["cache_read"]/(10**6):,.0f}M)</div></div>')
+        top = own["by_agent"][0] if own["by_agent"] else None
+        if top:
+            cards.append(f'<div class="card alt"><div class="v">{top["snapshots"]}</div>'
+                         f'<div class="k">{top["agent"]} 会话 · '
+                         f'{(top["tokens_in"] or 0)/(10**6):,.0f}M tok</div></div>')
+    if row:  # headroom 增强 (装了才有)
+        total_saved = ((row["cost_usd"] or 0) + (raw.get("cache_savings_usd") or 0)) if row else 0
+        cards.append(f'<div class="card"><div class="v">{usd(total_saved)}</div><div class="k">累计节省 (headroom 通路层)</div></div>')
+        cards.append(f'<div class="card alt"><div class="v">{usd(raw.get("cache_savings_usd"))}</div><div class="k">缓存节省</div></div>')
+    else:
+        cards.append('<div class="card alt"><div class="v">—</div>'
+                     '<div class="k">节省金额: 接入 headroom 解锁 (cv ledger import-headroom)</div></div>')
     rows = conn.execute("SELECT model, COUNT(*) n, SUM(tokens_saved) t, SUM(cost_usd) c "
                         "FROM ledger_events WHERE kind='compression' GROUP BY model ORDER BY c DESC").fetchall()
     mx = max((r["c"] or 0) for r in rows) if rows else 1
@@ -1880,13 +1915,23 @@ const stat=(v,k,cls="")=>'<div class="stat"><div class="v '+cls+'">'+v+'</div><d
 const kv=(k,v)=>"<b>"+k+"</b><span>"+(v==null?"—":v)+"</span>";
 
 async function loadOv(){
-  try{const d=await api("/ledger");const lt=d.lifetime||{};
-    const total=(lt.saved_usd||0)+(lt.cache_savings_usd||0);
-    $("#ov-band").innerHTML=
-      stat(usd(total),"累计节省（压缩 + 缓存）")+
-      stat(usd(lt.saved_usd),"压缩节省","neutral")+
-      stat(usd(lt.cache_savings_usd),"缓存节省","neutral")+
-      stat(bn(lt.total_input_tokens),"历史总输入 tokens","neutral");
+  try{const d=await api("/ledger");const lt=d.lifetime||{};const ow=d.owned||{};
+    const hasLt=(lt.saved_usd||0)+(lt.cache_savings_usd||0)>0;
+    let band="";
+    if(ow.snapshots){ /* vault 自有账本: 零外部依赖, 人人开箱即有 */
+      band+=stat(bn(ow.tokens_in),"会话累计消耗 tokens（"+num(ow.snapshots)+" 快照 · 自有）")+
+        stat((ow.cache_hit_rate*100).toFixed(0)+"%","缓存命中率（cache 读 "+bn(ow.cache_read)+"）","neutral");
+      const top=(ow.by_agent||[])[0];
+      if(top)band+=stat(num(top.snapshots),esc(top.agent)+" 会话 · "+bn(top.tokens_in||0)+" tok","neutral");
+    }
+    if(hasLt){ /* headroom 增强: 装了才解锁 */
+      const total=(lt.saved_usd||0)+(lt.cache_savings_usd||0);
+      band+=stat(usd(total),"累计节省（headroom 通路层）")+
+        stat(usd(lt.cache_savings_usd),"缓存节省","neutral");
+    }else{
+      band+=stat("—","节省金额：接入 headroom 解锁（cv ledger import-headroom）","neutral");
+    }
+    $("#ov-band").innerHTML=band;
     const ms=d.monthly||[];
     if(!ms.length)$("#ov-months").innerHTML='<div class="empty">暂无月度数据<br>导入账本 <code>cv ledger import-headroom</code></div>';
     else{
@@ -2123,7 +2168,8 @@ def build_vault_server(vault: Path, port: int):
                     return self._json({"lifetime": {"tokens_saved": lt["tokens_saved"] if lt else 0,
                                                     "saved_usd": lt["cost_usd"] if lt else 0, **raw},
                                        "by_model": [dict(r) for r in by_model],
-                                       "monthly": [dict(r) for r in monthly]})
+                                       "monthly": [dict(r) for r in monthly],
+                                       "owned": owned_stats(vault)})
                 if u.path == "/preview":
                     env2 = idx.envs.get(q.get("id", ""))
                     if not env2:
@@ -2156,7 +2202,7 @@ def build_vault_server(vault: Path, port: int):
                                   reverse=True)[:int(q.get("limit", 5))]
                     return self._json([{"sid": k, **v} for k, v in rows])
                 if u.path == "/stats":
-                    return self._json({"stats": ledger_summary(vault)})
+                    return self._json({"stats": ledger_summary(vault), "owned": owned_stats(vault)})
                 if u.path == "/snapshot":
                     env = idx.envs.get(q.get("id", ""))
                     if not env:

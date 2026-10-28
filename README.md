@@ -109,6 +109,11 @@ python tools/cv.py mcp status
 
 **Context Vault 的核心功能零外部依赖**（纯 Python 标准库，不需要 headroom）：
 
+> **协作者/新用户开箱体验**：`cv sync` 后控制台即有完整的**自有账本**——会话累计 token 消耗、
+> 缓存命中率（实测本机 176 快照 / 2.47 亿 tokens / 68% 命中率）、按 agent 分布——
+> 全部提取自 agent 会话自带的 usage 记录，零外部依赖。headroom 的节省**金额**是增强项，
+> 未安装时显示接入引导，不影响任何其他功能。
+
 - 会话快照资产库（export / list / diff / fork）
 - 双向迁移（Claude Code ↔ Codex）
 - MCP 记忆后端 + Web 控制台 + 热索引服务

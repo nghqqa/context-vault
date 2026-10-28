@@ -296,3 +296,26 @@ def test_ledger_headroom_import(isolated, monkeypatch):
     row = conn.execute("SELECT tokens_saved, cost_usd FROM ledger_events "
                        "WHERE kind='compression'").fetchone()
     assert row["tokens_saved"] == 60 and abs(row["cost_usd"] - 0.03) < 1e-9
+
+
+# ---------------- 自有账本 (协作者零依赖体验) ----------------
+
+def test_owned_stats_zero_external(isolated):
+    _, vault = isolated
+    # 无 headroom 时自有账本仍完整: 快照 stats 聚合
+    exp = cv.export_codex(mini_rollout(Path(str(vault)) and (isolated[0] / ".codex" / "sessions" / "2026" / "10" / "01")), False)
+    env = cv.build_envelope(exp)
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    import uuid as _u
+    sid = "cv_t" + _u.uuid4().hex[:12]
+    out = vault / "snapshots" / f"{sid}.json"
+    out.parent.mkdir(exist_ok=True)
+    out.write_text(json.dumps(env), encoding="utf-8")
+    cv.register_snapshot(conn, env, sid, out)
+    conn.commit()
+    own = cv.owned_stats(vault)
+    assert own["snapshots"] == 1
+    assert own["tokens_in"] == 100 and own["cache_read"] == 60
+    assert own["cache_hit_rate"] == 0.6
+    assert own["by_agent"][0]["agent"] == "codex"
