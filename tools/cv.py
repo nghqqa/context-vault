@@ -1418,11 +1418,15 @@ def load_all_snapshots_pub(vault: Path) -> list:
 
 
 def memory_search_api(vault: Path, query: str, limit: int = 8) -> list:
-    """serve /memory 与 MCP vault_remember 共用。"""
+    """serve /memory 与 MCP vault_remember 共用。query 为空 = 返回最新 N 条 (概览速览)。"""
     conn = db(vault)
     conn.executescript(SCHEMA + MEMORY_TABLE)
     terms = tokenize(query)
     rows = conn.execute("SELECT * FROM memory_items").fetchall()
+    if not terms:  # 速览模式: 按 id 倒序取最新, 不计命中 (浏览不污染 last_used 统计)
+        rows.sort(key=lambda r: r["id"], reverse=True)
+        return [{"kind": r["kind"], "content": r["content"], "project": r["project"],
+                 "snapshot": r["snapshot_id"], "score": 0} for r in rows[:limit]]
     scored = []
     for r in rows:
         low = r["content"].lower()
@@ -2137,7 +2141,7 @@ nav button.on{color:var(--ink);font-weight:600}
 nav button.on::after{content:"";position:absolute;left:12px;right:12px;bottom:-1px;height:2px;
   background:var(--acc);border-radius:2px 2px 0 0}
 
-main{padding:26px 28px 60px;max-width:1120px;margin:0 auto}
+main{padding:26px 32px 60px;max-width:1380px;margin:0 auto}
 section{animation:fadein .18s ease-out}
 @keyframes fadein{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
 h2{font-size:12px;font-weight:600;color:var(--ink-3);letter-spacing:.08em;
@@ -2145,7 +2149,7 @@ h2{font-size:12px;font-weight:600;color:var(--ink-3);letter-spacing:.08em;
 main > section > h2:first-child{margin-top:0}
 
 /* ---------- 数据带 (主指标) ---------- */
-.statband{display:flex;flex-wrap:wrap;align-items:baseline;column-gap:44px;row-gap:18px;
+.statband{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px 22px;
   padding:6px 0 22px;border-bottom:1px solid var(--line-soft)}
 .stat .v{font-family:var(--mono);font-size:27px;font-weight:600;letter-spacing:-.01em;
   font-variant-numeric:tabular-nums;color:var(--acc);line-height:1.2}
@@ -2171,6 +2175,21 @@ td.mono{font-family:var(--mono);font-size:12.5px}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:2px;vertical-align:1px}
 .dot.ok{background:var(--acc)} .dot.err{background:var(--err)} .dot.warm{background:var(--info)} .dot.sw{background:var(--warn)}
 td .sub{color:var(--ink-3);font-size:12px}
+
+/* ---------- 概览内容网格 (把实体内容带进首屏, 消除汇总页的空旷感) ---------- */
+.ovgrid{display:grid;grid-template-columns:1.6fr 1fr;gap:8px 36px;align-items:start;margin-top:16px}
+.ovgrid .side{display:grid;gap:14px}
+.duo{display:grid;grid-template-columns:1fr 1.2fr;gap:0 36px;align-items:start}
+.panel{background:var(--bg1);border:1px solid var(--line-soft);border-radius:10px;padding:12px 14px}
+.panel .pt{font-size:11.5px;font-weight:600;color:var(--ink-3);letter-spacing:.05em;
+  text-transform:uppercase;margin-bottom:6px}
+.panel .row{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;
+  padding:5px 0;border-bottom:1px solid var(--line-soft)}
+.panel .row:last-child{border-bottom:none}
+.panel .row .l{color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.panel .row .r{color:var(--ink-3);white-space:nowrap;font-family:var(--mono);font-size:11.5px}
+.panel .hint{color:var(--ink-3);font-size:12px}
+@media(max-width:1100px){.ovgrid,.duo{grid-template-columns:1fr}}
 
 /* ---------- 月度走势 ---------- */
 .months{display:flex;gap:6px;height:132px;padding:4px 0 0}
@@ -2311,9 +2330,21 @@ input{flex:1;min-width:260px}
 <main>
 <section id="t-ov">
   <div class="statband" id="ov-band"><div class="skel" style="width:220px"></div><div class="skel" style="width:160px"></div><div class="skel" style="width:160px"></div></div>
-  <div id="ov-recent" style="margin-top:8px"></div>
-  <h2>月度节省走势（数据源：headroom 导入）</h2><div class="months" id="ov-months"></div>
-  <h2>按模型明细（数据源：headroom 导入）</h2><div id="ov-models"></div>
+  <div class="ovgrid">
+    <div>
+      <h2 style="margin-top:0">最近入库会话</h2>
+      <div id="ov-latest"><div class="skel" style="height:120px"></div></div>
+    </div>
+    <div class="side">
+      <div class="panel"><div class="pt">哨兵 · 最近探测</div><div id="ov-probe"><span class="hint">加载中…</span></div></div>
+      <div class="panel"><div class="pt">最新记忆</div><div id="ov-mem"><span class="hint">加载中…</span></div></div>
+      <div class="panel"><div class="pt">审计 · 库内事件</div><div id="ov-audit"><span class="hint">加载中…</span></div></div>
+    </div>
+  </div>
+  <div class="duo">
+    <div><h2>月度节省走势（数据源：headroom 导入）</h2><div class="months" id="ov-months"></div></div>
+    <div><h2>按模型明细（数据源：headroom 导入）</h2><div id="ov-models"></div></div>
+  </div>
 </section>
 
 <section id="t-snap" style="display:none">
@@ -2439,9 +2470,35 @@ async function loadOv(){
       band+=stat("—","通路层节省 · 未接入（导入: cv ledger import-headroom）","neutral");
     }
     $("#ov-band").innerHTML=band;
+    /* 内容区: 最近入库会话表 + 哨兵/记忆/审计三卡 (把实体内容带进概览) */
+    const [rc,pv,mr,au]=await Promise.all([api("/recent?limit=8").catch(()=>[]),
+      api("/probe_events?limit=3").catch(()=>[]),api("/memory?q=&limit=3").catch(()=>[]),
+      api("/audit").catch(()=>null)]);
     const arr=Array.isArray(rc)?rc:[];
-    $("#ov-recent").innerHTML=arr.length?"<span class='k' style='opacity:.6;font-size:12px'>最近活跃会话</span>　"+
-      arr.map(s=>'<span class="chip" title="'+esc(s.sid)+'">'+esc(s.agent||"?")+" · "+frel(s.created_at)+"</span>").join(""):"";
+    $("#ov-latest").innerHTML=arr.length?table(["Agent","位置","入库时间","块","输入 tok"],
+      arr.map(s=>['<span class="chip">'+esc(s.agent||"?")+"</span>",
+        '<span class="sub" title="'+esc(s.cwd||"")+'">'+esc(String(s.cwd||"—").split(/[\\\\/]/).pop()||"—")+"</span>",
+        frel(s.created_at),{t:num(s.blocks||0),num:1},{t:bn(s.tokens_in||0),num:1}]))
+      :errEmpty("还没有会话入库 · 先运行 cv sync","");
+    const pe=Array.isArray(pv)?pv:[];
+    $("#ov-probe").innerHTML=pe.length?pe.map(e=>'<div class="row"><span class="l"><span class="dot '+
+      (e.status==="ok"?"ok":(e.status==="http_error"||e.status==="error")?"err":"sw")+'"></span>'+
+      esc(e.profile||"?")+' <span style="color:var(--ink-3)">'+esc(e.status||"")+
+      '</span></span><span class="r">'+frel(e.ts)+"</span></div>").join("")
+      :'<span class="hint">暂无探测记录 · cv probe 或托盘哨兵</span>';
+    const mm=Array.isArray(mr)?mr:(mr&&mr.memories||[]);
+    $("#ov-mem").innerHTML=mm.length?mm.map(m=>'<div class="row"><span class="l" title="'+esc(m.content)+
+      '">['+esc(m.kind)+"] "+esc(String(m.content).slice(0,40))+
+      '</span><span class="r">'+esc(m.project||"—")+"</span></div>").join("")
+      :'<span class="hint">暂无记忆 · cv memory extract</span>';
+    const as=au&&au.summary||null;
+    $("#ov-audit").innerHTML=as?
+      '<div class="row"><span class="l">累计事件</span><span class="r">'+num(au.total_events||0)+"</span></div>"+
+      '<div class="row"><span class="l">探测 ok / 异常</span><span class="r">'+num(as.ok_probes||0)+" / "+
+      num(as.abnormal||0)+"</span></div>"+
+      '<div class="row"><span class="l">上游切换</span><span class="r">'+num(as.switches||0)+"</span></div>"+
+      '<div class="row"><span class="l">模型消失事件</span><span class="r">'+num(as.model_missing_events||0)+"</span></div>"
+      :'<span class="hint">—</span>';
     const ms=d.monthly||[];
     if(!ms.length)$("#ov-months").innerHTML='<div class="empty">暂无月度数据<br>导入账本 <code>cv ledger import-headroom</code></div>';
     else{
