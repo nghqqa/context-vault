@@ -1,0 +1,32 @@
+# Context Vault
+
+> Local-first asset vault for AI coding sessions: immutable content-addressed snapshots, honest bidirectional Codex⇄Claude Code migration, token ledger from session usage records, cross-session memory with provenance, MCP backend. Pure Python stdlib, zero dependencies, all data stays on the machine.
+
+Rules for agents using this tool: never modify source session files (read-only); migration is dry-run by default — write to real session dirs only with explicit `--apply` after showing the user the diff; every memory cites its source snapshot — verify important decisions by re-reading the snapshot; the resident service on 127.0.0.1:8791 is an accelerator only, file-scan fallback returns identical results.
+
+## Commands
+
+- `python tools/cv.py doctor` — environment check
+- `python tools/cv.py sync` — incremental intake from all local session sources (+lineage)
+- `python tools/cv.py export <session-file>` — snapshot a session (idempotent, content-addressed)
+- `python tools/cv.py migrate <file> --target codex|claude` — export → honest diff → import (dry-run by default; `--apply` writes real dirs)
+- `python tools/cv.py ingest <file> [--format X]` — bridged read via session-migrate (19 formats)
+- `python tools/cv.py export-harness <sid> --to X` — bridged write (18 targets)
+- `python tools/cv.py memory extract` / `memory search "query"` — cross-session memory
+- `python tools/cv.py ledger stats` — token ledger from embedded usage records
+- `python tools/cv.py backup [--out DIR] [--keep N]` — consistent vault zip with rotation
+- `python tools/cv.py serve` — web console + hot-index HTTP API at 127.0.0.1:8791 (loopback-guarded)
+- `python tools/cv.py mcp install --all` — register the MCP backend in claude/codex/cursor
+
+## MCP tools
+
+- `vault_remember(query)` — long-term memory (decisions/preferences, with source snapshot)
+- `vault_context(query)` — relevant history excerpts for the current task
+- `vault_search(query)` — full-text search over all snapshots
+- `vault_recent(limit)` / `vault_snapshot(id)` / `vault_stats()`
+
+## Docs
+
+- [Snapshot format spec v0.1](https://github.com/nghqqa/context-vault/blob/main/docs/snapshot-format.md): the vendor-neutral envelope, block types, what migrates and what cannot (incl. txcript six-block mapping)
+- [README](https://github.com/nghqqa/context-vault/blob/main/README.md): fidelity table ("what survives"), comparison with porters/memory layers, dependency boundary
+- [Releases](https://github.com/nghqqa/context-vault/releases): notes include verification receipts (tests, real-machine checks)
