@@ -41,7 +41,7 @@ from pathlib import Path
 
 FORMAT_VERSION = "0.1"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # noconsole 进程 spawn 控制台程序不弹窗   # context-snapshot 格式版本
-VERSION = "0.4.1"          # 工具版本 (发布节奏独立于格式)
+VERSION = "0.4.2"          # 工具版本 (发布节奏独立于格式)
 TOOL_RESULT_LIMIT = 256 * 1024  # spec §8.2 裁决: 单块截断阈值 256KB
 HOME = Path.home()
 HEADROOM_DIR = HOME / ".headroom"
@@ -2785,6 +2785,46 @@ def cmd_serve(args):
     except KeyboardInterrupt:
         print("\n服务已停止")
 
+# ------------------------------------------------- backup: vault 备份 (一致性 + 轮换)
+
+def cmd_backup(args):
+    """vault 一致性备份: vault.db 走 sqlite 在线 backup API (WAL 下直接拷文件可能撕裂),
+    snapshots/ 原样打包 (不可变), 基线/水位随包; 按时间戳轮换保留 N 份。"""
+    import zipfile
+    vault = vault_dir(args)
+    if not (vault / "vault.db").exists():
+        raise SystemExit(f"vault 未初始化: {vault} (先 cv init / cv export)")
+    out_dir = Path(args.out).expanduser() if args.out else vault / "backups"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    out = out_dir / f"cv-backup-{ts}.zip"
+    tmp_db = out_dir / f".backup-tmp-{os.getpid()}.db"
+    n_snap = 0
+    try:
+        src = db(vault)
+        dst = sqlite3.connect(tmp_db)
+        src.backup(dst)  # 在线一致快照, 不锁常驻服务 (托盘 serve/sync 可同时跑)
+        dst.close()
+        src.close()
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+            z.write(tmp_db, "vault.db")
+            for f in sorted((vault / "snapshots").glob("cv_*.json")):
+                z.write(f, f"snapshots/{f.name}")
+                n_snap += 1
+            for name in ("probe_baseline.json", "relay_watermark.json"):
+                p = vault / name
+                if p.exists():
+                    z.write(p, name)
+    finally:
+        tmp_db.unlink(missing_ok=True)
+    backups = sorted(out_dir.glob("cv-backup-*.zip"))
+    for old in backups[:-int(args.keep)] if len(backups) > int(args.keep) else []:
+        old.unlink()
+    size_mb = out.stat().st_size / 1048576
+    print(f"备份完成: {out} ({n_snap} 快照, {size_mb:.1f} MB, 留存 {min(len(backups), int(args.keep))}/{args.keep} 份)")
+    print("  恢复: 解压到空目录, 以 --vault 指向它 (vault.db + snapshots/ 完整可用)")
+
+
 # ------------------------------------------------- doctor: 环境体检
 
 def cmd_doctor(args):
@@ -2947,6 +2987,11 @@ def main(argv=None):
     sv = sub.add_parser("serve", help="常驻服务: 热索引 + HTTP API (127.0.0.1)")
     sv.add_argument("--port", type=int, default=8791)
     sv.set_defaults(func=cmd_serve)
+
+    b = sub.add_parser("backup", help="vault 一致性备份 (sqlite 在线快照 + snapshots 打包, 轮换保留)")
+    b.add_argument("--out", default=None, help="备份目录 (默认 vault/backups; 建议定期指向外部盘)")
+    b.add_argument("--keep", type=int, default=10, help="保留份数 (默认 10, 旧的自动清理)")
+    b.set_defaults(func=cmd_backup)
 
     sub.add_parser("doctor").set_defaults(func=cmd_doctor)
 

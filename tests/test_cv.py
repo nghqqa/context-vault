@@ -519,3 +519,41 @@ def test_ledger_relay_billing_single_entry(isolated, monkeypatch, capsys):
     conn = cv.db(vault)
     rows = conn.execute("SELECT cost_usd FROM ledger_events WHERE kind='relay_usage'").fetchall()
     assert len(rows) == 1 and rows[0][0] == 12.34
+
+
+# ---------------- backup: 一致性备份与轮换 ----------------
+
+def test_backup_content_and_rotation(isolated, tmp_path):
+    import sqlite3 as _s
+    import zipfile
+    _, vault = isolated
+    env = make_env(tmp_path)
+    sid = cv.snapshot_id(env)
+    (vault / "snapshots").mkdir(exist_ok=True)
+    cv.atomic_write_text(vault / "snapshots" / f"{sid}.json", json.dumps(env, ensure_ascii=False))
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    conn.execute("INSERT INTO ledger_events(source,occurred_at,kind) VALUES('t','t','x')")
+    conn.commit()
+
+    bdir = vault / "backups"
+    cv.cmd_backup(SimpleNamespace(vault=str(vault), out=str(bdir), keep=2))
+    zips = sorted(bdir.glob("cv-backup-*.zip"))
+    assert len(zips) == 1
+    with zipfile.ZipFile(zips[0]) as z:
+        names = z.namelist()
+        assert "vault.db" in names and f"snapshots/{sid}.json" in names
+        z.extract("vault.db", bdir / "restore-test")
+    rc = _s.connect(bdir / "restore-test" / "vault.db")  # 备份库可开且数据完整
+    assert rc.execute("SELECT COUNT(*) FROM ledger_events").fetchone()[0] == 1
+    rc.close()
+    assert not list(bdir.glob(".backup-tmp-*"))          # 无临时残留
+
+    # 轮换: 伪造两份旧备份, keep=1 时应只剩最新一份
+    for name in ("cv-backup-20200101-000000.zip", "cv-backup-20250101-000000.zip"):
+        (bdir / name).write_bytes(b"old")
+    cv.cmd_backup(SimpleNamespace(vault=str(vault), out=str(bdir), keep=1))
+    left = [p.name for p in bdir.glob("cv-backup-*.zip")]
+    assert len(left) == 1                                        # keep=1: 只剩最新一份
+    assert not (bdir / "cv-backup-20200101-000000.zip").exists()  # 两份伪造旧备份被轮换掉
+    assert not (bdir / "cv-backup-20250101-000000.zip").exists()
