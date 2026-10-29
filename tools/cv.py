@@ -41,7 +41,7 @@ from pathlib import Path
 
 FORMAT_VERSION = "0.1"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # noconsole 进程 spawn 控制台程序不弹窗   # context-snapshot 格式版本
-VERSION = "0.4.0"          # 工具版本 (发布节奏独立于格式)
+VERSION = "0.4.1"          # 工具版本 (发布节奏独立于格式)
 TOOL_RESULT_LIMIT = 256 * 1024  # spec §8.2 裁决: 单块截断阈值 256KB
 HOME = Path.home()
 HEADROOM_DIR = HOME / ".headroom"
@@ -73,9 +73,21 @@ def vault_dir(args) -> Path:
 
 
 def db(vault: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(vault / "vault.db")
+    # WAL + busy_timeout: 托盘常驻多线程 (serve/哨兵/守望/sync) 与 CLI 并发写不再 database is locked
+    conn = sqlite3.connect(vault / "vault.db", timeout=10)
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError:
+        pass  # 其他连接持锁时切不上就下次再切, 不阻塞本次
     return conn
+
+
+def atomic_write_text(path: Path, text: str):
+    """同目录临时文件 + os.replace 原子落盘; 进程中途被杀不留截断文件 (快照/水位/基线共用)。"""
+    tmp = path.with_name(path.name + f".tmp-{os.getpid()}")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def cmd_init(args):
@@ -359,7 +371,7 @@ def cmd_export(args):
     if out.exists():
         print(f"已存在 (幂等跳过): {out.name}")
     else:
-        out.write_text(json.dumps(envelope, ensure_ascii=False, indent=1), encoding="utf-8")
+        atomic_write_text(out, json.dumps(envelope, ensure_ascii=False, indent=1))
         s = exported["stats"]
         print(f"已导出 {out.name}  格式={fmt}  块={s['blocks_total']}  入token={s['tokens_in']}  cache读={s['cache_read']}")
     conn = db(vault)
@@ -654,7 +666,7 @@ def do_import(vault: Path, sid: str, target: str, apply: bool, strip_thinking=Fa
         if apply:
             dest = claude_project_dir(cwd) / name
             dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text("\n".join(json.dumps(l, ensure_ascii=False) for l in lines) + "\n", encoding="utf-8")
+    atomic_write_text(dest, "\n".join(json.dumps(l, ensure_ascii=False) for l in lines) + "\n")
     return {"lines": len(lines), "dropped": dropped, "dest": str(dest),
             "new_sid": new_sid if target == "codex" else None, "applied": apply}
 
@@ -809,7 +821,7 @@ def cmd_probe(args):
         profiles = [p for p in profiles if p["id"] == args.profile] or profiles
     while True:
         probe_once(vault, profiles, key, baseline)
-        baseline_p.write_text(json.dumps(baseline, ensure_ascii=False, indent=1), encoding="utf-8")
+        atomic_write_text(baseline_p, json.dumps(baseline, ensure_ascii=False, indent=1))
         if not args.watch:
             break
         time.sleep(args.watch)
@@ -1041,7 +1053,7 @@ def cmd_ledger_import_relay(args):
             n += 1
             last_ts = max(last_ts, ts)
         wm[args.url] = last_ts
-        wm_p.write_text(json.dumps(wm), encoding="utf-8")
+        atomic_write_text(wm_p, json.dumps(wm))
         conn.commit()
         total = sum(int(i.get("quota", 0) or 0) for i in logs)
         print(f"[{args.url}] 拉取 {n} 条消费记录, ~${total / QUOTA_PER_USD:,.2f} (quota 估算) 已入账; "
@@ -1054,25 +1066,6 @@ def cmd_ledger_import_relay(args):
         raise SystemExit("无 API key (CV_RELAY_KEY / --key / headroom-auth-token)")
     data = fetch_relay_usage(args.url, key, start, end)
     total = float(data.get("total_usage", 0))
-    conn.execute("INSERT INTO ledger_events(source,occurred_at,kind,model,provider,client,"
-                 "tokens_saved,cost_usd,snapshot_id,raw) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                 ("relay-billing", now_iso(), "relay_usage", None, args.url, None, 0,
-                  total, None, json.dumps({"start": start, "end": end, **data}, ensure_ascii=False)))
-    conn.commit()
-    print(f"[{args.url}] {start} ~ {end}: ${total:,.2f} 已入账 (source=relay-billing)")
-
-
-
-    vault = vault_dir(args)
-    conn = db(vault)
-    conn.executescript(SCHEMA)
-    key = resolve_key(args)
-    if not key:
-        raise SystemExit("无 API key (CV_RELAY_KEY / --key / headroom-auth-token)")
-    end = args.end or dt.date.today().isoformat()
-    start = args.start or (dt.date.today() - dt.timedelta(days=args.days)).isoformat()
-    data = fetch_relay_usage(args.url, key, start, end)
-    total = float(data.get("total_usage", 0))  # OpenAI 口径: 美元(cent? openai 为 $, new-api 为 $)
     conn.execute("INSERT INTO ledger_events(source,occurred_at,kind,model,provider,client,"
                  "tokens_saved,cost_usd,snapshot_id,raw) VALUES(?,?,?,?,?,?,?,?,?,?)",
                  ("relay-billing", now_iso(), "relay_usage", None, args.url, None, 0,
@@ -1127,7 +1120,7 @@ def sync_one(conn, vault: Path, path: Path) -> str:
     sid = snapshot_id(envelope)
     out = vault / "snapshots" / f"{sid}.json"
     if not out.exists():
-        out.write_text(json.dumps(envelope, ensure_ascii=False, indent=1), encoding="utf-8")
+        atomic_write_text(out, json.dumps(envelope, ensure_ascii=False, indent=1))
     register_snapshot(conn, envelope, sid, out)
     conn.execute("INSERT OR REPLACE INTO sync_sources(path,mtime,size,snapshot_id,synced_at)"
                  " VALUES(?,?,?,?,?)", (str(path), st.st_mtime, st.st_size, sid, now_iso()))
@@ -1224,8 +1217,7 @@ def _sync_zcode_db(conn, vault: Path) -> tuple:
         sid = snapshot_id(envelope)
         out = vault / "snapshots" / f"{sid}.json"
         if not out.exists():
-            out.write_text(json.dumps(envelope, ensure_ascii=False, indent=1),
-                           encoding="utf-8")
+            atomic_write_text(out, json.dumps(envelope, ensure_ascii=False, indent=1))
         register_snapshot(conn, envelope, sid, out)
         conn.execute("INSERT OR REPLACE INTO sync_sources(path,mtime,size,snapshot_id,synced_at)"
                      " VALUES(?,?,?,?,?)", (key, mtime, 0, sid, now_iso()))
@@ -1495,7 +1487,7 @@ def cmd_fork(args):
     if out.exists():
         print(f"该分叉已存在 (幂等): {out.name}")
     else:
-        out.write_text(json.dumps(env, ensure_ascii=False, indent=1), encoding="utf-8")
+        atomic_write_text(out, json.dumps(env, ensure_ascii=False, indent=1))
         print(f"已分叉: {args.snapshot_id} → {sid}"
               + (f" · 备注: {args.message}" if args.message else ""))
     conn = db(vault)
@@ -1720,7 +1712,7 @@ def cmd_ingest(args):
     if out.exists():
         print(f"已存在 (幂等跳过): {out.name}")
     else:
-        out.write_text(json.dumps(envelope, ensure_ascii=False, indent=1), encoding="utf-8")
+        atomic_write_text(out, json.dumps(envelope, ensure_ascii=False, indent=1))
         s = exported["stats"]
         print(f"已接入 {out.name}  源={exported['capture']['source_format']}  "
               f"块={s['blocks_total']}  入token={s['tokens_in']}")
@@ -2604,7 +2596,7 @@ const shortModels=s=>{try{const m=JSON.parse(s);return m.by_agent?Object.entries
 async function probeNow(){
   const b=document.querySelector("#t-probe .btn.primary");if(b)b.disabled=true;
   toast("探测中…");
-  try{const r=await api("/probe",{method:"POST"});
+    try{const r=await api("/probe",{method:"POST",headers:{"Content-Type":"application/json"}});
     const bad=r.alerts&&r.alerts.length;
     toast(bad?"发现异常："+r.alerts.map(a=>"["+a.profile+"] "+(a.kind==="model_missing"?"模型消失 "+a.detail:a.kind)).join("；"):"探测完成：全部上游正常",bad);
     delete $("#probe-list").dataset.loaded;loadProbe();
@@ -2624,7 +2616,7 @@ def build_vault_server(vault: Path, port: int):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import urlparse, parse_qs
     sys.path.insert(0, str(Path(__file__).parent))
-    from mcp_server import block_text
+    from mcp_server import block_text, ledger_summary  # ledger_summary: /stats 端点 (曾漏导入致 500)
     idx = VaultIndex(vault, block_text)
 
     class H(BaseHTTPRequestHandler):
@@ -2639,9 +2631,32 @@ def build_vault_server(vault: Path, port: int):
             self.end_headers()
             self.wfile.write(body)
 
+        def _guard(self, post: bool) -> bool:
+            """本地访问防护: Host 必须回环 (挡 DNS rebinding 读会话史); Origin 若带必须回环
+            (挡恶意网页跨站); POST 强制 application/json (跨站简单请求发不出该类型 = 强制预检,
+            预检无 CORS 应答即被浏览器拦截)。本地进程 (MCP 热索引/托盘/CLI) 不受影响。"""
+            host = (self.headers.get("Host") or "").strip().lower()
+            hn = host.rsplit(":", 1)[0].strip("[]") if ":" in host else host
+            if hn not in ("127.0.0.1", "localhost", "::1"):
+                self._json({"error": f"forbidden: host '{host}' 不在本地白名单"}, 403)
+                return False
+            org = self.headers.get("Origin")
+            if org:
+                if (urlparse(org).hostname or "").lower() not in ("127.0.0.1", "localhost", "::1"):
+                    self._json({"error": f"forbidden: origin '{org}' 非本地"}, 403)
+                    return False
+            if post:
+                ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                if ctype != "application/json":
+                    self._json({"error": "forbidden: POST 需要 Content-Type: application/json"}, 403)
+                    return False
+            return True
+
         def do_GET(self):
             u = urlparse(self.path)
             q = {k: v[0] for k, v in parse_qs(u.query).items()}
+            if not self._guard(False):
+                return
             try:
                 if u.path == "/":
                     body = CONSOLE_HTML.encode("utf-8")
@@ -2734,6 +2749,8 @@ def build_vault_server(vault: Path, port: int):
         def do_POST(self):
             import urllib.parse as _up
             u = _up.urlparse(self.path)
+            if not self._guard(True):
+                return
             try:
                 n = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
@@ -2746,8 +2763,7 @@ def build_vault_server(vault: Path, port: int):
                     baseline = json.loads(baseline_p.read_text(encoding="utf-8")) if baseline_p.exists() else {}
                     alerts = probe_once(vault, load_profiles(), resolve_key(_KeyStub()), baseline,
                                         verbose=False)
-                    baseline_p.write_text(json.dumps(baseline, ensure_ascii=False, indent=1),
-                                          encoding="utf-8")
+                    atomic_write_text(baseline_p, json.dumps(baseline, ensure_ascii=False, indent=1))
                     return self._json({"alerts": alerts})
                 self._json({"error": "unknown route"}, 404)
             except Exception as e:
@@ -2762,6 +2778,8 @@ def cmd_serve(args):
     print(f"vault 热索引就绪: {len(idx.envs)} 快照, {len(idx.index)} 词项")
     print(f"Context Vault 服务已启动: http://127.0.0.1:{args.port} (Ctrl+C 退出)")
     print("  MCP server 检测到本服务时自动走热索引 (CV_VAULT_SVC 可覆盖地址)")
+    print("  本地访问防护已启用: Host/Origin 回环校验 + POST 强制 application/json"
+          " (浏览器跨站与 DNS rebinding 会被 403 拦截, 本地进程不受影响)")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

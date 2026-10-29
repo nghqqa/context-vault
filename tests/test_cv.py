@@ -324,9 +324,9 @@ def test_owned_stats_zero_external(isolated):
 
 # ---------------- M3 记忆层 ----------------
 
-def test_memory_extract_and_search(isolated, monkeypatch):
+def test_memory_extract_and_search(isolated, monkeypatch, tmp_path):
     _, vault = isolated
-    env = make_env(tmp_path_maker(), "codex-rollout")
+    env = make_env(tmp_path, "codex-rollout")
     env["conversation"].append({"type": "text", "role": "assistant",
                                 "content": "结论：我们决定采用单实例自托管方案", "ts": ""})
     env["conversation"].insert(0, {"type": "compaction", "summary": "早前讨论了缓存策略并确定 TTL=300",
@@ -355,15 +355,11 @@ def test_memory_extract_and_search(isolated, monkeypatch):
     assert all(h["snapshot"] == sid for h in hits)
 
 
-def tmp_path_maker():
-    return Path(__file__).parent  # make_env 只用 tmp 做中转, 任意可写目录均可
-
-
 # ---------------- M3 收尾: fork / audit / 引擎接口 ----------------
 
-def test_fork_lineage(isolated, monkeypatch, capsys):
+def test_fork_lineage(isolated, monkeypatch, capsys, tmp_path):
     _, vault = isolated
-    env = make_env(Path(__file__).parent)
+    env = make_env(tmp_path)
     sid = "cv_forksrc1"
     (vault / "snapshots").mkdir(exist_ok=True)
     (vault / "snapshots" / f"{sid}.json").write_text(json.dumps(env), encoding="utf-8")
@@ -452,3 +448,74 @@ def test_export_zcode_session(isolated, tmp_path):
     assert tc["call_id"] == "call_1" and tr["call_id"] == "call_1"
     assert tr["content"] == "a b c"
     assert "signature" not in json.dumps(r)  # spec §3.2: 签名不可移植即丢弃
+
+
+# ---------------- serve 本地访问防护 + 账本回归 (2026-10-29 修复) ----------------
+
+import http.client  # noqa: E402
+import threading  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+
+def _req(port, method, path, body=None, headers=None):
+    """直接对 127.0.0.1:port 发请求, 返回 (status, body_json); 头部完全可控。"""
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    c.request(method, path, body=body, headers=headers or {})
+    r = c.getresponse()
+    raw = r.read().decode("utf-8", errors="replace")
+    c.close()
+    return r.status, (json.loads(raw) if raw.startswith("{") else {})
+
+
+def test_serve_local_guard_and_stats(isolated, tmp_path):
+    """Host/Origin 回环白名单 + POST 强制 application/json; /stats 曾因漏导入 500。"""
+    _, vault = isolated
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    conn.commit()
+    srv, _idx = cv.build_vault_server(vault, 0)  # 0 = 随机空闲端口
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        # 本地进程 (MCP 热索引 / 托盘 / 控制台同源页面) 正常访问
+        code, h = _req(port, "GET", "/healthz")
+        assert code == 200 and h["status"] == "ok"
+        code, s = _req(port, "GET", "/stats")  # 回归: ledger_summary 漏导入曾 500
+        assert code == 200 and "owned" in s and "stats" in s
+        # DNS rebinding: Host 非回环 → 403
+        code, _ = _req(port, "GET", "/healthz", headers={"Host": "evil.example:1"})
+        assert code == 403
+        # 恶意网页跨站: Origin 非回环 → 403
+        code, _ = _req(port, "GET", "/healthz", headers={"Origin": "http://evil.example"})
+        assert code == 403
+        # 跨站简单请求 POST (text/plain 不触发预检) → 403, 不再触达 do_import
+        code, _ = _req(port, "POST", "/migrate",
+                       body=json.dumps({"id": "x", "apply": True}),
+                       headers={"Content-Type": "text/plain"})
+        assert code == 403
+        # 合法 POST: application/json + 回环 Origin → 200 (真实快照 dry-run 迁移)
+        env = make_env(tmp_path)
+        sid = cv.snapshot_id(env)
+        (vault / "snapshots").mkdir(exist_ok=True)
+        cv.atomic_write_text(vault / "snapshots" / f"{sid}.json", json.dumps(env, ensure_ascii=False))
+        code, r = _req(port, "POST", "/migrate",
+                       body=json.dumps({"id": sid, "target": "codex", "apply": False}),
+                       headers={"Content-Type": "application/json",
+                                "Origin": f"http://127.0.0.1:{port}"})
+        assert code == 200 and r["lines"] >= 1 and r["applied"] is False
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_ledger_relay_billing_single_entry(isolated, monkeypatch, capsys):
+    """回归: billing 模式重复代码块曾致每次导入双计入 relay_usage。"""
+    _, vault = isolated
+    monkeypatch.delenv("CV_RELAY_KEY", raising=False)
+    monkeypatch.setattr(cv, "fetch_relay_usage", lambda url, key, s, e: {"total_usage": 12.34})
+    cv.cmd_ledger_import_relay(SimpleNamespace(
+        vault=str(vault), mode="billing", url="https://relay.example",
+        days=7, start=None, end=None, key="k", token=None, user_id=None, log_path=None))
+    conn = cv.db(vault)
+    rows = conn.execute("SELECT cost_usd FROM ledger_events WHERE kind='relay_usage'").fetchall()
+    assert len(rows) == 1 and rows[0][0] == 12.34
