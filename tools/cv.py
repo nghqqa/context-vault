@@ -2311,8 +2311,9 @@ input{flex:1;min-width:260px}
 <main>
 <section id="t-ov">
   <div class="statband" id="ov-band"><div class="skel" style="width:220px"></div><div class="skel" style="width:160px"></div><div class="skel" style="width:160px"></div></div>
-  <h2>月度节省走势</h2><div class="months" id="ov-months"></div>
-  <h2>按模型明细</h2><div id="ov-models"></div>
+  <div id="ov-recent" style="margin-top:8px"></div>
+  <h2>月度节省走势（数据源：headroom 导入）</h2><div class="months" id="ov-months"></div>
+  <h2>按模型明细（数据源：headroom 导入）</h2><div id="ov-models"></div>
 </section>
 
 <section id="t-snap" style="display:none">
@@ -2413,23 +2414,34 @@ const stat=(v,k,cls="")=>'<div class="stat"><div class="v '+cls+'">'+v+'</div><d
 const kv=(k,v)=>"<b>"+k+"</b><span>"+(v==null?"—":v)+"</span>";
 
 async function loadOv(){
-  try{const d=await api("/ledger");const lt=d.lifetime||{};const ow=d.owned||{};
-    const hasLt=(lt.saved_usd||0)+(lt.cache_savings_usd||0)>0;
+  try{
+    const [d,rc]=await Promise.all([api("/ledger"),api("/recent?limit=3").catch(()=>[])]);
+    const lt=d.lifetime||{};const ow=d.owned||{};
     let band="";
-    if(ow.snapshots){ /* vault 自有账本: 零外部依赖, 人人开箱即有 */
-      band+=stat(bn(ow.tokens_in),"会话累计消耗 tokens（"+num(ow.snapshots)+" 快照 · 自有）")+
-        stat((ow.cache_hit_rate*100).toFixed(0)+"%","缓存命中率（cache 读 "+bn(ow.cache_read)+"）","neutral");
+    /* ① 资产带 (vault 自有): 库里有什么、还在不在动 */
+    if(ow.snapshots){
+      band+=stat(num(ow.snapshots),"快照资产 · 跨 harness 统一库存");
+      band+=stat(num(d.memories||0),"跨会话记忆 · 自动提取, 注明来源快照","neutral");
       const top=(ow.by_agent||[])[0];
-      if(top)band+=stat(num(top.snapshots),esc(top.agent)+" 会话 · "+bn(top.tokens_in||0)+" tok","neutral");
+      if(top)band+=stat(esc(top.agent)+" ×"+num(top.snapshots),
+        "会话最多的 agent · 累计输入 "+bn(top.tokens_in||0)+" tok","neutral");
     }
-    if(hasLt){ /* headroom 增强: 装了才解锁 */
-      const total=(lt.saved_usd||0)+(lt.cache_savings_usd||0);
-      band+=stat(usd(total),"累计节省（headroom 通路层）")+
-        stat(usd(lt.cache_savings_usd),"缓存节省","neutral");
+    /* ② 消耗带 (自有): 数字带参照系, 不裸奔 */
+    band+=stat(bn(ow.tokens_in),"累计输入 tokens · 提取自快照内嵌用量, 零外部依赖","neutral");
+    band+=stat((ow.cache_hit_rate*100).toFixed(0)+"%",
+      "缓存命中率 · 命中部分按约 1/10 计价, 越高越省（cache 读 "+bn(ow.cache_read)+"）","neutral");
+    /* ③ 通路节省 (headroom 增强): 整带归因; 未接入时折叠为引导 */
+    const hasLt=(lt.saved_usd||0)+(lt.cache_savings_usd||0)>0;
+    if(hasLt){
+      band+=stat(usd((lt.saved_usd||0)+(lt.cache_savings_usd||0)),
+        "通路层节省 · headroom 代理压缩, 按官方价目折算（估算, 非账单）");
     }else{
-      band+=stat("—","节省金额：接入 headroom 解锁（cv ledger import-headroom）","neutral");
+      band+=stat("—","通路层节省 · 未接入（导入: cv ledger import-headroom）","neutral");
     }
     $("#ov-band").innerHTML=band;
+    const arr=Array.isArray(rc)?rc:[];
+    $("#ov-recent").innerHTML=arr.length?"<span class='k' style='opacity:.6;font-size:12px'>最近活跃会话</span>　"+
+      arr.map(s=>'<span class="chip" title="'+esc(s.sid)+'">'+esc(s.agent||"?")+" · "+frel(s.created_at)+"</span>").join(""):"";
     const ms=d.monthly||[];
     if(!ms.length)$("#ov-months").innerHTML='<div class="empty">暂无月度数据<br>导入账本 <code>cv ledger import-headroom</code></div>';
     else{
@@ -2684,6 +2696,10 @@ def build_vault_server(vault: Path, port: int):
                     return self._json([dict(r) for r in rows])
                 if u.path == "/ledger":
                     conn = db(vault)
+                    try:
+                        mem_n = conn.execute("SELECT COUNT(*) n FROM memory_items").fetchone()["n"]
+                    except sqlite3.OperationalError:
+                        mem_n = 0
                     lt = conn.execute("SELECT tokens_saved, cost_usd, raw FROM ledger_events"
                                       " WHERE source='headroom-lifetime'").fetchone()
                     by_model = conn.execute("SELECT model, COUNT(*) n, SUM(tokens_saved) t, SUM(cost_usd) c"
@@ -2697,7 +2713,7 @@ def build_vault_server(vault: Path, port: int):
                                                     "saved_usd": lt["cost_usd"] if lt else 0, **raw},
                                        "by_model": [dict(r) for r in by_model],
                                        "monthly": [dict(r) for r in monthly],
-                                       "owned": owned_stats(vault)})
+                                       "owned": owned_stats(vault), "memories": mem_n})
                 if u.path == "/preview":
                     env2 = idx.envs.get(q.get("id", ""))
                     if not env2:
