@@ -2447,7 +2447,7 @@ const kv=(k,v)=>"<b>"+k+"</b><span>"+(v==null?"—":v)+"</span>";
 
 async function loadOv(){
   try{
-    const [d,rc]=await Promise.all([api("/ledger"),api("/recent?limit=3").catch(()=>[])]);
+    const d=await api("/ledger");
     const lt=d.lifetime||{};const ow=d.owned||{};
     let band="";
     /* ① 资产带 (vault 自有): 库里有什么、还在不在动 */
