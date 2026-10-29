@@ -2438,8 +2438,9 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>setTab(b.datase
 async function boot(){
   try{const h=await api("/healthz");
     $("#status").innerHTML='<span class="pulse"></span>服务正常 · '+h.snapshots+" 快照 · "+num(h.terms)+" 索引词项";
-  }catch(e){const s=$("#status");s.classList.add("err");s.innerHTML="<span class='pulse'></span>服务异常"}
-  loadOv();loadSnaps();
+    loadOv();loadSnaps();
+  }catch(e){const s=$("#status");s.classList.add("err");s.innerHTML="<span class='pulse'></span>服务异常 · 4s 后重试";
+    setTimeout(boot,4000)}   /* 常驻重启/部署窗口期自动恢复, 不定格在连接失败 */
 }
 const stat=(v,k,cls="")=>'<div class="stat"><div class="v '+cls+'">'+v+'</div><div class="k">'+k+"</div></div>";
 const kv=(k,v)=>"<b>"+k+"</b><span>"+(v==null?"—":v)+"</span>";
@@ -2689,8 +2690,22 @@ def build_vault_server(vault: Path, port: int):
     idx = VaultIndex(vault, block_text)
 
     class H(BaseHTTPRequestHandler):
+        # HTTP/1.0 下 Chromium 系 webview 会复用已被服务端关闭的连接, fetch 全部挂起
+        # (HTML 导航走新连接所以页面能开, 数据接口全卡"加载中")。1.1 + 全端点 Content-Length = 正确 keep-alive。
+        protocol_version = "HTTP/1.1"
+
         def log_message(self, *a):
             pass
+
+        def log_request(self, code="-", size="-"):
+            # 请求落盘: 诊断"浏览器 fetch 挂起"类问题的关键证据 (请求到没到服务)
+            try:
+                with (vault / "serve_http.log").open("a", encoding="utf-8") as fh:
+                    fh.write(f"{dt.datetime.now().isoformat(timespec='seconds')} "
+                             f"{self.client_address[0]} \"{self.requestline}\" {code} "
+                             f"UA={str(self.headers.get('User-Agent', ''))[:48]}\n")
+            except OSError:
+                pass
 
         def _json(self, obj, code=200):
             body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
