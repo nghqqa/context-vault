@@ -215,6 +215,7 @@ def isolated(tmp_path, monkeypatch):
     (home / ".claude" / "projects" / "D--proj").mkdir(parents=True)
     monkeypatch.setattr(cv, "HOME", home)
     monkeypatch.setattr(cv, "CODEX_SESSIONS", home / ".codex" / "sessions")
+    monkeypatch.setattr(cv, "ZCODE_DB", home / ".zcode" / "absent.sqlite")  # 隔离真实 zcode 库
     import cv as _cv
     # scan_sources 用模块常量, 已随 monkeypatch 生效
     vault = tmp_path / "vault"
@@ -414,3 +415,40 @@ def test_memory_engine_protocol():
     _s.modules["tests_fake_engine"] = mod
     e2 = cv.load_memory_engine(fake)
     assert e2.name == "fake" and e2.extract({})[0]["content"] == "x"
+
+
+# ---------------- zcode sqlite 适配器 ----------------
+
+def test_export_zcode_session(isolated, tmp_path):
+    import sqlite3 as _s
+    db = _s.connect(":memory:")
+    db.row_factory = _s.Row
+    db.executescript("""CREATE TABLE session(id TEXT, directory TEXT, title TEXT, time_updated INTEGER,
+        time_deleted INTEGER, time_created INTEGER);
+        CREATE TABLE message(id TEXT, session_id TEXT, data TEXT, time_created INTEGER, sequence INTEGER);
+        CREATE TABLE part(id TEXT, message_id TEXT, session_id TEXT, data TEXT, sequence INTEGER);""")
+    db.execute("INSERT INTO session VALUES('sess_t','D:\proj','测试会话',1793000000000,NULL,1793000000000)")
+    db.execute("INSERT INTO message VALUES('m1','sess_t',?,1000,1)",
+               (json.dumps({"role": "user"}),))
+    db.execute("INSERT INTO message VALUES('m2','sess_t',?,2000,2)",
+               (json.dumps({"role": "assistant", "modelId": "GLM-5.3"}),))
+    db.execute("INSERT INTO part VALUES('p1','m1','sess_t',?,1)",
+               (json.dumps({"type": "text", "text": "帮我看看"}),))
+    db.execute("INSERT INTO part VALUES('p2','m1','sess_t',?,2)",
+               (json.dumps({"type": "text", "text": "[系统提醒]", "synthetic": True}),))
+    db.execute("INSERT INTO part VALUES('p3','m2','sess_t',?,1)",
+               (json.dumps({"type": "reasoning", "text": "先查库",
+                            "metadata": {"anthropic": {"signature": "sig"}}}),))
+    db.execute("INSERT INTO part VALUES('p4','m2','sess_t',?,2)",
+               (json.dumps({"type": "tool", "callID": "call_1", "tool": "Bash",
+                            "state": {"status": "completed", "input": {"command": "ls"},
+                                      "output": "a b c"}}),))
+    r = cv.export_zcode_session(db, db.execute("SELECT * FROM session").fetchone())
+    types = [b["type"] for b in r["conversation"]]
+    assert types == ["text", "thinking", "tool_call", "tool_result"]  # synthetic 被过滤
+    assert r["capture"]["agent"] == "zcode" and r["capture"]["model"] == "GLM-5.3"
+    assert r["capture"]["cwd"] == "D:\proj"
+    tc = r["conversation"][2]; tr = r["conversation"][3]
+    assert tc["call_id"] == "call_1" and tr["call_id"] == "call_1"
+    assert tr["content"] == "a b c"
+    assert "signature" not in json.dumps(r)  # spec §3.2: 签名不可移植即丢弃

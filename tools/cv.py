@@ -225,7 +225,7 @@ def export_codex(path: Path, drop_developer: bool) -> dict:
 
 def export_claude(path: Path, drop_developer: bool) -> dict:
     blocks, stats = [], zero_stats()
-    capture = {"agent": "claude-code", "source_format": "claude-transcript", "provider": None,
+    capture = {"agent": "zcode", "source_format": "claude-transcript", "provider": None,
                "model": None, "session_ref": path.stem, "completeness": "no_assistant_text"}
     seq = 0
     pending: dict = {}  # tool_name -> [call_id, ...] 按序 FIFO 匹配 (同名调用顺序完成)
@@ -1134,6 +1134,107 @@ def sync_one(conn, vault: Path, path: Path) -> str:
     return "update" if row else "new"
 
 
+ZCODE_DB = HOME / ".zcode" / "cli" / "db" / "db.sqlite"
+
+
+def export_zcode_session(db_conn, srow) -> dict:
+    """Zcode 主转录库 (~/.zcode/cli/db/db.sqlite) 的单会话导出。
+    结构实测: message.data{role,modelId} 按 sequence; part.data{type}: text/reasoning/tool
+    (tool 自带 state.input/output 无需配对); synthetic part 过滤; signature 丢弃 (spec §3.2)。"""
+    blocks, stats = [], zero_stats()
+    sid = srow["id"]
+    capture = {"agent": "zcode", "source_format": "zcode-sqlite",
+               "provider": None, "model": None, "session_ref": sid,
+               "completeness": "full"}
+    if srow["directory"]:
+        capture["cwd"] = srow["directory"]
+    if srow["title"]:
+        capture["originator"] = str(srow["title"])[:80]
+    first_ts = None
+    for m in db_conn.execute("SELECT id, data, time_created FROM message WHERE session_id=?"
+                             " ORDER BY sequence", (sid,)):
+        try:
+            md = json.loads(m["data"])
+        except ValueError:
+            continue
+        role = md.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        if not capture.get("model") and md.get("modelId"):
+            capture["model"] = md.get("modelId")
+        ts = dt.datetime.fromtimestamp(m["time_created"] / 1000,
+                                       dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z") \
+            if m["time_created"] else ""
+        first_ts = first_ts or ts
+        for p in db_conn.execute("SELECT data FROM part WHERE message_id=? ORDER BY sequence",
+                                 (m["id"],)):
+            try:
+                pd = json.loads(p["data"])
+            except ValueError:
+                continue
+            pt = pd.get("type")
+            if pt == "text" and not pd.get("synthetic"):
+                blocks.append({"type": "text", "role": role,
+                               "content": pd.get("text", "") or "", "ts": ts})
+            elif pt == "reasoning":
+                summary = pd.get("text", "") or ""
+                if summary:
+                    blocks.append({"type": "thinking", "summary": summary, "ts": ts})
+            elif pt == "tool":
+                state = pd.get("state") or {}
+                call_id = pd.get("callID")
+                name = pd.get("tool")
+                inp = state.get("input")
+                blocks.append({"type": "tool_call", "call_id": call_id, "name": name,
+                               "namespace": None, "arguments": inp, "ts": ts})
+                out = state.get("output")
+                if out is not None:
+                    content, _ = clip(str(out))
+                    blocks.append({"type": "tool_result", "call_id": call_id,
+                                   "content": content, "is_error": False, "ts": ts})
+    stats["blocks_total"] = len(blocks)
+    return {"capture": capture, "conversation": blocks, "stats": stats}
+
+
+def _sync_zcode_db(conn, vault: Path) -> tuple:
+    """zcode 主库增量同步: session.time_updated 水位, 键 zcode:<session_id>。"""
+    if not ZCODE_DB.exists():
+        return (0, 0, 0)
+    import sqlite3 as _s
+    db_conn = _s.connect(f"file:{ZCODE_DB}?mode=ro", uri=True)
+    db_conn.row_factory = _s.Row
+    n_new = n_upd = 0
+    for srow in db_conn.execute("SELECT * FROM session WHERE time_deleted IS NULL"
+                                " ORDER BY time_updated"):
+        key = f"zcode:{srow['id']}"
+        mtime = (srow["time_updated"] or 0) / 1000
+        prev = conn.execute("SELECT mtime, snapshot_id FROM sync_sources WHERE path=?",
+                            (key,)).fetchone()
+        if prev and abs(prev["mtime"] - mtime) < 1:
+            continue
+        try:
+            exported = export_zcode_session(db_conn, srow)
+        except Exception:
+            continue
+        if exported["stats"]["blocks_total"] == 0:
+            continue
+        envelope = build_envelope(exported)
+        if prev and prev["snapshot_id"]:
+            envelope["lineage"]["parent_snapshot"] = prev["snapshot_id"]
+        sid = snapshot_id(envelope)
+        out = vault / "snapshots" / f"{sid}.json"
+        if not out.exists():
+            out.write_text(json.dumps(envelope, ensure_ascii=False, indent=1),
+                           encoding="utf-8")
+        register_snapshot(conn, envelope, sid, out)
+        conn.execute("INSERT OR REPLACE INTO sync_sources(path,mtime,size,snapshot_id,synced_at)"
+                     " VALUES(?,?,?,?,?)", (key, mtime, 0, sid, now_iso()))
+        n_upd += 1 if prev else 0
+        n_new += 0 if prev else 1
+    db_conn.close()
+    return (n_new, n_upd, 0)
+
+
 def cmd_sync(args):
     vault = vault_dir(args)
     (vault / "snapshots").mkdir(parents=True, exist_ok=True)
@@ -1157,6 +1258,11 @@ def cmd_sync(args):
             n_empty += 1
         else:
             n_skip += 1
+    try:
+        z_new, z_upd, _ = _sync_zcode_db(conn, vault)
+        n_new += z_new; n_upd += z_upd
+    except Exception as e:
+        print(f"  ! zcode 库同步跳过: {str(e)[:80]}")
     conn.commit()
     total = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
     print(f"sync 完成: 新增 {n_new} · 更新 {n_upd} · 跳过 {n_skip}(未变/异常)"
