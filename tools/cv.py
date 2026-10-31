@@ -2231,9 +2231,9 @@ td.mono{font-family:var(--mono);font-size:12.5px}
 td .sub{color:var(--ink-3);font-size:12px}
 
 /* ---------- 概览内容网格 (Linear 风白卡系统) ---------- */
-.ovgrid{display:grid;grid-template-columns:8fr 4fr;gap:16px;align-items:start;margin-top:16px}
-.ovgrid .side{display:grid;gap:16px}
-.duo{display:grid;grid-template-columns:1fr 1.2fr;gap:16px;align-items:start}
+.ovgrid{display:grid;grid-template-columns:8fr 4fr;gap:16px;align-items:stretch;margin-top:16px}
+.ovgrid .side{display:grid;gap:16px;grid-auto-rows:1fr}
+.duo{display:grid;grid-template-columns:1fr 1.2fr;gap:16px;align-items:stretch}
 .ovcard,.panel{background:#fff;border:1px solid #e4e4e7;border-radius:10px;
   box-shadow:0 1px 2px rgba(9,9,11,.04)}
 .ovcard{padding:2px 4px 4px}
@@ -2255,12 +2255,17 @@ td .sub{color:var(--ink-3);font-size:12px}
 .pill.warn{color:#a16207;background:#fefce8}
 @media(max-width:1100px){.ovgrid,.duo{grid-template-columns:1fr}}
 
-/* ---------- 月度走势 (细柱 + 数值标签) ---------- */
-.months{display:flex;gap:6px;height:150px;padding:10px 4px 0;
-  background:repeating-linear-gradient(to top,transparent 0 36px,#e4e4e7 36px 37px)}
+/* ---------- 月度走势 (Y 轴刻度 + 柱顶数值) ---------- */
+.months{display:flex;gap:10px;height:150px;padding:10px 4px 0}
+.yax{width:52px;flex:none;display:flex;flex-direction:column;justify-content:space-between;
+  align-items:flex-end;font-family:var(--mono);font-size:10px;color:#a1a1aa;
+  font-variant-numeric:tabular-nums;padding-bottom:18px}
+.bars{flex:1;display:flex;gap:6px;height:100%;
+  background:repeating-linear-gradient(to top,transparent 0 36px,#ececee 36px 37px)}
 .mcol{flex:1;position:relative;min-width:0}
-.mcol .val{position:absolute;left:0;right:0;bottom:calc(22px + 4px + 1%);
-  text-align:center;font-family:var(--mono);font-size:10.5px;color:#71717a;
+.mcol .val{position:absolute;left:50%;transform:translateX(-50%);
+  bottom:calc(22px + var(--h,50) * 0.96%);
+  font-family:var(--mono);font-size:10.5px;color:#3f3f46;white-space:nowrap;
   font-variant-numeric:tabular-nums}
 .mcol .stick{position:absolute;left:50%;bottom:22px;width:32px;max-width:60%;
   height:3%;max-height:calc(100% - 26px);background:#10b981;border-radius:4px 4px 0 0;
@@ -2572,10 +2577,12 @@ async function loadOv(){
     if(!ms.length)$("#ov-months").innerHTML='<div class="empty">暂无月度数据<br>导入账本 <code>cv ledger import-headroom</code></div>';
     else{
       const mx=Math.max(...ms.map(m=>m.c||0),1);
-      $("#ov-months").innerHTML=ms.map((m,i)=>{const h=Math.max(100*(m.c||0)/mx,3);
-        return '<div class="mcol"><div class="val">'+usd(m.c||0)+'</div><div class="stick" style="height:'+
-        h.toFixed(2)+'%;--i:'+i+'" title="'+esc(m.m+" · "+usd(m.c))+
-        '"></div><div class="lb">'+esc(m.m.slice(2))+"</div></div>"}).join("");
+      const fmt=v=>"$"+(v>=1000?(v/1000).toFixed(1)+"k":v.toFixed(0));
+      $("#ov-months").innerHTML='<div class="yax"><span>'+fmt(mx)+'</span><span>'+fmt(mx/2)+
+        '</span><span>$0</span></div><div class="bars">'+ms.map((m,i)=>{const h=Math.max(100*(m.c||0)/mx,3);
+        return '<div class="mcol"><div class="val" style="--h:'+h.toFixed(1)+'">'+usd(m.c||0)+
+        '</div><div class="stick" style="height:'+h.toFixed(2)+'%;--i:'+i+'" title="'+
+        esc(m.m+" · "+usd(m.c))+'"></div><div class="lb">'+esc(m.m.slice(2))+"</div></div>"}).join("")+"</div>";
     }
     $("#ov-models").innerHTML=table(["模型","事件","节省 tokens","节省金额"],
       (d.by_model||[]).map(m=>["<span class='mono'>"+esc(m.model||"未知模型")+"</span>",
