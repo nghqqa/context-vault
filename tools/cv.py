@@ -2292,9 +2292,12 @@ td .sub{color:var(--ink-3);font-size:12px}
 
 /* ---------- 表单与按钮 ---------- */
 .controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
-input,select{background:var(--bg1);border:1px solid var(--line);color:var(--ink);
+input,select{background:#fff;border:1px solid #e4e4e7;color:var(--ink);
   border-radius:var(--rad);padding:8px 12px;font-size:13.5px;outline:none;
   transition:border-color .15s ease,background .15s ease}
+select{appearance:none;-webkit-appearance:none;padding-right:30px;cursor:pointer;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 10px center}
 input::placeholder{color:var(--ink-3)}
 input:focus,select:focus{border-color:var(--acc);background:var(--bg2)}
 input{flex:1;min-width:260px}
@@ -2448,7 +2451,7 @@ input{flex:1;min-width:260px}
     <b>把历史会话迁移到另一个 agent</b>
     <div class="controls" style="margin-top:14px;margin-bottom:4px">
       <select id="mig-sid" style="flex:1;min-width:260px"></select>
-      <select id="mig-target"><option value="codex">→ Codex</option><option value="claude">→ Claude Code</option><option value="markdown">→ Markdown 简报 (任意 agent)</option></select>
+      <select id="mig-target"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="markdown">Markdown 简报 · 任意 agent</option></select>
       <button class="btn primary" onclick="migPreview()">预览迁移</button>
     </div>
     <div id="mig-preview"></div>
