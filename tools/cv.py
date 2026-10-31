@@ -1861,7 +1861,7 @@ def cmd_warm(args):
 DASH_TMPL = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <title>Context Vault · token 经济面板</title>
 <style>
-:root{--bg:#0e1116;--card:#171c24;--ink:#e6e9ef;--dim:#8b93a3;--acc:#4f9cf9;--good:#3ecf8e;--warn:#f5a623}
+:root{--bg:#f7f4ee;--card:#fffdf8;--ink:#26221c;--dim:#8c8577;--acc:#c2402a;--good:#2d7d46;--warn:#b07d1e}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--ink);font:14px/1.6 "Segoe UI",system-ui,sans-serif;padding:28px}
 h1{font-size:20px;margin-bottom:2px} .sub{color:var(--dim);font-size:12px;margin-bottom:22px}
@@ -1879,10 +1879,10 @@ table{width:100%;border-collapse:collapse;font-size:12.5px}
 th,td{text-align:left;padding:7px 10px;border-bottom:1px solid #202836}
 th{color:var(--dim);font-weight:500}
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
-.ok{background:var(--good)} .err{background:#e5534b} .warm{background:var(--warn)}
+.ok{background:var(--good)} .err{background:#c23a2e} .warm{background:var(--warn)}
 .months{display:flex;align-items:flex-end;gap:6px;height:120px}
 .mcol{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:4px}
-.mcol .stick{width:100%;max-width:46px;background:linear-gradient(180deg,var(--acc),#2a5f9e);border-radius:4px 4px 0 0}
+.mcol .stick{width:100%;max-width:46px;background:linear-gradient(180deg,var(--acc),#e8c9b0);border-radius:4px 4px 0 0}
 .mcol .lb{font-size:10px;color:var(--dim)}
 </style></head><body>
 <h1>Context Vault · token 经济面板</h1>
@@ -2140,12 +2140,12 @@ CONSOLE_HTML = r"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect x='2.5' y='2.5' width='15' height='15' rx='3.5' fill='none' stroke='%232dd4a7' stroke-width='1.7'/%3E%3Crect x='6.5' y='8' width='7' height='6' rx='1' fill='%232dd4a7'/%3E%3Cpath d='M7.5 8V6.5a2.5 2.5 0 0 1 5 0V8' fill='none' stroke='%232dd4a7' stroke-width='1.7' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
 :root{
-  --bg0:#0b1013; --bg1:#10181c; --bg2:#162226; --bg3:#1b2a2f;
-  --line:#1c2a2e; --line-soft:#162125;
-  --ink:#dde9e5; --ink-2:#9fb3ad; --ink-3:#6e837f;
-  --acc:#2dd4a7; --acc-ink:#0a1512; --acc-deep:#0f3b33;
-  --bar:#17594a; --bar-hover:#1e6d5b;
-  --warn:#e2b45c; --err:#e07862; --info:#5ca8dd;
+  --bg0:#f7f4ee; --bg1:#efeae0; --bg2:#e9e3d7; --bg3:#e2dbcc;
+  --line:#ddd5c5; --line-soft:#e6e0d3;
+  --ink:#26221c; --ink-2:#6b655a; --ink-3:#8c8577;
+  --acc:#c2402a; --acc-ink:#fffdf8; --acc-deep:#f3d9d2;
+  --bar:#e5b8ac; --bar-hover:#d99c8c;
+  --warn:#b07d1e; --err:#c23a2e; --info:#3d6f9e;
   --mono:"Cascadia Code",Consolas,"SF Mono",monospace;
   --sans:"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI",system-ui,sans-serif;
   --rad:8px; --head-h:56px; --nav-h:46px;
@@ -2157,7 +2157,7 @@ body{background:var(--bg0);color:var(--ink);font:14px/1.65 var(--sans);
 ::selection{background:var(--acc-deep);color:var(--ink)}
 ::-webkit-scrollbar{width:10px;height:10px}
 ::-webkit-scrollbar-thumb{background:var(--bg3);border-radius:5px;border:2px solid var(--bg0)}
-::-webkit-scrollbar-thumb:hover{background:#24363c}
+::-webkit-scrollbar-thumb:hover{background:#e2dbcc}
 :focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4px}
 button{font:inherit;color:inherit}
 
@@ -2217,7 +2217,7 @@ td.mono{font-family:var(--mono);font-size:12.5px}
 .sid:hover{text-decoration:underline;text-underline-offset:3px}
 .chip{display:inline-block;font-size:11px;padding:1px 8px;border-radius:5px;
   background:var(--bg2);color:var(--ink-2);border:1px solid var(--line)}
-.chip.warn{color:var(--warn);border-color:#4a3b1e}
+.chip.warn{color:var(--warn);border-color:#e3d3ae}
 .chip.ok{color:var(--acc);border-color:#1d4a40}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:2px;vertical-align:1px}
 .dot.ok{background:var(--acc)} .dot.err{background:var(--err)} .dot.warm{background:var(--info)} .dot.sw{background:var(--warn)}
@@ -2262,12 +2262,12 @@ input{flex:1;min-width:260px}
 .btn{display:inline-flex;align-items:center;gap:7px;background:var(--bg2);border:1px solid var(--line);
   border-radius:var(--rad);padding:8px 14px;font-size:13.5px;cursor:pointer;
   transition:border-color .15s ease,background .15s ease,transform .1s ease}
-.btn:hover{border-color:#2a4046;background:var(--bg3)}
+.btn:hover{border-color:#ddd5c5;background:var(--bg3)}
 .btn:active{transform:translateY(1px)}
 .btn.primary{background:var(--acc);border-color:var(--acc);color:var(--acc-ink);font-weight:600}
-.btn.primary:hover{background:#43e0b6;border-color:#43e0b6}
-.btn.danger{background:none;border-color:#5a4020;color:var(--warn)}
-.btn.danger:hover{background:#241b0e;border-color:var(--warn)}
+.btn.primary:hover{background:#c2402a;border-color:#c2402a}
+.btn.danger{background:none;border-color:#8a6a1c;color:var(--warn)}
+.btn.danger:hover{background:#fdf6e3;border-color:var(--warn)}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 
 /* ---------- 面板 ---------- */
@@ -2344,9 +2344,9 @@ input{flex:1;min-width:260px}
 <header>
   <div class="brand">
     <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-      <rect x="2.5" y="2.5" width="15" height="15" rx="3.5" stroke="#2dd4a7" stroke-width="1.7"/>
-      <rect x="6.5" y="8" width="7" height="6" rx="1" fill="#2dd4a7"/>
-      <path d="M7.5 8V6.5a2.5 2.5 0 0 1 5 0V8" stroke="#2dd4a7" stroke-width="1.7" stroke-linecap="round"/>
+      <rect x="2.5" y="2.5" width="15" height="15" rx="3.5" stroke="#c2402a" stroke-width="1.7"/>
+      <rect x="6.5" y="8" width="7" height="6" rx="1" fill="#c2402a"/>
+      <path d="M7.5 8V6.5a2.5 2.5 0 0 1 5 0V8" stroke="#c2402a" stroke-width="1.7" stroke-linecap="round"/>
     </svg>
     Context Vault
   </div>
@@ -2461,8 +2461,8 @@ function toast(m,err){const t=$("#toast");t.textContent=m;t.classList.toggle("er
 async function api(p,opt){const r=await fetch(p,opt);
   if(!r.ok)throw new Error((await r.json().catch(()=>({}))).error||r.status);return r.json()}
 
-const WARN='<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 2L15 14H1L8 2Z" stroke="#e2b45c" stroke-width="1.5" stroke-linejoin="round"/><path d="M8 6.5v3.5M8 12v.5" stroke="#e2b45c" stroke-width="1.5" stroke-linecap="round"/></svg>';
-const GOOD='<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.3" stroke="#2dd4a7" stroke-width="1.5"/><path d="M5.4 8.2l1.8 1.8 3.4-3.8" stroke="#2dd4a7" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const WARN='<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 2L15 14H1L8 2Z" stroke="#b07d1e" stroke-width="1.5" stroke-linejoin="round"/><path d="M8 6.5v3.5M8 12v.5" stroke="#b07d1e" stroke-width="1.5" stroke-linecap="round"/></svg>';
+const GOOD='<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.3" stroke="#c2402a" stroke-width="1.5"/><path d="M5.4 8.2l1.8 1.8 3.4-3.8" stroke="#c2402a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const errEmpty=(msg,retry)=>'<div class="empty">'+WARN+esc(msg)+
   (retry?'<br><button class="btn" onclick="'+retry+'">重试</button>':"")+"</div>";
 
