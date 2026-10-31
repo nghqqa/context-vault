@@ -2554,15 +2554,17 @@ async function loadOv(){
     }
     $("#ov-band").innerHTML=band;
     /* 内容区: 最近入库会话表 + 哨兵/记忆/审计三卡 (把实体内容带进概览) */
-    const [rc,pv,mr,au]=await Promise.all([api("/recent?limit=8").catch(()=>[]),
+    const [rc,pv,mr,au]=await Promise.all([api("/recent?limit=12").catch(()=>[]),
       api("/probe_events?limit=3").catch(()=>[]),api("/memory?q=&limit=3").catch(()=>[]),
       api("/audit").catch(()=>null)]);
     const arr=Array.isArray(rc)?rc:[];
-    $("#ov-latest").innerHTML=arr.length?table(["Agent","位置","入库时间","块","输入 tok"],
+    $("#ov-latest").innerHTML=(arr.length?table(["Agent","位置","入库时间","块","输入 tok"],
       arr.map(s=>['<span class="chip">'+esc(s.agent||"?")+"</span>",
         '<span class="sub" title="'+esc(s.cwd||"")+'">'+esc(String(s.cwd||"—").split(/[\\\\/]/).pop()||"—")+"</span>",
         frel(s.created_at),{t:num(s.blocks||0),num:1},{t:bn(s.tokens_in||0),num:1}]))
-      :errEmpty("还没有会话入库 · 先运行 cv sync","");
+      :errEmpty("还没有会话入库 · 先运行 cv sync",""))+
+      '<div class="foot"><span>显示最近 '+arr.length+' 条 · 共 '+num((d.owned||{}).snapshots||0)+' 条会话</span>'+
+      '<a onclick="setTab(\'snap\')">查看全部 →</a></div>';
     const pe=Array.isArray(pv)?pv:[];
     $("#ov-probe").innerHTML=pe.length?pe.map(e=>{
       const st=e.status||"?";const cls=st==="ok"?"ok":(st==="http_error"||st==="error")?"err":"warn";
