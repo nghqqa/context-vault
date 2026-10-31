@@ -2548,7 +2548,9 @@ async function loadOv(){
     }
     /* ② 消耗带 (自有) */
     band+=stat(bn(ow.tokens_in),"累计输入 tokens","提取自快照内嵌用量记录, 零外部依赖","neutral");
-    band+=stat((ow.cache_hit_rate*100).toFixed(0)+"%","缓存命中率","命中部分按约 1/10 计价, 越高越省 (cache 读 "+bn(ow.cache_read)+")","neutral");
+    band+=stat((ow.cache_hit_rate*100).toFixed(0)+"%","缓存命中率 · 省约 $"+
+      num(Math.round(ow.cache_read*0.9*3/1e6))+"k (估)",
+      "估算: 假设输入全价 $3/Mtok, 命中部分按约 1/10 计价, 差值即节省额 (相对'完全无缓存'的假想基准, 非 headroom 账单) · cache 读 "+bn(ow.cache_read),"neutral");
     /* ③ 通路节省 (headroom 增强): 正向指标 = 翡翠绿 */
     const hasLt=(lt.saved_usd||0)+(lt.cache_savings_usd||0)>0;
     if(hasLt){
@@ -2627,8 +2629,10 @@ const compCell=r=>r.completeness&&r.completeness!=="full"
 async function loadSnaps(){
   try{
     const rows=await api("/recent?limit=30");
-    $("#snap-list").innerHTML=table(["快照","来源","块数","入 tokens","完整性","时间 / 目录"],
-      rows.map(r=>[sidBtn(r.sid),agentCell(r),{t:num(r.blocks),num:1},{t:bn(r.tokens_in),num:1},
+    $("#snap-list").innerHTML=table(["快照","会话摘要","来源","块数","入 tokens","完整性","时间 / 目录"],
+      rows.map(r=>[sidBtn(r.sid),
+        '<span class="sub" title="'+esc(r.first||"")+'">'+esc(r.first||"(无文本)")+"</span>",
+        agentCell(r),{t:num(r.blocks),num:1},{t:bn(r.tokens_in),num:1},
         compCell(r),whenCell(r)]))
       ||'<div class="empty">vault 还是空的<br>导出第一个会话 <code>python tools/cv.py export ~/.codex/sessions/…/rollout-*.jsonl</code></div>';
     fillMig(rows);
