@@ -22,7 +22,7 @@ jobs:
       - run: python -m pytest tests/ -v
       - name: console JS syntax check (内嵌脚本崩一则整页失灵)
         run: |
-          python -c "import re; src=open('tools/cv.py',encoding='utf-8').read(); html=re.search(r'CONSOLE_HTML = r?\"\"\"(.*?)\"\"\"',src,re.S).group(1); open('console_check.js','w',encoding='utf-8').write(re.search(r'<script>(.*)</script>',html,re.S).group(1))"
+          python tools/check_console_js.py
           node --check console_check.js
       - name: stdlib-only check (引擎零第三方依赖)
         run: python -c "import sys; sys.path.insert(0, 'tools'); import cv, mcp_server; print('engine imports OK, zero third-party deps')"
