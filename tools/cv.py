@@ -2089,8 +2089,10 @@ class VaultIndex:
             env["_sid"] = sid
             self.envs[sid] = env
             self.meta[sid] = {"agent": env["capture"].get("agent"),
-                              "first": next((block_text(b)[:64] for b in env["conversation"]
-                                             if b.get("role") == "user" and block_text(b)), ""),
+                              "first": next(((b.get("content") or b.get("summary") or "")[:64]
+                                             for b in env["conversation"]
+                                             if b.get("role") == "user"
+                                             and (b.get("content") or b.get("summary"))), ""),
                               "created_at": env.get("created_at"),
                               "cwd": env["capture"].get("cwd"),
                               "blocks": env["stats"]["blocks_total"],
