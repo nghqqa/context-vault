@@ -2234,16 +2234,24 @@ td .sub{color:var(--ink-3);font-size:12px}
 .ovgrid{display:grid;grid-template-columns:8fr 4fr;gap:16px;align-items:stretch;margin-top:16px}
 .ovgrid .side{display:grid;gap:16px;grid-auto-rows:1fr}
 .duo{display:grid;grid-template-columns:1fr 1.2fr;gap:16px;align-items:stretch}
-.ovcard,.panel{background:#fff;border:1px solid #e4e4e7;border-radius:10px;
+.ovcard,.ocard{background:#fff;border:1px solid #e4e4e7;border-radius:10px;
   box-shadow:0 1px 2px rgba(9,9,11,.04)}
 .ovcard{padding:2px 4px 4px}
-.ovcard>.oc-h{font-size:11.5px;font-weight:600;color:#71717a;letter-spacing:.05em;
+.ocard{padding:12px 14px}
+.ovcard>.oc-h,.ocard .pt{font-size:11.5px;font-weight:600;color:#71717a;letter-spacing:.05em;
   text-transform:uppercase;padding:10px 12px 4px}
-.panel{padding:12px 14px}
-.panel .pt{font-size:11.5px;font-weight:600;color:#71717a;letter-spacing:.05em;
-  text-transform:uppercase;margin-bottom:6px}
-.panel .row{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;
+.panel .pt{margin-bottom:6px}
+.ocard .pt{padding:10px 12px 4px}
+.panel .row,.ocard .row{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;
   padding:6px 0;border-bottom:1px solid #ececee}
+.panel .row:last-child,.ocard .row:last-child{border-bottom:none}
+.panel .row .l,.ocard .row .l{color:#3f3f46;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.panel .row .r,.ocard .row .r{color:#71717a;white-space:nowrap;font-family:var(--mono);font-size:11.5px}
+.panel .hint,.ocard .hint{color:#a1a1aa;font-size:12px}
+.ovcard td{padding:10px 12px}
+.ovcard .foot{display:flex;justify-content:space-between;align-items:center;
+  padding:9px 12px;border-top:1px solid #ececee;font-size:12px;color:#71717a}
+.ovcard .foot a{cursor:pointer}
 .panel .row:last-child{border-bottom:none}
 .panel .row .l{color:#3f3f46;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .panel .row .r{color:#71717a;white-space:nowrap;font-family:var(--mono);font-size:11.5px}
@@ -2256,10 +2264,11 @@ td .sub{color:var(--ink-3);font-size:12px}
 @media(max-width:1100px){.ovgrid,.duo{grid-template-columns:1fr}}
 
 /* ---------- 月度走势 (Y 轴刻度 + 柱顶数值) ---------- */
-.months{display:flex;gap:10px;height:150px;padding:10px 4px 0}
+.months{display:flex;gap:10px;height:150px;padding:26px 4px 0}
 .yax{width:52px;flex:none;display:flex;flex-direction:column;justify-content:space-between;
   align-items:flex-end;font-family:var(--mono);font-size:10px;color:#a1a1aa;
   font-variant-numeric:tabular-nums;padding-bottom:18px}
+.duo .oc-h{padding-top:12px}
 .bars{flex:1;display:flex;gap:6px;height:100%;
   background:repeating-linear-gradient(to top,transparent 0 36px,#ececee 36px 37px)}
 .mcol{flex:1;position:relative;min-width:0}
@@ -2409,9 +2418,9 @@ input{flex:1;min-width:260px}
       <div id="ov-latest"><div class="skel" style="height:120px"></div></div>
     </div>
     <div class="side">
-      <div class="panel"><div class="pt">哨兵 · 最近探测</div><div id="ov-probe"><span class="hint">加载中…</span></div></div>
-      <div class="panel"><div class="pt">最新记忆</div><div id="ov-mem"><span class="hint">加载中…</span></div></div>
-      <div class="panel"><div class="pt">审计 · 库内事件</div><div id="ov-audit"><span class="hint">加载中…</span></div></div>
+      <div class="ocard"><div class="pt">哨兵 · 最近探测</div><div id="ov-probe"><span class="hint">加载中…</span></div></div>
+      <div class="ocard"><div class="pt">最新记忆</div><div id="ov-mem"><span class="hint">加载中…</span></div></div>
+      <div class="ocard"><div class="pt">审计 · 库内事件</div><div id="ov-audit"><span class="hint">加载中…</span></div></div>
     </div>
   </div>
   <div class="duo">
