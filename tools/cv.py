@@ -2547,7 +2547,7 @@ async function loadOv(){
       band+=stat(num(d.memories||0),"跨会话记忆","自动提取 · 每条注明来源快照, 可回读核实","neutral");
       const top=(ow.by_agent||[])[0];
       if(top)band+=stat(esc(top.agent)+" ×"+num(top.snapshots),
-        "会话最多的 agent","累计输入 "+bn(top.tokens_in||0)+" tokens (快照内嵌用量)","neutral");
+        "消耗最大的 agent","累计输入 "+bn(top.tokens_in||0)+" tokens (快照内嵌用量, 或低估)","neutral");
     }
     /* ② 消耗带 (自有) */
     band+=stat(bn(ow.tokens_in),"累计输入 tokens","提取自快照内嵌用量记录, 零外部依赖","neutral");
@@ -2912,14 +2912,16 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                         except ValueError:
                             pass
                     zcode_usage = {}
-                    for r in conn.execute("SELECT model, raw FROM ledger_events WHERE source='zcode-modelio'"):
-                        try:
-                            raw = json.loads(r["raw"] or "{}")
-                        except ValueError:
-                            continue
-                        a = zcode_usage.setdefault(r["model"] or "未知", {"n": 0, "tin": 0, "tout": 0, "cr": 0})
-                        a["n"] += 1; a["tin"] += int(raw.get("input") or 0)
-                        a["tout"] += int(raw.get("output") or 0); a["cr"] += int(raw.get("cache_read") or 0)
+                    try:  # 真相源: zcode 主库 model_usage (全量调用); model-io 审计文件仅零头
+                        zdb = sqlite3.connect(f"file:{ZCODE_DB}?mode=ro", uri=True)
+                        for r in zdb.execute("SELECT model_id, COUNT(*), COALESCE(SUM(input_tokens),0),"
+                                             " COALESCE(SUM(output_tokens),0), COALESCE(SUM(cache_read_input_tokens),0)"
+                                             " FROM model_usage GROUP BY model_id"):
+                            zcode_usage.setdefault(r[0] or "未知",
+                                                   {"n": r[1], "tin": r[2], "tout": r[3], "cr": r[4]})
+                        zdb.close()
+                    except sqlite3.Error:
+                        pass
                     for m, a in zcode_usage.items():
                         pr = prices.get(m)
                         a["cost"] = (round((a["tin"] * pr["input"] + a["tout"] * pr["output"]
