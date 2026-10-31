@@ -2,7 +2,7 @@
 
 # Context Vault
 
-[![CI](https://github.com/nghqqa/context-vault/actions/workflows/ci.yml/badge.svg)](https://github.com/nghqqa/context-vault/actions/workflows/ci.yml)
+[官网](https://nghqqa.github.io/context-vault/) · [![CI](https://github.com/nghqqa/context-vault/actions/workflows/ci.yml/badge.svg)](https://github.com/nghqqa/context-vault/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/nghqqa/context-vault)](https://github.com/nghqqa/context-vault/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
@@ -18,6 +18,8 @@
 ## ✨ 核心能力
 
 - **快照资产库**——把 Codex / Claude Code / 19 种桥接 harness 的会话导出为供应商中立的 [context-snapshot](docs/snapshot-format.md) 格式：内容寻址、不可变、幂等、自动 lineage（会话树与 fork）。
+- **交接简报档**——`--target markdown` 生成 ≤48KB 可携交接简报（停在哪/最近动作/活上下文尾部），任何 agent 都能吃。
+- **vault 备份**——`cv backup`：一致性快照 + 轮换 zip；常驻控制台可选 `CV_SERVE_TOKEN` 鉴权。
 - **诚实迁移**——Codex ⇄ Claude Code 双向（双端真机验证），默认 dry-run，每次迁移产出"什么保住了/什么丢了"的完整报告。
 - **token 账本**——从你自己会话文件内嵌的 usage 记录聚合出按模型成本、缓存命中率、5 小时窗口视图，不需要任何代理。
 - **跨会话记忆**——从历史自动提取决策/偏好/摘要，`MemoryEngine` 接口可插拔；每条记忆标注来源快照。
@@ -136,7 +138,7 @@ vault/
 - **M1 ✅** SQLite 资产库 · 双向迁移（双端真机验证）· diff 预览
 - **M2 ✅** 常驻服务 + Web 控制台 · MCP 后端 · 缓存预热 · 哨兵/守望 · 19 格式桥接接入
 - **M3 ✅** 记忆层（引擎可插拔）· fork/谱系 · 审计时间线
-- **下一步** 发布与反馈 · 便携 Markdown 交接简报 · 记忆出处 span · 可选加密
+- **下一步** 发布与反馈 · 记忆出处 span · 可选加密
 
 ## FAQ
 

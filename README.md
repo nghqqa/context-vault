@@ -2,7 +2,7 @@
 
 # Context Vault
 
-[![CI](https://github.com/nghqqa/context-vault/actions/workflows/ci.yml/badge.svg)](https://github.com/nghqqa/context-vault/actions/workflows/ci.yml)
+[Website](https://nghqqa.github.io/context-vault/) · [![CI](https://github.com/nghqqa/context-vault/actions/workflows/ci.yml/badge.svg)](https://github.com/nghqqa/context-vault/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/nghqqa/context-vault)](https://github.com/nghqqa/context-vault/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
@@ -18,6 +18,8 @@ Your AI coding sessions are your most valuable work asset — yet they're locked
 ## ✨ Features
 
 - **Snapshot vault** — export Codex / Claude Code / 19 bridged harnesses into the vendor-neutral [context-snapshot](docs/snapshot-format.md) format: content-addressed, immutable, idempotent, with automatic lineage (session trees & forks).
+- **Handoff brief** — `--target markdown` emits a ≤48KB portable brief (where it stopped / recent actions / live-context tail) that any agent can consume.
+- **Vault backup** — `cv backup`: consistent sqlite snapshot + rotated zips; optional `CV_SERVE_TOKEN` auth for the resident console.
 - **Honest migration** — bidirectional Codex ⇄ Claude Code (real-machine verified both ways), dry-run by default, and a per-migration report of exactly what survives and what doesn't.
 - **Token ledger** — per-model costs, cache hit rates and 5h-window views aggregated from usage records *inside your own session files*. No proxy required.
 - **Cross-session memory** — decisions, preferences and summaries auto-extracted from history behind a swappable `MemoryEngine` interface; every memory cites its source snapshot.
@@ -84,7 +86,7 @@ Two rules that don't bend: **snapshots are immutable** (any derived data lives i
 - 195 MB Codex rollout → 12 MB snapshot in **1.5 s**; 39 compaction boundaries, 224M tokens of usage, 838 tool-call pairs intact.
 - **Bidirectional migration, both directions real-machine verified**: Codex→Claude resumes and continues accurately in Claude 2.1.181; Claude→Codex restores **373,160 tokens of full context** in Codex 0.153.4.
 - Reverse-engineered and dodged the two-generation Codex format trap (numeric vs string `ordinal`, resume reading the SQLite thread-store, misleading "rollout is empty").
-- Test suite: **22 tests** including a hot/cold equivalence test — the resident index and the file-scan fallback must return identical results ("the daemon accelerates; it is never a dependency").
+- Test suite: **24 tests** including a hot/cold equivalence test — the resident index and the file-scan fallback must return identical results ("the daemon accelerates; it is never a dependency").
 
 ## Design principles
 
@@ -125,7 +127,7 @@ Porters are upstream adapters, not competitors — `cv ingest` and `cv export-ha
 - **M1 ✅** SQLite vault · bidirectional migration (verified both ways) · diff preview
 - **M2 ✅** resident service + web console · MCP backend · cache warming · sentry/watch · 19-format bridged intake
 - **M3 ✅** memory layer (pluggable engine) · fork/tree lineage · audit timeline
-- **Next** launch & feedback · portable Markdown handoff brief · memory provenance spans · optional encryption
+- **Next** launch & feedback · memory provenance spans · optional encryption
 
 ## FAQ
 
