@@ -2545,9 +2545,16 @@ async function loadOv(){
     if(ow.snapshots){
       band+=stat(num(ow.snapshots),"快照资产","跨 harness 统一库存 · 内容寻址 · 自动 lineage");
       band+=stat(num(d.memories||0),"跨会话记忆","自动提取 · 每条注明来源快照, 可回读核实","neutral");
-      const top=(ow.by_agent||[])[0];
+      /* top agent: zcode 快照内嵌 usage 低估, 用 model_usage 真实总量替换后排名 */
+      const zt=Object.values(d.zcode_usage||{}).reduce((s,a)=>s+(a.tin||0),0);
+      const cand=(ow.by_agent||[]).map(a=>({agent:a.agent,snap:a.snapshots,tin:a.tokens_in||0}));
+      const zrow=cand.find(c=>c.agent==="zcode");
+      if(zt>0){ if(zrow)zrow.tin=zt; else cand.push({agent:"zcode",snap:0,tin:zt}); }
+      cand.sort((a,b)=>b.tin-a.tin);
+      const top=cand[0];
       if(top)band+=stat(esc(top.agent)+" ×"+num(top.snapshots),
-        "消耗最大的 agent","累计输入 "+bn(top.tokens_in||0)+" tokens (快照内嵌用量, 或低估)","neutral");
+        "消耗最大的 agent · "+bn(top.tin||0)+" tokens 输入",
+        "按真实模型调用记录排名 (zcode 取 model_usage 表全量, 其他 agent 取快照内嵌用量)","neutral");
     }
     /* ② 消耗带 (自有) */
     band+=stat(bn(ow.tokens_in),"累计输入 tokens","提取自快照内嵌用量记录, 零外部依赖","neutral");
