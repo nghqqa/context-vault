@@ -224,7 +224,11 @@ SVC_BASE = os.environ.get("CV_VAULT_SVC", "http://127.0.0.1:8791")
 
 def _svc_get(path: str, timeout: float = 2.0):
     import urllib.request
-    req = urllib.request.Request(SVC_BASE + path, headers={"User-Agent": "ContextVault-mcp/0.1"})
+    headers = {"User-Agent": "ContextVault-mcp/0.1"}
+    tok = os.environ.get("CV_SERVE_TOKEN")  # 与 cv serve --token 配对: 鉴权档热索引联动
+    if tok:
+        headers["X-Vault-Token"] = tok
+    req = urllib.request.Request(SVC_BASE + path, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 

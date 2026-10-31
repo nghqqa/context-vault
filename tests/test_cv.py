@@ -557,3 +557,50 @@ def test_backup_content_and_rotation(isolated, tmp_path):
     assert len(left) == 1                                        # keep=1: 只剩最新一份
     assert not (bdir / "cv-backup-20200101-000000.zip").exists()  # 两份伪造旧备份被轮换掉
     assert not (bdir / "cv-backup-20250101-000000.zip").exists()
+
+
+# ---------------- Markdown 交接简报 (可携降级档) ----------------
+
+def test_brief_generation(isolated, tmp_path):
+    _, vault = isolated
+    env = make_env(tmp_path)
+    env["conversation"].append({"type": "text", "role": "assistant",
+                                "content": "已完成 RBAC 方案初稿, 待评审", "ts": ""})
+    env["conversation"].append({"type": "tool_call", "call_id": "c2", "name": "edit",
+                                "arguments": {"path": "src/auth.py"}, "ts": ""})
+    sid = cv.snapshot_id(env)
+    (vault / "snapshots").mkdir(exist_ok=True)
+    cv.atomic_write_text(vault / "snapshots" / f"{sid}.json", json.dumps(env, ensure_ascii=False))
+    r = cv.do_import(vault, sid, "markdown", apply=False)
+    brief = Path(r["dest"]).read_text(encoding="utf-8")
+    assert len(brief) <= 48 * 1024 + 200                         # 48KB 上限
+    for section in ("它停在哪儿", "最近动作", "活上下文尾部", "RBAC 方案初稿", "edit", "src/auth.py"):
+        assert section in brief
+    assert "precise" not in brief and r["applied"] is False      # 简报不写真实会话目录
+
+
+def test_serve_token_auth(isolated, tmp_path):
+    """鉴权档: 无凭据 401; ?token= 首访 200+Set-Cookie; cookie 复访 200; 错 token 401。"""
+    _, vault = isolated
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    conn.commit()
+    srv, _ = cv.build_vault_server(vault, 0, token="sekret")
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        code, _ = _req(port, "GET", "/healthz")
+        assert code == 401                                       # 无凭据
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        c.request("GET", f"/healthz?token=sekret")
+        r = c.getresponse(); body = r.read(); setc = r.getheader("Set-Cookie"); c.close()
+        assert r.status == 200 and "vault_token=sekret" in (setc or "")
+        code, _ = _req(port, "GET", "/healthz", headers={"Cookie": "vault_token=sekret"})
+        assert code == 200                                       # cookie 复访
+        code, _ = _req(port, "GET", "/healthz", headers={"X-Vault-Token": "sekret"})
+        assert code == 200                                       # 头形态 (MCP/脚本)
+        code, _ = _req(port, "GET", "/healthz?token=wrong")
+        assert code == 401
+    finally:
+        srv.shutdown()
+        srv.server_close()

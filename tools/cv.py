@@ -41,7 +41,7 @@ from pathlib import Path
 
 FORMAT_VERSION = "0.1"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # noconsole 进程 spawn 控制台程序不弹窗   # context-snapshot 格式版本
-VERSION = "0.4.2"          # 工具版本 (发布节奏独立于格式)
+VERSION = "0.5.0"          # 工具版本 (发布节奏独立于格式)
 TOOL_RESULT_LIMIT = 256 * 1024  # spec §8.2 裁决: 单块截断阈值 256KB
 HOME = Path.home()
 HEADROOM_DIR = HOME / ".headroom"
@@ -647,10 +647,57 @@ def claude_project_dir(cwd: str) -> Path:
     return CLAUDE_PROJECTS / re.sub(r"[^A-Za-z0-9-]", "-", cwd.replace("\\", "/"))
 
 
+def blocks_to_brief(env: dict, max_chars: int = 48 * 1024) -> str:
+    """Markdown 交接简报: 精确迁移之外的可携降级档 (Beacon 模式) — 任何 agent 都吃 Markdown。
+    内容: 它停在哪儿 / 最近动作 / 活上下文尾部; 密钥类内容不特殊处理 (简报只含会话内已明文的内容)。"""
+    from collections import Counter
+    c, s = env["capture"], env["stats"]
+    blocks = env["conversation"]
+    dist = Counter(b["type"] for b in blocks)
+    out = [f"# 会话交接简报 — {c.get('agent', '?')} · {str(env.get('created_at', ''))[:10]}",
+           "",
+           f"- 工作目录: `{c.get('cwd', '?')}`",
+           f"- 完整性: {c.get('completeness', '?')} · 块 {s['blocks_total']} · "
+           f"输入 {s['tokens_in']:,} tok · 压缩边界 {dist.get('compaction', 0)}",
+           f"- 来源快照: `{env.get('_sid', snapshot_id(env))}` (可用 cv import --target codex|claude 精确迁移)",
+           "", "## 它停在哪儿", ""]
+    for b in reversed(blocks):  # 最后一条 assistant 输出 = 停点
+        if b["type"] == "agent_message":
+            txt = (b.get("content") or "").strip()
+            out += [txt[:2000] + ("…[截断]" if len(txt) > 2000 else ""), ""]
+            break
+    out += ["## 最近动作 (工具调用, 末 12 条)", ""]
+    calls = [b for b in blocks if b["type"] == "tool_call"][-12:]
+    for b in reversed(calls):
+        arg = json.dumps(b.get("arguments", {}), ensure_ascii=False)[:110]
+        out.append(f"- `{b.get('name', '?')}` {arg}")
+    if not calls:
+        out.append("(无工具调用)")
+    out += ["", "## 活上下文尾部 (最后 30 块)", ""]
+    for b in blocks[-30:]:
+        role = b.get("role") or b["type"]
+        text = (b.get("content") or b.get("summary") or "").strip().replace("\n", " ")
+        if b["type"] == "compaction":
+            text = "(压缩边界) " + (b.get("summary") or "")[:150]
+        if b["type"] in ("tool_call", "tool_result"):
+            text = (b.get("name") or "") + " " + text[:110]
+        if text:
+            out.append(f"- **{role}**: {text[:220]}")
+    brief = "\n".join(out)
+    if len(brief) > max_chars:
+        brief = brief[:max_chars] + "\n\n…[简报超限截断; 完整内容请用精确迁移 cv import]"
+    return brief
+
+
 def do_import(vault: Path, sid: str, target: str, apply: bool, strip_thinking=False) -> dict:
     """迁移执行核心 (CLI 与控制台 HTTP 共用)。返回 {lines, dropped, dest, new_sid, applied}。"""
     env = load_snapshot(vault, sid)
     (vault / "outbox").mkdir(parents=True, exist_ok=True)
+    if target == "markdown":  # 交接简报: 可携降级档, 不写真实会话目录, 无 apply 语义
+        dest = vault / "outbox" / f"brief-{sid}.md"
+        atomic_write_text(dest, blocks_to_brief(env))
+        return {"lines": dest.stat().st_size, "dropped": 0, "dest": str(dest),
+                "new_sid": None, "applied": False}
     if target == "codex":
         lines, dropped, new_sid, name = blocks_to_codex(env, strip_thinking)
         dest = vault / "outbox" / name
@@ -2361,7 +2408,7 @@ input{flex:1;min-width:260px}
     <b>把历史会话迁移到另一个 agent</b>
     <div class="controls" style="margin-top:14px;margin-bottom:4px">
       <select id="mig-sid" style="flex:1;min-width:260px"></select>
-      <select id="mig-target"><option value="codex">→ Codex</option><option value="claude">→ Claude Code</option></select>
+      <select id="mig-target"><option value="codex">→ Codex</option><option value="claude">→ Claude Code</option><option value="markdown">→ Markdown 简报 (任意 agent)</option></select>
       <button class="btn primary" onclick="migPreview()">预览迁移</button>
     </div>
     <div id="mig-preview"></div>
@@ -2681,8 +2728,10 @@ class _KeyStub:
     key = None
 
 
-def build_vault_server(vault: Path, port: int):
-    """构建热索引 HTTP 服务 (不阻塞); cmd_serve 与 Pro 托盘共用, 避免实现漂移。"""
+def build_vault_server(vault: Path, port: int, token: str | None = None):
+    """构建热索引 HTTP 服务 (不阻塞); cmd_serve 与 Pro 托盘共用, 避免实现漂移。
+    token: 商业化/局域网档的可选鉴权 — 设置后所有请求需凭据 (X-Vault-Token 头 /
+    Cookie vault_token / 首访 ?token= 自动 Set-Cookie), 未授权一律 401。"""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import urlparse, parse_qs
     sys.path.insert(0, str(Path(__file__).parent))
@@ -2734,6 +2783,30 @@ def build_vault_server(vault: Path, port: int):
                 if ctype != "application/json":
                     self._json({"error": "forbidden: POST 需要 Content-Type: application/json"}, 403)
                     return False
+            if token:  # 鉴权档: 头 / Cookie / 首访 query(种 cookie) 三种凭据形态
+                given = self.headers.get("X-Vault-Token")
+                if not given:
+                    for part in (self.headers.get("Cookie") or "").split(";"):
+                        if part.strip().startswith("vault_token="):
+                            given = part.split("=", 1)[1].strip()
+                            break
+                if not given and not post:
+                    given = parse_qs(urlparse(self.path).query).get("token", [""])[0]
+                if given == token:
+                    if "vault_token=" not in (self.headers.get("Cookie") or ""):
+                        self.send_response(200)
+                        self.send_header("Set-Cookie", f"vault_token={token}; Path=/; HttpOnly; SameSite=Strict")
+                        self.send_header("Cache-Control", "no-store")
+                    else:
+                        return True
+                    body = b'{"ok":true}'
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return True
+                self._json({"error": "unauthorized: 需要 token (?token= 首访, 或 X-Vault-Token 头)"}, 401)
+                return False
             return True
 
         def do_GET(self):
@@ -2862,9 +2935,13 @@ def build_vault_server(vault: Path, port: int):
 
 
 def cmd_serve(args):
-    srv, idx = build_vault_server(vault_dir(args), args.port)
+    token = args.token or os.environ.get("CV_SERVE_TOKEN")
+    srv, idx = build_vault_server(vault_dir(args), args.port, token=token)
     print(f"vault 热索引就绪: {len(idx.envs)} 快照, {len(idx.index)} 词项")
     print(f"Context Vault 服务已启动: http://127.0.0.1:{args.port} (Ctrl+C 退出)")
+    if token:
+        print("  鉴权已启用: 首访 http://127.0.0.1:{}/?token=*** 自动登录; "
+              "MCP/脚本侧设 CV_SERVE_TOKEN 同值".format(args.port))
     print("  MCP server 检测到本服务时自动走热索引 (CV_VAULT_SVC 可覆盖地址)")
     print("  本地访问防护已启用: Host/Origin 回环校验 + POST 强制 application/json"
           " (浏览器跨站与 DNS rebinding 会被 403 拦截, 本地进程不受影响)")
@@ -2960,14 +3037,14 @@ def main(argv=None):
 
     i = sub.add_parser("import", help="快照 → 目标 agent 会话文件")
     i.add_argument("snapshot_id")
-    i.add_argument("--target", choices=["codex", "claude"], required=True)
+    i.add_argument("--target", choices=["codex", "claude", "markdown"], required=True)
     i.add_argument("--apply", action="store_true", help="写入真实会话目录 (默认 dry-run)")
     i.add_argument("--strip-thinking", action="store_true", help="不迁移 reasoning 摘要")
     i.set_defaults(func=cmd_import)
 
     m = sub.add_parser("migrate", help="一键: 导出→预览→导入")
     m.add_argument("source")
-    m.add_argument("--target", choices=["codex", "claude"], required=True)
+    m.add_argument("--target", choices=["codex", "claude", "markdown"], required=True)
     m.add_argument("--apply", action="store_true")
     m.add_argument("--yes", action="store_true")
     m.add_argument("--strip-thinking", action="store_true")
@@ -3074,6 +3151,8 @@ def main(argv=None):
 
     sv = sub.add_parser("serve", help="常驻服务: 热索引 + HTTP API (127.0.0.1)")
     sv.add_argument("--port", type=int, default=8791)
+    sv.add_argument("--token", default=None,
+                    help="启用鉴权 (或环境变量 CV_SERVE_TOKEN): 客户端首访 ?token= 自动登录, 脚本用 X-Vault-Token 头")
     sv.set_defaults(func=cmd_serve)
 
     b = sub.add_parser("backup", help="vault 一致性备份 (sqlite 在线快照 + snapshots 打包, 轮换保留)")

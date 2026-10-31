@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Context Vault — 本地优先的 AI 会话资产库</title>
+<meta name="description" content="把 AI 编程会话变成你自己机器上的中立资产：不可变快照、双向迁移、token 账本、跨会话记忆、MCP 后端。零依赖，数据不出机器。">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='2' y='6' width='12' height='8' rx='2' fill='%232dd4a7'/><path d='M5 6V4a3 3 0 016 0v2' stroke='%232dd4a7' stroke-width='2' fill='none'/></svg>">
+<style>
+:root{--bg:#0b1015;--bg1:#111820;--bg2:#161e28;--line:#1e2732;--ink:#e8edf2;--ink2:#9aa8b5;--dim:#8295a6;--acc:#2dd4a7;--warn:#e2b45c;--mono:ui-monospace,"Cascadia Code",Consolas,monospace}
+*{margin:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:15px/1.7 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
+.wrap{max-width:1060px;margin:0 auto;padding:0 28px}
+header{display:flex;justify-content:space-between;align-items:center;padding:20px 0}
+.logo{font-weight:700;font-size:17px;letter-spacing:.02em}
+.logo b{color:var(--acc)}
+nav a{color:var(--ink2);margin-left:26px;font-size:14px}
+.hero{padding:88px 0 64px;text-align:center}
+.hero h1{font-size:44px;line-height:1.22;letter-spacing:-.02em;font-weight:800}
+.hero h1 em{font-style:normal;color:var(--acc)}
+.hero p{color:var(--ink2);font-size:17px;max-width:640px;margin:22px auto 0}
+.install{display:inline-flex;gap:0;margin-top:34px;background:var(--bg1);border:1px solid var(--line);border-radius:10px;overflow:hidden;font-family:var(--mono);font-size:13.5px}
+.install code{padding:13px 18px;color:var(--ink)}
+.install button{background:var(--acc);border:0;color:#06281e;font-weight:700;padding:0 20px;cursor:pointer;font-family:var(--mono)}
+.hero .meta{margin-top:18px;color:var(--dim);font-size:13px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;padding:30px 0 10px}
+.card{background:var(--bg1);border:1px solid var(--line);border-radius:12px;padding:22px}
+.card h3{font-size:15.5px;margin-bottom:8px}
+.card h3 b{color:var(--acc)}
+.card p{color:var(--ink2);font-size:13.5px}
+h2{font-size:13px;color:var(--dim);letter-spacing:.12em;text-transform:uppercase;margin:72px 0 6px;text-align:center}
+.sub{color:var(--ink2);text-align:center;max-width:620px;margin:0 auto 8px;font-size:15px}
+table{width:100%;border-collapse:collapse;font-size:13.5px;margin-top:18px}
+th{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.06em;text-align:left;padding:9px 12px;border-bottom:1px solid var(--line)}
+td{padding:9px 12px;border-bottom:1px solid var(--line);color:var(--ink2)}
+td:first-child{color:var(--ink)}
+.yes{color:var(--acc);font-weight:700}.no{color:var(--dim)}
+.privacy{background:var(--bg1);border:1px solid var(--line);border-radius:12px;padding:26px;margin-top:16px;display:grid;grid-template-columns:1fr 1fr;gap:8px 36px;font-size:14px;color:var(--ink2)}
+.privacy b{color:var(--ink)}
+.faq{max-width:760px;margin:16px auto 0}
+.faq details{border-bottom:1px solid var(--line);padding:14px 4px}
+.faq summary{cursor:pointer;font-weight:600;font-size:14.5px}
+.faq p{color:var(--ink2);font-size:13.5px;margin-top:8px}
+footer{border-top:1px solid var(--line);margin-top:80px;padding:30px 0 44px;color:var(--dim);font-size:13px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px}
+@media(max-width:720px){.hero h1{font-size:31px}.privacy{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="logo">🔒 Context <b>Vault</b></div>
+  <nav><a href="#features">能力</a><a href="#fidelity">保真度</a><a href="#privacy">本地与隐私</a><a href="https://github.com/nghqqa/context-vault">GitHub</a></nav>
+</header>
+
+<section class="hero">
+  <h1>换模型、换工具，<br>会话上下文<em>不再清零</em></h1>
+  <p>Context Vault 把你的 AI 编程会话变成<b>你自己机器上的中立资产</b>：不可变快照、双向迁移、token 账本、跨会话记忆。agent 来来去去，vault 一直在。</p>
+  <div class="install"><code>git clone https://github.com/nghqqa/context-vault</code><button onclick="navigator.clipboard.writeText('git clone https://github.com/nghqqa/context-vault');this.textContent='已复制 ✓';setTimeout(()=>this.textContent='复制',1600)">复制</button></div>
+  <div class="meta">Python 3.9+ · 纯标准库零依赖 · Windows / Linux / macOS · MIT 开源</div>
+</section>
+
+<h2 id="features">六个能力，一个位置</h2>
+<p class="sub">市面上的迁移工具都是一次性搬运工；Context Vault 是资产库——存储、谱系、账本、审计。</p>
+<div class="grid">
+  <div class="card"><h3><b>快照资产库</b></h3><p>Codex / Claude Code / 19 种桥接 harness 的会话，导出为供应商中立格式：内容寻址、不可变、幂等、自动 lineage 会话树。</p></div>
+  <div class="card"><h3><b>诚实迁移</b></h3><p>Codex ⇄ Claude Code 双向（双端真机验证），默认 dry-run，逐字段告诉你什么保住了、什么搬不走。另有 Markdown 交接简报档，任何 agent 都能吃。</p></div>
+  <div class="card"><h3><b>token 账本</b></h3><p>按模型成本、缓存命中率、5 小时窗口视图——全部从会话文件内嵌的 usage 记录聚合，不需要任何代理。</p></div>
+  <div class="card"><h3><b>跨会话记忆</b></h3><p>决策、偏好、摘要从历史自动提取，每条记忆注明来源快照、可回读核实。引擎接口可插拔。</p></div>
+  <div class="card"><h3><b>MCP 记忆后端</b></h3><p>一条命令接入 Claude Code / Codex / Cursor。新任务开始时问一句"关于 X 我们之前定过什么"。</p></div>
+  <div class="card"><h3><b>上游哨兵</b></h3><p>定时探测 relay 的模型清单，模型静默消失即刻告警并留下审计痕——下架又上架，只有留痕才知道。</p></div>
+</div>
+
+<h2 id="fidelity">迁移保真度，先说诚实的话</h2>
+<p class="sub">这是完整清单，不是精选集。</p>
+<table>
+<tr><th>数据</th><th>状态</th><th>说明</th></tr>
+<tr><td>对话与配对的工具调用</td><td class="yes">✓ 迁移</td><td>未配对结果被丢弃并逐条计数进报告</td></tr>
+<tr><td>思考摘要</td><td style="color:var(--warn);font-weight:700">部分</td><td>签名与加密内容不可移植，按规范丢弃</td></tr>
+<tr><td>压缩边界</td><td class="yes">✓ 迁移</td><td>转为摘要块，stateless-replay 语义</td></tr>
+<tr><td>token 用量</td><td class="yes">✓ 迁移</td><td>进账本，不进迁移会话</td></tr>
+<tr><td>env / hooks / MCP 配置 / 权限</td><td class="no">✗ 留在源端</td><td>搬不走，也不该搬</td></tr>
+</table>
+
+<h2 id="privacy">数据不出机器</h2>
+<div class="privacy">
+  <div><b>零遥测、零账号。</b><br>核心功能不需要任何 API key。</div>
+  <div><b>只读源文件。</b><br>vault 永不修改 agent 写下的会话。</div>
+  <div><b>只绑回环。</b><br>serve 仅 127.0.0.1，Host/Origin 校验 + 可选 token 鉴权。</div>
+  <div><b>一键备份。</b><br>cv backup 一致性快照 + 轮换，数据自主可验证。</div>
+</div>
+
+<h2>FAQ</h2>
+<div class="faq">
+<details><summary>和直接翻 ~/.claude/projects 有什么区别？</summary><p>你都可以——一次性、单一格式、单机。Vault 给你跨 harness、跨月份的统一可查询存储：会话演进的 lineage、上游变动的审计痕、全部历史之上的记忆提取。</p></details>
+<details><summary>和搬运工工具（session-migrate / txcript）冲突吗？</summary><p>不冲突，是上下游：Vault 的 19 格式桥接正是驱动 session-migrate 实现的。它们管搬运，Vault 管存储、谱系、账本、审计。</p></details>
+<details><summary>免费吗？</summary><p>核心 MIT 永久免费。另有闭源 Windows 托盘伴侣（自动入库、每日备份、常驻控制台）；开源核心离开它完整可用。</p></details>
+</div>
+
+<footer>
+  <div>Context Vault · 代码 MIT · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/snapshot-format.md">格式规范 CC-BY</a></div>
+  <div><a href="https://github.com/nghqqa/context-vault">GitHub</a> · <a href="https://github.com/nghqqa/context-vault/releases">Releases</a> · <a href="https://raw.githubusercontent.com/nghqqa/context-vault/main/llms.txt">llms.txt</a></div>
+</footer>
+</div>
+</body>
+</html>
