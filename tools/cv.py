@@ -2089,6 +2089,8 @@ class VaultIndex:
             env["_sid"] = sid
             self.envs[sid] = env
             self.meta[sid] = {"agent": env["capture"].get("agent"),
+                              "first": next((block_text(b)[:64] for b in env["conversation"]
+                                             if b.get("role") == "user" and block_text(b)), ""),
                               "created_at": env.get("created_at"),
                               "cwd": env["capture"].get("cwd"),
                               "blocks": env["stats"]["blocks_total"],
@@ -2426,6 +2428,7 @@ input{flex:1;min-width:260px}
   <div class="duo">
     <div class="ovcard"><div class="oc-h">月度节省走势（数据源：headroom 导入）</div><div class="months" id="ov-months" style="margin:0 8px 10px"></div></div>
     <div class="ovcard"><div class="oc-h">按模型明细（数据源：headroom 导入）</div><div id="ov-models" style="padding:0 4px 4px"></div></div>
+    <div class="ovcard" style="grid-column:1/-1"><div class="oc-h">zcode 用量（model-io 自有 · 成本需 vault/prices.json 价目）</div><div id="ov-zcode" style="padding:0 4px 4px"></div></div>
   </div>
 </section>
 
@@ -2558,10 +2561,11 @@ async function loadOv(){
       api("/probe_events?limit=3").catch(()=>[]),api("/memory?q=&limit=3").catch(()=>[]),
       api("/audit").catch(()=>null)]);
     const arr=Array.isArray(rc)?rc:[];
-    $("#ov-latest").innerHTML=(arr.length?table(["Agent","位置","入库时间","块","输入 tok"],
+    $("#ov-latest").innerHTML=(arr.length?table(["Agent","会话摘要","位置","入库时间","tok"],
       arr.map(s=>['<span class="chip">'+esc(s.agent||"?")+"</span>",
+        '<span class="sub" title="'+esc(s.first||"")+'">'+esc(s.first||"(无文本)")+"</span>",
         '<span class="sub" title="'+esc(s.cwd||"")+'">'+esc(String(s.cwd||"—").split(/[\\\\/]/).pop()||"—")+"</span>",
-        frel(s.created_at),{t:num(s.blocks||0),num:1},{t:bn(s.tokens_in||0),num:1}]))
+        frel(s.created_at),{t:bn(s.tokens_in||0),num:1}]))
       :errEmpty("还没有会话入库 · 先运行 cv sync",""))+
       '<div class="foot"><span>显示最近 '+arr.length+' 条 · 共 '+num((d.owned||{}).snapshots||0)+' 条会话</span>'+
       '<a onclick="setTab(\'snap\')">查看全部 →</a></div>';
@@ -2584,6 +2588,12 @@ async function loadOv(){
       '<div class="row"><span class="l">上游切换</span><span class="r">'+num(as.switches||0)+"</span></div>"+
       '<div class="row"><span class="l">模型消失事件</span><span class="r">'+num(as.model_missing_events||0)+"</span></div>"
       :'<span class="hint">—</span>';
+    const zu=d.zcode_usage||{};const zrows=Object.entries(zu);
+    $("#ov-zcode").innerHTML=zrows.length?table(["模型","请求","入 tok","出 tok","成本(估)"],
+      zrows.map(([m,a])=>['<span class="mono">'+esc(m)+"</span>",{t:num(a.n),num:1},
+        {t:bn(a.tin),num:1},{t:bn(a.tout),num:1},
+        {t:a.cost==null?"—":usd(a.cost),num:1}]))
+      :'<span class="hint">暂无记录 · cv ledger import-zcode</span>';
     const ms=d.monthly||[];
     if(!ms.length)$("#ov-months").innerHTML='<div class="empty">暂无月度数据<br>导入账本 <code>cv ledger import-headroom</code></div>';
     else{
@@ -2885,6 +2895,27 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                         mem_n = conn.execute("SELECT COUNT(*) n FROM memory_items").fetchone()["n"]
                     except sqlite3.OperationalError:
                         mem_n = 0
+                    prices = {}
+                    prices_p = vault / "prices.json"  # {"模型": {"input":x,"output":y,"cache_read":z}} $/Mtok
+                    if prices_p.exists():
+                        try:
+                            prices = json.loads(prices_p.read_text(encoding="utf-8"))
+                        except ValueError:
+                            pass
+                    zcode_usage = {}
+                    for r in conn.execute("SELECT model, raw FROM ledger_events WHERE source='zcode-modelio'"):
+                        try:
+                            raw = json.loads(r["raw"] or "{}")
+                        except ValueError:
+                            continue
+                        a = zcode_usage.setdefault(r["model"] or "未知", {"n": 0, "tin": 0, "tout": 0, "cr": 0})
+                        a["n"] += 1; a["tin"] += int(raw.get("input") or 0)
+                        a["tout"] += int(raw.get("output") or 0); a["cr"] += int(raw.get("cache_read") or 0)
+                    for m, a in zcode_usage.items():
+                        pr = prices.get(m)
+                        a["cost"] = (round((a["tin"] * pr["input"] + a["tout"] * pr["output"]
+                                            + a["cr"] * pr.get("cache_read", 0)) / 1e6, 2)
+                                     if pr else None)
                     lt = conn.execute("SELECT tokens_saved, cost_usd, raw FROM ledger_events"
                                       " WHERE source='headroom-lifetime'").fetchone()
                     by_model = conn.execute("SELECT model, COUNT(*) n, SUM(tokens_saved) t, SUM(cost_usd) c"
@@ -2898,7 +2929,8 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                                                     "saved_usd": lt["cost_usd"] if lt else 0, **raw},
                                        "by_model": [dict(r) for r in by_model],
                                        "monthly": [dict(r) for r in monthly],
-                                       "owned": owned_stats(vault), "memories": mem_n})
+                                       "owned": owned_stats(vault), "memories": mem_n,
+                                       "zcode_usage": zcode_usage})
                 if u.path == "/preview":
                     env2 = idx.envs.get(q.get("id", ""))
                     if not env2:
