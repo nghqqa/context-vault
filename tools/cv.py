@@ -1861,7 +1861,7 @@ def cmd_warm(args):
 DASH_TMPL = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <title>Context Vault · token 经济面板</title>
 <style>
-:root{--bg:#f7f4ee;--card:#fffdf8;--ink:#26221c;--dim:#8c8577;--acc:#c2402a;--good:#2d7d46;--warn:#b07d1e}
+:root{--bg:#fafafa;--card:#ffffff;--ink:#09090b;--dim:#a1a1aa;--acc:#18181b;--good:#16a34a;--warn:#d97706}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--ink);font:14px/1.6 "Segoe UI",system-ui,sans-serif;padding:28px}
 h1{font-size:20px;margin-bottom:2px} .sub{color:var(--dim);font-size:12px;margin-bottom:22px}
@@ -1873,16 +1873,16 @@ h2{font-size:15px;margin:24px 0 12px;color:var(--ink)}
 .bar{display:flex;align-items:center;gap:10px;margin:7px 0}
 .bar .name{width:220px;color:var(--dim);font-size:12px;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .bar .track{flex:1;background:#1d2430;border-radius:6px;height:18px;position:relative}
-.bar .fill{height:100%;border-radius:6px;background:linear-gradient(90deg,#2d7d46,var(--good))}
+.bar .fill{height:100%;border-radius:6px;background:linear-gradient(90deg,#16a34a,var(--good))}
 .bar .val{width:130px;font-size:12px;color:var(--ink)}
 table{width:100%;border-collapse:collapse;font-size:12.5px}
 th,td{text-align:left;padding:7px 10px;border-bottom:1px solid #202836}
 th{color:var(--dim);font-weight:500}
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
-.ok{background:var(--good)} .err{background:#c23a2e} .warm{background:var(--warn)}
+.ok{background:var(--good)} .err{background:#ef4444} .warm{background:var(--warn)}
 .months{display:flex;align-items:flex-end;gap:6px;height:120px}
 .mcol{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:4px}
-.mcol .stick{width:100%;max-width:46px;background:linear-gradient(180deg,var(--acc),#e8c9b0);border-radius:4px 4px 0 0}
+.mcol .stick{width:100%;max-width:46px;background:linear-gradient(180deg,var(--acc),#e4e4e7);border-radius:4px 4px 0 0}
 .mcol .lb{font-size:10px;color:var(--dim)}
 </style></head><body>
 <h1>Context Vault · token 经济面板</h1>
@@ -2140,12 +2140,12 @@ CONSOLE_HTML = r"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect x='2.5' y='2.5' width='15' height='15' rx='3.5' fill='none' stroke='%232dd4a7' stroke-width='1.7'/%3E%3Crect x='6.5' y='8' width='7' height='6' rx='1' fill='%232dd4a7'/%3E%3Cpath d='M7.5 8V6.5a2.5 2.5 0 0 1 5 0V8' fill='none' stroke='%232dd4a7' stroke-width='1.7' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
 :root{
-  --bg0:#f7f4ee; --bg1:#efeae0; --bg2:#e9e3d7; --bg3:#e2dbcc;
-  --line:#ddd5c5; --line-soft:#e6e0d3;
-  --ink:#26221c; --ink-2:#6b655a; --ink-3:#8c8577;
-  --acc:#c2402a; --acc-ink:#fffdf8; --acc-deep:#f3d9d2;
-  --bar:#e5b8ac; --bar-hover:#d99c8c;
-  --warn:#b07d1e; --err:#c23a2e; --info:#3d6f9e;
+  --bg0:#fafafa; --bg1:#f4f4f5; --bg2:#ececee; --bg3:#e4e4e7;
+  --line:#e4e4e7; --line-soft:#ececee;
+  --ink:#09090b; --ink-2:#71717a; --ink-3:#a1a1aa;
+  --acc:#18181b; --acc-ink:#ffffff; --acc-deep:#dcfce7;
+  --bar:#d4d4d8; --bar-hover:#c8c8cc;
+  --warn:#d97706; --err:#ef4444; --info:#2563eb;
   --mono:"Cascadia Code",Consolas,"SF Mono",monospace;
   --sans:"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI",system-ui,sans-serif;
   --rad:8px; --head-h:56px; --nav-h:46px;
@@ -2157,7 +2157,7 @@ body{background:var(--bg0);color:var(--ink);font:14px/1.65 var(--sans);
 ::selection{background:var(--acc-deep);color:var(--ink)}
 ::-webkit-scrollbar{width:10px;height:10px}
 ::-webkit-scrollbar-thumb{background:var(--bg3);border-radius:5px;border:2px solid var(--bg0)}
-::-webkit-scrollbar-thumb:hover{background:#e2dbcc}
+::-webkit-scrollbar-thumb:hover{background:#e4e4e7}
 :focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4px}
 button{font:inherit;color:inherit}
 
@@ -2195,21 +2195,28 @@ h2{font-size:12px;font-weight:600;color:var(--ink-3);letter-spacing:.08em;
   margin:26px 0 10px;text-transform:uppercase}
 main > section > h2:first-child{margin-top:0}
 
-/* ---------- 数据带 (主指标) ---------- */
-.statband{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px 22px;
+/* ---------- 数据带 (主指标, Bento 白卡) ---------- */
+.statband{display:grid;grid-template-columns:repeat(6,1fr);gap:16px;
   padding:6px 0 22px;border-bottom:1px solid var(--line-soft)}
-.stat .v{font-family:var(--mono);font-size:27px;font-weight:600;letter-spacing:-.01em;
-  font-variant-numeric:tabular-nums;color:var(--acc);line-height:1.2}
-.stat .v.neutral{color:var(--ink)}
-.stat .k{font-size:12px;color:var(--ink-3);margin-top:2px}
+@media(max-width:1280px){.statband{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:820px){.statband{grid-template-columns:repeat(2,1fr)}}
+.stat{background:#fff;border:1px solid #e4e4e7;border-radius:10px;padding:14px 16px;
+  box-shadow:0 1px 2px rgba(9,9,11,.04);min-width:0}
+.stat .v{font-family:var(--mono);font-size:24px;font-weight:650;letter-spacing:-.01em;
+  font-variant-numeric:tabular-nums;color:#09090b;line-height:1.25;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stat .v.neutral{color:#09090b}
+.stat .v.good{color:#10b981}
+.stat .k{font-size:11.5px;color:#71717a;margin-top:4px;line-height:1.45;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:help}
 
 /* ---------- 表格 ---------- */
 .tbl-wrap{width:100%}
 table{width:100%;border-collapse:collapse;font-size:13px}
-th{font-size:11.5px;font-weight:600;color:var(--ink-3);text-align:left;letter-spacing:.05em;
-  text-transform:uppercase;padding:8px 12px;border-bottom:1px solid var(--line);
-  background:var(--bg1);position:sticky;top:calc(var(--head-h) + var(--nav-h))}
-td{padding:9px 12px;border-bottom:1px solid var(--line-soft);vertical-align:baseline}
+th{font-size:11px;font-weight:600;color:#71717a;text-align:left;letter-spacing:.05em;
+  text-transform:uppercase;padding:7px 12px;border-bottom:1px solid #e4e4e7;
+  background:#f4f4f5;position:sticky;top:calc(var(--head-h) + var(--nav-h))}
+td{padding:8px 12px;border-bottom:1px solid #ececee;vertical-align:baseline}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 td.mono{font-family:var(--mono);font-size:12.5px}
 .linklike{background:none;border:none;padding:0;cursor:pointer;text-align:left}
@@ -2217,39 +2224,53 @@ td.mono{font-family:var(--mono);font-size:12.5px}
 .sid:hover{text-decoration:underline;text-underline-offset:3px}
 .chip{display:inline-block;font-size:11px;padding:1px 8px;border-radius:5px;
   background:var(--bg2);color:var(--ink-2);border:1px solid var(--line)}
-.chip.warn{color:var(--warn);border-color:#e3d3ae}
+.chip.warn{color:var(--warn);border-color:#fde68a}
 .chip.ok{color:var(--acc);border-color:#1d4a40}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:2px;vertical-align:1px}
-.dot.ok{background:var(--acc)} .dot.err{background:var(--err)} .dot.warm{background:var(--info)} .dot.sw{background:var(--warn)}
+.dot.ok{background:#22c55e} .dot.err{background:#ef4444} .dot.warn{background:#d97706} .dot.sw{background:#d97706}
 td .sub{color:var(--ink-3);font-size:12px}
 
-/* ---------- 概览内容网格 (把实体内容带进首屏, 消除汇总页的空旷感) ---------- */
-.ovgrid{display:grid;grid-template-columns:1.6fr 1fr;gap:8px 36px;align-items:start;margin-top:16px}
-.ovgrid .side{display:grid;gap:14px}
-.duo{display:grid;grid-template-columns:1fr 1.2fr;gap:0 36px;align-items:start}
-.panel{background:var(--bg1);border:1px solid var(--line-soft);border-radius:10px;padding:12px 14px}
-.panel .pt{font-size:11.5px;font-weight:600;color:var(--ink-3);letter-spacing:.05em;
+/* ---------- 概览内容网格 (Linear 风白卡系统) ---------- */
+.ovgrid{display:grid;grid-template-columns:8fr 4fr;gap:16px;align-items:start;margin-top:16px}
+.ovgrid .side{display:grid;gap:16px}
+.duo{display:grid;grid-template-columns:1fr 1.2fr;gap:16px;align-items:start}
+.ovcard,.panel{background:#fff;border:1px solid #e4e4e7;border-radius:10px;
+  box-shadow:0 1px 2px rgba(9,9,11,.04)}
+.ovcard{padding:2px 4px 4px}
+.ovcard>.oc-h{font-size:11.5px;font-weight:600;color:#71717a;letter-spacing:.05em;
+  text-transform:uppercase;padding:10px 12px 4px}
+.panel{padding:12px 14px}
+.panel .pt{font-size:11.5px;font-weight:600;color:#71717a;letter-spacing:.05em;
   text-transform:uppercase;margin-bottom:6px}
 .panel .row{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;
-  padding:5px 0;border-bottom:1px solid var(--line-soft)}
+  padding:6px 0;border-bottom:1px solid #ececee}
 .panel .row:last-child{border-bottom:none}
-.panel .row .l{color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.panel .row .r{color:var(--ink-3);white-space:nowrap;font-family:var(--mono);font-size:11.5px}
-.panel .hint{color:var(--ink-3);font-size:12px}
+.panel .row .l{color:#3f3f46;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.panel .row .r{color:#71717a;white-space:nowrap;font-family:var(--mono);font-size:11.5px}
+.panel .hint{color:#a1a1aa;font-size:12px}
+.pill{display:inline-block;font-size:10.5px;padding:1px 8px;border-radius:999px;font-weight:600;
+  font-family:var(--mono)}
+.pill.ok{color:#15803d;background:#dcfce7}
+.pill.err{color:#b91c1c;background:#fee2e2}
+.pill.warn{color:#a16207;background:#fefce8}
 @media(max-width:1100px){.ovgrid,.duo{grid-template-columns:1fr}}
 
-/* ---------- 月度走势 ---------- */
-.months{display:flex;gap:6px;height:132px;padding:4px 0 0}
+/* ---------- 月度走势 (细柱 + 数值标签) ---------- */
+.months{display:flex;gap:6px;height:150px;padding:10px 4px 0;
+  background:repeating-linear-gradient(to top,transparent 0 36px,#e4e4e7 36px 37px)}
 .mcol{flex:1;position:relative;min-width:0}
-.mcol .stick{position:absolute;left:50%;bottom:22px;width:100%;max-width:46px;
-  height:3%;max-height:calc(100% - 26px);background:var(--bar);border-radius:3px 3px 0 0;
-  border-top:2px solid var(--acc);transform:translateX(-50%) scaleY(1);transform-origin:bottom;
+.mcol .val{position:absolute;left:0;right:0;bottom:calc(22px + 4px + 1%);
+  text-align:center;font-family:var(--mono);font-size:10.5px;color:#71717a;
+  font-variant-numeric:tabular-nums}
+.mcol .stick{position:absolute;left:50%;bottom:22px;width:32px;max-width:60%;
+  height:3%;max-height:calc(100% - 26px);background:#10b981;border-radius:4px 4px 0 0;
+  transform:translateX(-50%) scaleY(1);transform-origin:bottom;
   animation:grow .5s cubic-bezier(.2,.7,.3,1) backwards;animation-delay:calc(var(--i,0)*40ms);
   transition:background .15s ease}
 @keyframes grow{from{transform:translateX(-50%) scaleY(0)}}
-.mcol .stick:hover{background:var(--bar-hover)}
+.mcol .stick:hover{background:#059669}
 .mcol .lb{position:absolute;left:0;right:0;bottom:0;text-align:center;
-  font-size:10.5px;color:var(--ink-3);font-variant-numeric:tabular-nums}
+  font-size:10.5px;color:#a1a1aa;font-variant-numeric:tabular-nums}
 
 /* ---------- 表单与按钮 ---------- */
 .controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
@@ -2262,12 +2283,12 @@ input{flex:1;min-width:260px}
 .btn{display:inline-flex;align-items:center;gap:7px;background:var(--bg2);border:1px solid var(--line);
   border-radius:var(--rad);padding:8px 14px;font-size:13.5px;cursor:pointer;
   transition:border-color .15s ease,background .15s ease,transform .1s ease}
-.btn:hover{border-color:#ddd5c5;background:var(--bg3)}
+.btn:hover{border-color:#e4e4e7;background:var(--bg3)}
 .btn:active{transform:translateY(1px)}
 .btn.primary{background:var(--acc);border-color:var(--acc);color:var(--acc-ink);font-weight:600}
-.btn.primary:hover{background:#c2402a;border-color:#c2402a}
-.btn.danger{background:none;border-color:#8a6a1c;color:var(--warn)}
-.btn.danger:hover{background:#fdf6e3;border-color:var(--warn)}
+.btn.primary:hover{background:#18181b;border-color:#18181b}
+.btn.danger{background:none;border-color:#a16207;color:var(--warn)}
+.btn.danger:hover{background:#fefce8;border-color:var(--warn)}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 
 /* ---------- 面板 ---------- */
@@ -2344,9 +2365,9 @@ input{flex:1;min-width:260px}
 <header>
   <div class="brand">
     <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-      <rect x="2.5" y="2.5" width="15" height="15" rx="3.5" stroke="#c2402a" stroke-width="1.7"/>
-      <rect x="6.5" y="8" width="7" height="6" rx="1" fill="#c2402a"/>
-      <path d="M7.5 8V6.5a2.5 2.5 0 0 1 5 0V8" stroke="#c2402a" stroke-width="1.7" stroke-linecap="round"/>
+      <rect x="2.5" y="2.5" width="15" height="15" rx="3.5" stroke="#18181b" stroke-width="1.7"/>
+      <rect x="6.5" y="8" width="7" height="6" rx="1" fill="#18181b"/>
+      <path d="M7.5 8V6.5a2.5 2.5 0 0 1 5 0V8" stroke="#18181b" stroke-width="1.7" stroke-linecap="round"/>
     </svg>
     Context Vault
   </div>
@@ -2378,8 +2399,8 @@ input{flex:1;min-width:260px}
 <section id="t-ov">
   <div class="statband" id="ov-band"><div class="skel" style="width:220px"></div><div class="skel" style="width:160px"></div><div class="skel" style="width:160px"></div></div>
   <div class="ovgrid">
-    <div>
-      <h2 style="margin-top:0">最近入库会话</h2>
+    <div class="ovcard">
+      <div class="oc-h">最近入库会话</div>
       <div id="ov-latest"><div class="skel" style="height:120px"></div></div>
     </div>
     <div class="side">
@@ -2389,8 +2410,8 @@ input{flex:1;min-width:260px}
     </div>
   </div>
   <div class="duo">
-    <div><h2>月度节省走势（数据源：headroom 导入）</h2><div class="months" id="ov-months"></div></div>
-    <div><h2>按模型明细（数据源：headroom 导入）</h2><div id="ov-models"></div></div>
+    <div class="ovcard"><div class="oc-h">月度节省走势（数据源：headroom 导入）</div><div class="months" id="ov-months" style="margin:0 8px 10px"></div></div>
+    <div class="ovcard"><div class="oc-h">按模型明细（数据源：headroom 导入）</div><div id="ov-models" style="padding:0 4px 4px"></div></div>
   </div>
 </section>
 
@@ -2461,8 +2482,8 @@ function toast(m,err){const t=$("#toast");t.textContent=m;t.classList.toggle("er
 async function api(p,opt){const r=await fetch(p,opt);
   if(!r.ok)throw new Error((await r.json().catch(()=>({}))).error||r.status);return r.json()}
 
-const WARN='<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 2L15 14H1L8 2Z" stroke="#b07d1e" stroke-width="1.5" stroke-linejoin="round"/><path d="M8 6.5v3.5M8 12v.5" stroke="#b07d1e" stroke-width="1.5" stroke-linecap="round"/></svg>';
-const GOOD='<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.3" stroke="#c2402a" stroke-width="1.5"/><path d="M5.4 8.2l1.8 1.8 3.4-3.8" stroke="#c2402a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const WARN='<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 2L15 14H1L8 2Z" stroke="#d97706" stroke-width="1.5" stroke-linejoin="round"/><path d="M8 6.5v3.5M8 12v.5" stroke="#d97706" stroke-width="1.5" stroke-linecap="round"/></svg>';
+const GOOD='<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.3" stroke="#18181b" stroke-width="1.5"/><path d="M5.4 8.2l1.8 1.8 3.4-3.8" stroke="#18181b" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const errEmpty=(msg,retry)=>'<div class="empty">'+WARN+esc(msg)+
   (retry?'<br><button class="btn" onclick="'+retry+'">重试</button>':"")+"</div>";
 
@@ -2489,7 +2510,8 @@ async function boot(){
   }catch(e){const s=$("#status");s.classList.add("err");s.innerHTML="<span class='pulse'></span>服务异常 · 4s 后重试";
     setTimeout(boot,4000)}   /* 常驻重启/部署窗口期自动恢复, 不定格在连接失败 */
 }
-const stat=(v,k,cls="")=>'<div class="stat"><div class="v '+cls+'">'+v+'</div><div class="k">'+k+"</div></div>";
+const stat=(v,k,tip,cls="")=>'<div class="stat"'+(tip?' title="'+String(tip).replace(/"/g,"&quot;")+'"':"")+
+  '><div class="v '+cls+'">'+v+'</div><div class="k">'+k+"</div></div>";
 const kv=(k,v)=>"<b>"+k+"</b><span>"+(v==null?"—":v)+"</span>";
 
 async function loadOv(){
@@ -2497,25 +2519,24 @@ async function loadOv(){
     const d=await api("/ledger");
     const lt=d.lifetime||{};const ow=d.owned||{};
     let band="";
-    /* ① 资产带 (vault 自有): 库里有什么、还在不在动 */
+    /* ① 资产带 (vault 自有): 短副标题 + title Tooltip 承载细节 */
     if(ow.snapshots){
-      band+=stat(num(ow.snapshots),"快照资产 · 跨 harness 统一库存");
-      band+=stat(num(d.memories||0),"跨会话记忆 · 自动提取, 注明来源快照","neutral");
+      band+=stat(num(ow.snapshots),"快照资产","跨 harness 统一库存 · 内容寻址 · 自动 lineage");
+      band+=stat(num(d.memories||0),"跨会话记忆","自动提取 · 每条注明来源快照, 可回读核实","neutral");
       const top=(ow.by_agent||[])[0];
       if(top)band+=stat(esc(top.agent)+" ×"+num(top.snapshots),
-        "会话最多的 agent · 累计输入 "+bn(top.tokens_in||0)+" tok","neutral");
+        "会话最多的 agent","累计输入 "+bn(top.tokens_in||0)+" tokens (快照内嵌用量)","neutral");
     }
-    /* ② 消耗带 (自有): 数字带参照系, 不裸奔 */
-    band+=stat(bn(ow.tokens_in),"累计输入 tokens · 提取自快照内嵌用量, 零外部依赖","neutral");
-    band+=stat((ow.cache_hit_rate*100).toFixed(0)+"%",
-      "缓存命中率 · 命中部分按约 1/10 计价, 越高越省（cache 读 "+bn(ow.cache_read)+"）","neutral");
-    /* ③ 通路节省 (headroom 增强): 整带归因; 未接入时折叠为引导 */
+    /* ② 消耗带 (自有) */
+    band+=stat(bn(ow.tokens_in),"累计输入 tokens","提取自快照内嵌用量记录, 零外部依赖","neutral");
+    band+=stat((ow.cache_hit_rate*100).toFixed(0)+"%","缓存命中率","命中部分按约 1/10 计价, 越高越省 (cache 读 "+bn(ow.cache_read)+")","neutral");
+    /* ③ 通路节省 (headroom 增强): 正向指标 = 翡翠绿 */
     const hasLt=(lt.saved_usd||0)+(lt.cache_savings_usd||0)>0;
     if(hasLt){
       band+=stat(usd((lt.saved_usd||0)+(lt.cache_savings_usd||0)),
-        "通路层节省 · headroom 代理压缩, 按官方价目折算（估算, 非账单）");
+        "通路层节省","headroom 代理压缩 · 按官方价目折算 (估算, 非账单)","good");
     }else{
-      band+=stat("—","通路层节省 · 未接入（导入: cv ledger import-headroom）","neutral");
+      band+=stat("—","通路层节省","未接入 (导入: cv ledger import-headroom)","neutral");
     }
     $("#ov-band").innerHTML=band;
     /* 内容区: 最近入库会话表 + 哨兵/记忆/审计三卡 (把实体内容带进概览) */
@@ -2529,10 +2550,10 @@ async function loadOv(){
         frel(s.created_at),{t:num(s.blocks||0),num:1},{t:bn(s.tokens_in||0),num:1}]))
       :errEmpty("还没有会话入库 · 先运行 cv sync","");
     const pe=Array.isArray(pv)?pv:[];
-    $("#ov-probe").innerHTML=pe.length?pe.map(e=>'<div class="row"><span class="l"><span class="dot '+
-      (e.status==="ok"?"ok":(e.status==="http_error"||e.status==="error")?"err":"sw")+'"></span>'+
-      esc(e.profile||"?")+' <span style="color:var(--ink-3)">'+esc(e.status||"")+
-      '</span></span><span class="r">'+frel(e.ts)+"</span></div>").join("")
+    $("#ov-probe").innerHTML=pe.length?pe.map(e=>{
+      const st=e.status||"?";const cls=st==="ok"?"ok":(st==="http_error"||st==="error")?"err":"warn";
+      return '<div class="row"><span class="l"><span class="dot '+cls+'"></span>'+esc(e.profile||"?")+
+      ' <span class="pill '+cls+'">'+esc(st)+'</span></span><span class="r">'+frel(e.ts)+"</span></div>"}).join("")
       :'<span class="hint">暂无探测记录 · cv probe 或托盘哨兵</span>';
     const mm=Array.isArray(mr)?mr:(mr&&mr.memories||[]);
     $("#ov-mem").innerHTML=mm.length?mm.map(m=>'<div class="row"><span class="l" title="'+esc(m.content)+
@@ -2551,9 +2572,10 @@ async function loadOv(){
     if(!ms.length)$("#ov-months").innerHTML='<div class="empty">暂无月度数据<br>导入账本 <code>cv ledger import-headroom</code></div>';
     else{
       const mx=Math.max(...ms.map(m=>m.c||0),1);
-      $("#ov-months").innerHTML=ms.map((m,i)=>'<div class="mcol"><div class="stick" style="height:'+
-        Math.max(100*(m.c||0)/mx,3).toFixed(2)+'%;--i:'+i+'" title="'+esc(m.m+" · "+usd(m.c))+
-        '"></div><div class="lb">'+esc(m.m.slice(2))+"</div></div>").join("");
+      $("#ov-months").innerHTML=ms.map((m,i)=>{const h=Math.max(100*(m.c||0)/mx,3);
+        return '<div class="mcol"><div class="val">'+usd(m.c||0)+'</div><div class="stick" style="height:'+
+        h.toFixed(2)+'%;--i:'+i+'" title="'+esc(m.m+" · "+usd(m.c))+
+        '"></div><div class="lb">'+esc(m.m.slice(2))+"</div></div>"}).join("");
     }
     $("#ov-models").innerHTML=table(["模型","事件","节省 tokens","节省金额"],
       (d.by_model||[]).map(m=>["<span class='mono'>"+esc(m.model||"未知模型")+"</span>",
