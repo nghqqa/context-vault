@@ -2076,12 +2076,19 @@ class VaultIndex:
         self.block_text = block_text_fn
         self.fingerprint = None
         self.index, self.meta = {}, {}   # 常驻: 只有倒排索引 + 轻量 meta; 全文 env 按需加载
-        self._sids: list[str] = []       # postings 里 sid 的解码表 (与 index 同批原子换装)
+        self._sids: list[str] = []       # postings 里 sid 的解码表 (只追加; 与 meta 同批可见)
+        self._mtimes: dict = {}          # sid -> mtime, 增量差分用 (变更/删除 → 全量重建)
         self._env_cache = {}             # sid -> env, 小 LRU (快照内容寻址不可变, 无失效问题)
         self._rebuild_lock = threading.Lock()  # 单飞: 重建期间其他请求拿现态秒回, 不排队不并发重建
         self._rebuild_pending = False          # 后台重建已在排队/执行中
         self._last_rebuild = 0.0               # monotonic; 节流基线 (库在增长时指纹永远追不上, 必须节流)
-        self.rebuild(force=True)
+        self._last_persist = 0.0               # 缓存落盘节流 (0.4GB 写盘, 增量后 ≥PERSIST_MIN_SEC 才重写)
+        self.stats = {"full": 0, "incr": 0, "cache_load": 0}  # 重建方式计数 (诊断 + 测试断言)
+        if self._load_cache():
+            self._last_rebuild = time.monotonic()
+            self.rebuild()  # 追赶: 缓存之后的新增走增量 (毫秒级), 删除/变更自动转全量
+        else:
+            self.rebuild(force=True)
 
     # postings 位编码: q = (sid 序号 << 24) | 块号。tuple 存 4900 万条 ≈ 4.5GB, 位编码 ≈ 0.4GB。
     # 块号 < 2**24 (单快照 1670 万块, 实际最大 ~3000), sid 序号 < 2**39 (容量充足)。
@@ -2089,6 +2096,7 @@ class VaultIndex:
     _BLOCK_MASK = (1 << 24) - 1
 
     ENV_CACHE_MAX = 64  # ≈64 × 数 MB 解析对象, 上限半 GB 级; 全量常驻曾是 12GB+ 内存的根源
+    PERSIST_MIN_SEC = 300  # 增量后缓存重写最小间隔 (0.4GB 写盘, 别跟着 2 分钟 sync 跑)
 
     def load_env(self, sid):
         """按需读快照全文 (磁盘 JSON -> 解析), LRU 缓存; 不存在/损坏返回 None。"""
@@ -2104,52 +2112,116 @@ class VaultIndex:
             self._env_cache.popitem(last=False)
         return env
 
-    def _fp(self) -> str:
-        snap_dir = self.vault / "snapshots"
-        return hashlib.sha256("|".join(f"{f.name}:{int(f.stat().st_mtime)}" for f in
-                                       sorted(snap_dir.glob("cv_*.json"))).encode()).hexdigest()
+    def _scan(self):
+        """(指纹, {stem: file}, {stem: mtime}) — 一次 glob 供指纹与差分共用。"""
+        files = {f.stem: f for f in sorted((self.vault / "snapshots").glob("cv_*.json"))}
+        mtimes = {sid: int(f.stat().st_mtime) for sid, f in files.items()}
+        fp = hashlib.sha256("|".join(f"{sid}:{m}" for sid, m in sorted(mtimes.items())).encode()).hexdigest()
+        return fp, files, mtimes
+
+    def _index_one(self, f, meta, index, sids, mtimes):
+        """解析并索引单个快照。可见顺序是硬约束: 先 meta (healthz/recent 口径),
+        再 sids (postings 解码表), 最后 postings — 并发读者任何时刻都只见完整条目。"""
+        try:
+            env = json.loads(f.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            return False
+        sid = f.stem
+        meta[sid] = {"agent": env["capture"].get("agent"),
+                     "first": next(((b.get("content") or b.get("summary") or "")[:64]
+                                    for b in env["conversation"]
+                                    if b.get("role") == "user"
+                                    and (b.get("content") or b.get("summary"))), ""),
+                     "created_at": env.get("created_at"),
+                     "cwd": env["capture"].get("cwd"),
+                     "blocks": env["stats"]["blocks_total"],
+                     "tokens_in": env["stats"]["tokens_in"],
+                     "completeness": env["capture"].get("completeness")}
+        sid_code = len(sids) << self._BLOCK_BITS
+        sids.append(sid)
+        mtimes[sid] = int(f.stat().st_mtime)
+        for i, b in enumerate(env["conversation"]):
+            for t in set(tokenize(self.block_text(b))):
+                arr = index.get(t)
+                if arr is None:
+                    arr = index[t] = array("q")
+                arr.append(sid_code | i)
+        return True
+
+    _CACHE_VER = 1
+
+    def _persist(self, force=False):
+        """索引缓存落盘: 启动秒级加载 + 增量追赶, 免 3-4 分钟冷建。失败静默 (纯加速件)。"""
+        now = time.monotonic()
+        if not force and now - self._last_persist < self.PERSIST_MIN_SEC:
+            return
+        self._last_persist = now
+        try:
+            import pickle
+            p = self.vault / "index_cache.pkl"
+            tmp = p.parent / (p.name + f".{os.getpid()}.tmp")
+            with open(tmp, "wb") as fh:
+                pickle.dump({"ver": self._CACHE_VER, "fp": self.fingerprint,
+                             "meta": self.meta, "index": self.index,
+                             "sids": self._sids, "mtimes": self._mtimes}, fh, protocol=4)
+            os.replace(tmp, p)  # 原子换文件, 并发读者 (其他实例) 不见半截
+        except OSError:
+            pass
+
+    def _load_cache(self):
+        """启动加载索引缓存。只做结构与版本校验, 指纹可以落后 —— 落后部分由随后的
+        rebuild() 增量追赶 (纯新增毫秒级); 结构坏了才回退全量。"""
+        try:
+            import pickle
+            p = self.vault / "index_cache.pkl"
+            if not p.exists():
+                return False
+            with open(p, "rb") as fh:
+                d = pickle.load(fh)
+            if d.get("ver") != self._CACHE_VER or not isinstance(d.get("index"), dict):
+                return False
+            if not isinstance(d.get("meta"), dict) or len(d.get("sids") or []) != len(d["meta"]):
+                return False
+            self.index, self.meta = d["index"], d["meta"]
+            self._sids, self._mtimes = d["sids"], d["mtimes"]
+            self.fingerprint = d["fp"]  # 缓存时刻的指纹; rebuild() 以此差分追赶
+            self.stats["cache_load"] += 1
+            return True
+        except (OSError, ValueError, KeyError, EOFError):
+            return False
 
     def rebuild(self, force=False, stale_after=0.0):
         """stale_after>0: 距上次重建不足该秒数时直接返回现态 (热路径防重建风暴);
-        已有重建在跑时非阻塞跳过。force=True (启动) 语义不变。"""
+        已有重建在跑时非阻塞跳过。快照内容寻址只增不改 → 指纹变化若纯为新增,
+        走增量追加 (毫秒级); 删除/变更才全量重建。"""
         now = time.monotonic()
         if not force and stale_after and now - self._last_rebuild < stale_after:
             return
         if not self._rebuild_lock.acquire(blocking=False):
             return
         try:
-            fp = self._fp()
+            fp, files, mtimes = self._scan()
             if not force and fp == self.fingerprint:
                 return
-            # 建到新字典, 末尾原子换装: 重建耗时数分钟, 就地清空会让并发读者看到半成品计数
-            # 只建 index+meta; 全文 env 走 load_env 按需加载 (全量常驻曾吃 12GB+ 内存)
-            new_index, new_meta, new_sids = {}, {}, []
-            for f in sorted((self.vault / "snapshots").glob("cv_*.json")):
-                try:
-                    env = json.loads(f.read_text(encoding="utf-8"))
-                except (ValueError, OSError):
-                    continue
-                sid = f.stem
-                sid_code = len(new_sids) << self._BLOCK_BITS
-                new_sids.append(sid)
-                new_meta[sid] = {"agent": env["capture"].get("agent"),
-                                 "first": next(((b.get("content") or b.get("summary") or "")[:64]
-                                                for b in env["conversation"]
-                                                if b.get("role") == "user"
-                                                and (b.get("content") or b.get("summary"))), ""),
-                                 "created_at": env.get("created_at"),
-                                 "cwd": env["capture"].get("cwd"),
-                                 "blocks": env["stats"]["blocks_total"],
-                                 "tokens_in": env["stats"]["tokens_in"],
-                                 "completeness": env["capture"].get("completeness")}
-                for i, b in enumerate(env["conversation"]):
-                    for t in set(tokenize(self.block_text(b))):
-                        arr = new_index.get(t)
-                        if arr is None:
-                            arr = new_index[t] = array("q")
-                        arr.append(sid_code | i)
-            self.index, self.meta, self._sids = new_index, new_meta, new_sids
+            added = [f for sid, f in files.items() if sid not in self._mtimes]
+            dirty = (set(self._mtimes) - files.keys()) or \
+                    any(mtimes[s] != self._mtimes[s] for s in self._mtimes if s in mtimes)
+            if not force and self.fingerprint is not None and not dirty and added:
+                for f in added:  # 增量: 只解析新文件, 原地追加 (快照不可变, 老条目永不失效)
+                    self._index_one(f, self.meta, self.index, self._sids, self._mtimes)
+                self.fingerprint = fp
+                self.stats["incr"] += 1
+                self._persist()
+                return
+            # 全量: staging + 原子换装, 并发读者不见半成品
+            new_index, new_meta, new_sids, new_mtimes = {}, {}, [], {}
+            for f in files.values():
+                self._index_one(f, new_meta, new_index, new_sids, new_mtimes)
+            self.index, self.meta = new_index, new_meta
+            self._sids, self._mtimes = new_sids, new_mtimes
             self.fingerprint = fp
+            self.stats["full"] += 1
+            self._persist(force=True)
         finally:
             self._last_rebuild = time.monotonic()  # 失败也计时, 别让坏请求反复触发
             self._rebuild_lock.release()
@@ -3105,7 +3177,9 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     lim = max(1, min(int(q.get("limit", 5)), 200))
                     off = max(int(q.get("offset", 0)), 0)
                     desc = q.get("order", "desc") != "asc"
-                    rows = sorted(idx.meta.items(), key=lambda kv: kv[1]["created_at"] or "",
+                    # 迭代只追加的 _sids 而非 dict.items(): 增量插入并发时 dict 迭代会 RuntimeError
+                    pairs = [(sid, idx.meta[sid]) for sid in idx._sids]
+                    rows = sorted(pairs, key=lambda kv: kv[1]["created_at"] or "",
                                   reverse=desc)[off:off + lim]
                     return self._json({"total": total,
                                        "rows": [{"sid": k, **v} for k, v in rows]})

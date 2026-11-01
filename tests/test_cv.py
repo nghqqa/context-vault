@@ -604,3 +604,50 @@ def test_serve_token_auth(isolated, tmp_path):
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def _mk_snap(vault: Path, sid: str, first_user: str, blocks: int = 3):
+    """写一个 VaultIndex 可解析的最小快照文件, 返回其 mtime 前的文件对象。"""
+    p = vault / "snapshots" / f"{sid}.json"
+    p.parent.mkdir(exist_ok=True)
+    env = {"capture": {"agent": "zcode", "completeness": "full", "cwd": "D:\proj"},
+           "created_at": "2026-11-01T00:00:00",
+           "stats": {"blocks_total": blocks, "tokens_in": 100 * blocks},
+           "conversation": ([{"type": "user", "role": "user", "content": first_user}] +
+                            [{"type": "assistant", "role": "assistant", "content": f"回复{i}"}
+                             for i in range(blocks - 1)])}
+    p.write_text(json.dumps(env, ensure_ascii=False), encoding="utf-8")
+    return p
+
+
+def test_index_incremental_cache_and_removal(isolated):
+    """索引三态: 追加走增量 (不全量), 重启加载缓存后增量追赶一致, 删除触发全量。"""
+    _, vault = isolated
+    bt = lambda b: b.get("content") or ""
+    _mk_snap(vault, "cv_aaaa", "第一个会话 关键词甲")
+    _mk_snap(vault, "cv_bbbb", "第二个会话 关键词乙")
+    idx = cv.VaultIndex(vault, bt)
+    assert len(idx.meta) == 2 and idx.stats == {"full": 1, "incr": 0, "cache_load": 0}
+
+    # 增量: 纯新增 -> incr 计数, 不动全量
+    _mk_snap(vault, "cv_cccc", "第三个会话 关键词甲")
+    idx.rebuild()
+    assert len(idx.meta) == 3 and idx.stats["incr"] == 1 and idx.stats["full"] == 1
+    assert "cv_cccc" in idx.meta
+    assert idx.search("关键词甲", 5)["hits"][0]["sid"] in ("cv_aaaa", "cv_cccc")
+
+    # 缓存: 新实例直接加载, 追加的 cv_dddd 走增量追赶, 搜索/上下文跨加载一致
+    _mk_snap(vault, "cv_dddd", "第四个会话 关键词乙")
+    idx2 = cv.VaultIndex(vault, bt)
+    assert idx2.stats["cache_load"] == 1 and idx2.stats["full"] == 0
+    assert len(idx2.meta) == 4
+    assert idx2.search("关键词乙", 5)["hits"][0]["sid"] in ("cv_bbbb", "cv_dddd")
+    assert idx2.context("关键词甲", 3)["results"]
+    assert idx2.load_env("cv_aaaa") is not None
+
+    # 删除: 差分发现移除 -> 全量重建, 计数与搜索立刻一致
+    (vault / "snapshots" / "cv_aaaa.json").unlink()
+    idx2.rebuild()
+    assert len(idx2.meta) == 3 and "cv_aaaa" not in idx2.meta
+    assert idx2.stats["full"] == 1 and idx2.stats["cache_load"] == 1  # 全量恰好 +1
+    assert (vault / "index_cache.pkl").exists()  # 落盘缓存已生成
