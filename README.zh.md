@@ -21,7 +21,7 @@
 - **交接简报档**——`--target markdown` 生成 ≤48KB 可携交接简报（停在哪/最近动作/活上下文尾部），任何 agent 都能吃。
 - **vault 备份**——`cv backup`：一致性快照 + 轮换 zip；常驻控制台可选 `CV_SERVE_TOKEN` 鉴权。
 - **诚实迁移**——Codex ⇄ Claude Code 双向（双端真机验证），默认 dry-run，每次迁移产出"什么保住了/什么丢了"的完整报告。
-- **token 账本**——从你自己会话文件内嵌的 usage 记录聚合出按模型成本、缓存命中率、5 小时窗口视图，不需要任何代理。
+- **token 账本**——从你自己会话文件内嵌的 usage 记录聚合出按模型成本、缓存命中率，不需要任何代理。
 - **跨会话记忆**——从历史自动提取决策/偏好/摘要，`MemoryEngine` 接口可插拔；每条记忆标注来源快照。
 - **MCP 记忆后端**——6 个工具让任意 MCP 客户端（Claude Code / Codex / Cursor）变成"记得住的 agent"，一条命令全客户端接入。
 - **上游哨兵**——定时探测 relay `/v1/models`，模型静默消失即刻告警并留审计痕。
@@ -42,7 +42,7 @@ python tools/cv.py migrate ~/.claude/transcripts/ses_xxx.jsonl --target codex
 python tools/cv.py import cv_xxxx --target codex --apply
 ```
 
-更多：`cv ingest <会话文件>`（桥接读 19 种格式，经 session-migrate）、`cv export-harness cv_xxxx --to opencode`（桥接写 18 个目标）、`cv memory extract`（记忆提取）、`cv probe --watch 300`（哨兵）、`cv backup`（一致性备份轮换）、`cv dashboard --open`（自包含面板）。
+更多：`cv ingest <会话文件>`（桥接读 18 种格式，经 session-migrate）、`cv export-harness cv_xxxx --to opencode`（桥接写 18 个目标）、`cv memory extract`（记忆提取）、`cv probe --watch 300`（哨兵）、`cv backup`（一致性备份轮换）、`cv dashboard --open`（自包含面板）。
 
 ## 📦 迁移保真度表（What survives）
 
@@ -88,7 +88,7 @@ vault/
 - 195MB Codex rollout → **1.5 秒**导出 → 12MB 快照；39 个压缩边界、2.24 亿 token 用量、838 对工具调用全部保真。
 - **双向迁移真机验证全部通过**：Codex→Claude 在 2.1.181 里 resume 续写；Claude→Codex 在 0.153.4 里恢复 **373,160 tokens 全量上下文**。
 - 逆向并规避 codex 两代格式陷阱（`ordinal` 数字/字符串互不兼容、resume 走 SQLite thread-store、"rollout is empty" 误导性报错）。
-- 测试 **22 用例**，含冷热双路径等价测试——常驻索引与文件扫描回退必须结果一致（"常驻只是加速，不是依赖"被写进了测试）。
+- 测试 **24 用例**，含冷热双路径等价测试——常驻索引与文件扫描回退必须结果一致（"常驻只是加速，不是依赖"被写进了测试）。
 
 ## 设计原则
 
@@ -120,14 +120,14 @@ vault/
 | 带出处的记忆 | ✅（规则引擎 v0，可插拔） | — | ✅ | — |
 | 开放格式规范 | ✅ [CC-BY](docs/snapshot-format.md)（含 txcript 映射） | txcript `Simple` | — | — |
 
-搬运工是上游适配器而非竞品——`cv ingest` / `cv export-harness` 的 19 格式桥接正是驱动 session-migrate 实现的。Vault 拥有它们不做的部分：存储、谱系、账本、审计。
+搬运工是上游适配器而非竞品——`cv ingest` / `cv export-harness` 的 18 格式桥接正是驱动 session-migrate 实现的。Vault 拥有它们不做的部分：存储、谱系、账本、审计。
 
 ## harness 支持矩阵
 
 | 通道 | 覆盖 |
 |---|---|
-| 原生读+写（真机验证） | Codex · Claude Code · ZCode 转录 |
-| 桥接读（`cv ingest`，19 格式） | opencode · cursor · qwen · kimi · grok · antigravity · copilot · devin · hermes · kilo · mastracode · muse · omp · pi · vibe · openhands … |
+| 原生读+写（真机验证） | Codex · Claude Code · ZCode 转录（只读） |
+| 桥接读（`cv ingest`，18 格式） | opencode · cursor · qwen · kimi · grok · antigravity · copilot · devin · hermes · kilo · mastracode · muse · omp · pi · vibe · openhands … |
 | 桥接写（`cv export-harness`，18 目标） | 同上清单 |
 | 账本数据源 | headroom · relay billing API · ZCode 用量审计 |
 | 无法支持 | 加密存储的 harness（如 Windsurf——本地会话加密，无格式可适配） |
@@ -136,7 +136,7 @@ vault/
 
 - **M0 ✅** 格式 spec v0.1 · 双源导出 · 账本导入 · 可用性探测
 - **M1 ✅** SQLite 资产库 · 双向迁移（双端真机验证）· diff 预览
-- **M2 ✅** 常驻服务 + Web 控制台 · MCP 后端 · 缓存预热 · 哨兵/守望 · 19 格式桥接接入
+- **M2 ✅** 常驻服务 + Web 控制台 · MCP 后端 · 缓存预热 · 哨兵/守望 · 18 格式桥接接入
 - **M3 ✅** 记忆层（引擎可插拔）· fork/谱系 · 审计时间线
 - **下一步** 发布与反馈 · 记忆出处 span · 可选加密
 

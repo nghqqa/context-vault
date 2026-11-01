@@ -10,7 +10,7 @@ Rules for agents using this tool: never modify source session files (read-only);
 - `python tools/cv.py sync` — incremental intake from all local session sources (+lineage)
 - `python tools/cv.py export <session-file>` — snapshot a session (idempotent, content-addressed)
 - `python tools/cv.py migrate <file> --target codex|claude` — export → honest diff → import (dry-run by default; `--apply` writes real dirs)
-- `python tools/cv.py ingest <file> [--format X]` — bridged read via session-migrate (19 formats)
+- `python tools/cv.py ingest <file> [--format X]` — bridged read via session-migrate (18 formats)
 - `python tools/cv.py export-harness <sid> --to X` — bridged write (18 targets)
 - `python tools/cv.py memory extract` / `memory search "query"` — cross-session memory
 - `python tools/cv.py ledger stats` — token ledger from embedded usage records

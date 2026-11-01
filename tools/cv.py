@@ -1401,6 +1401,8 @@ def load_memory_engine(name: str):
 
 
 def cmd_memory(args):
+    if not hasattr(args, "engine"):
+        args.engine = None  # search/list 子命令未注册 --engine, 统一兜底
     vault = vault_dir(args)
     conn = db(vault)
     conn.executescript(SCHEMA + MEMORY_TABLE)
@@ -2825,6 +2827,10 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
         def _json(self, obj, code=200):
             body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
             self.send_response(code)
+            nc = getattr(self, "_new_cookie", None)
+            if nc:
+                self.send_header("Set-Cookie", nc)
+                self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -2860,16 +2866,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     given = parse_qs(urlparse(self.path).query).get("token", [""])[0]
                 if given == token:
                     if "vault_token=" not in (self.headers.get("Cookie") or ""):
-                        self.send_response(200)
-                        self.send_header("Set-Cookie", f"vault_token={token}; Path=/; HttpOnly; SameSite=Strict")
-                        self.send_header("Cache-Control", "no-store")
-                    else:
-                        return True
-                    body = b'{"ok":true}'
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
+                        self._new_cookie = f"vault_token={token}; Path=/; HttpOnly; SameSite=Strict"
                     return True
                 self._json({"error": "unauthorized: 需要 token (?token= 首访, 或 X-Vault-Token 头)"}, 401)
                 return False
@@ -2915,8 +2912,10 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     prices_p = vault / "prices.json"  # {"模型": {"input":x,"output":y,"cache_read":z}} $/Mtok
                     if prices_p.exists():
                         try:
-                            prices = json.loads(prices_p.read_text(encoding="utf-8"))
-                        except ValueError:
+                            pj = json.loads(prices_p.read_text(encoding="utf-8"))
+                            prices = {m: v for m, v in pj.items()
+                                      if isinstance(v, dict) and "input" in v and "output" in v}
+                        except (ValueError, AttributeError):
                             pass
                     zcode_usage = {}
                     try:  # 真相源: zcode 主库 model_usage (全量调用); model-io 审计文件仅零头
@@ -3051,7 +3050,7 @@ def cmd_backup(args):
         raise SystemExit(f"vault 未初始化: {vault} (先 cv init / cv export)")
     out_dir = Path(args.out).expanduser() if args.out else vault / "backups"
     out_dir.mkdir(parents=True, exist_ok=True)
-    ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S") + ("-f%03d" % (dt.datetime.now().microsecond // 1000))
     out = out_dir / f"cv-backup-{ts}.zip"
     tmp_db = out_dir / f".backup-tmp-{os.getpid()}.db"
     n_snap = 0
@@ -3073,7 +3072,7 @@ def cmd_backup(args):
     finally:
         tmp_db.unlink(missing_ok=True)
     backups = sorted(out_dir.glob("cv-backup-*.zip"))
-    for old in backups[:-int(args.keep)] if len(backups) > int(args.keep) else []:
+    for old in backups[:-int(args.keep)] if int(args.keep) > 0 and len(backups) > int(args.keep) else []:
         old.unlink()
     size_mb = out.stat().st_size / 1048576
     print(f"备份完成: {out} ({n_snap} 快照, {size_mb:.1f} MB, 留存 {min(len(backups), int(args.keep))}/{args.keep} 份)")
@@ -3083,6 +3082,10 @@ def cmd_backup(args):
 # ------------------------------------------------- doctor: 环境体检
 
 def cmd_doctor(args):
+    try:  # 中文 Windows GBK 控制台下 ✓/✗ 会 UnicodeEncodeError
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     checks = []
     checks.append(("Codex 会话目录", CODEX_SESSIONS.exists(), str(CODEX_SESSIONS)))
     checks.append(("Claude 转录目录", (HOME / ".claude" / "transcripts").exists(), str(HOME / ".claude/transcripts")))

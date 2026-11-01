@@ -1,3 +1,5 @@
+> © 2026 Context Vault contributors — 规范以 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 授权。
+
 # context-snapshot 格式规范 v0.1
 
 > 状态：**定稿**（2026-10-27，四项开放问题已裁决，见 §8）· 上游文档：[BLUEPRINT.md](BLUEPRINT.md) §4

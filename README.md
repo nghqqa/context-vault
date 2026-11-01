@@ -21,7 +21,7 @@ Your AI coding sessions are your most valuable work asset — yet they're locked
 - **Handoff brief** — `--target markdown` emits a ≤48KB portable brief (where it stopped / recent actions / live-context tail) that any agent can consume.
 - **Vault backup** — `cv backup`: consistent sqlite snapshot + rotated zips; optional `CV_SERVE_TOKEN` auth for the resident console.
 - **Honest migration** — bidirectional Codex ⇄ Claude Code (real-machine verified both ways), dry-run by default, and a per-migration report of exactly what survives and what doesn't.
-- **Token ledger** — per-model costs, cache hit rates and 5h-window views aggregated from usage records *inside your own session files*. No proxy required.
+- **Token ledger** — per-model costs, cache hit rates aggregated from usage records *inside your own session files*. No proxy required.
 - **Cross-session memory** — decisions, preferences and summaries auto-extracted from history behind a swappable `MemoryEngine` interface; every memory cites its source snapshot.
 - **MCP backend** — 6 tools (`vault_remember` etc.) turn any MCP client (Claude Code / Codex / Cursor) into a remembering agent. One command to install everywhere.
 - **Upstream sentinel** — probes relay `/v1/models`, alerts and leaves an audit trail when a model silently disappears.
@@ -109,14 +109,14 @@ Two rules that don't bend: **snapshots are immutable** (any derived data lives i
 | Memory with provenance | ✅ (rule engine v0, pluggable) | — | ✅ | — |
 | Open format spec | ✅ [CC-BY](docs/snapshot-format.md) (txcript mapping included) | txcript `Simple` | — | — |
 
-Porters are upstream adapters, not competitors — `cv ingest` and `cv export-harness` literally shell out to session-migrate for 19 formats. The vault owns what they don't: storage, lineage, ledger, audit.
+Porters are upstream adapters, not competitors — `cv ingest` and `cv export-harness` literally shell out to session-migrate for 18 formats. The vault owns what they don't: storage, lineage, ledger, audit.
 
 ## Harness matrix
 
 | Channel | Coverage |
 |---|---|
-| Native read+write (real-machine verified) | Codex · Claude Code · ZCode transcripts |
-| Bridged read (`cv ingest`, 19 formats) | opencode · cursor · qwen · kimi · grok · antigravity · copilot · devin · hermes · kilo · mastracode · muse · omp · pi · vibe · openhands … |
+| Native read+write (real-machine verified) | Codex · Claude Code · ZCode transcripts (read) |
+| Bridged read (`cv ingest`, 18 formats) | opencode · cursor · qwen · kimi · grok · antigravity · copilot · devin · hermes · kilo · mastracode · muse · omp · pi · vibe · openhands … |
 | Bridged write (`cv export-harness`, 18 targets) | same list |
 | Ledger sources | headroom · relay billing API · ZCode usage audit |
 | Not supported | harnesses with encrypted local stores (e.g. Windsurf) |

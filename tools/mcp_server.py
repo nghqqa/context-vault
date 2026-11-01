@@ -376,6 +376,11 @@ def handle(msg: dict, vault: Path) -> dict | None:
 
 
 def main():
+    try:  # 中文 Windows 管道默认 GBK, MCP 规范要求 UTF-8
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     ap = argparse.ArgumentParser(prog="context-vault-mcp")
     ap.add_argument("--vault", default=str(Path.cwd() / "vault"))
     args = ap.parse_args()
