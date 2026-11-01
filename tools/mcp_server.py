@@ -258,8 +258,9 @@ def _via_service(name: str, args_dict: dict):
             return "\n".join(lines)[:12000]
         if name == "vault_recent":
             r = _svc_get(f"/recent?limit={int(args_dict.get('limit', 5))}")
-            lines = [f"最近 {len(r)} 个快照 (via 热索引):"]
-            for h in r:
+            rows = r.get("rows", []) if isinstance(r, dict) else r  # /recent 契约 {total, rows[]} (2026-11-01); 兼容旧数组形态
+            lines = [f"最近 {len(rows)} 个快照 (via 热索引):"]
+            for h in rows:
                 lines.append(f"  [{h['sid']}] {h['agent']} 块={h.get('blocks')} "
                              f"入={h.get('tokens_in')} | {str(h.get('created_at', ''))[:19]}")
             return "\n".join(lines)

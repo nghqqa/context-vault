@@ -17,7 +17,7 @@
 
 ## ✨ 核心能力
 
-- **快照资产库**——把 Codex / Claude Code / 19 种桥接 harness 的会话导出为供应商中立的 [context-snapshot](docs/snapshot-format.md) 格式：内容寻址、不可变、幂等、自动 lineage（会话树与 fork）。
+- **快照资产库**——把 Codex / Claude Code / 18 种桥接 harness 的会话导出为供应商中立的 [context-snapshot](docs/snapshot-format.md) 格式：内容寻址、不可变、幂等、自动 lineage（会话树与 fork）。
 - **交接简报档**——`--target markdown` 生成 ≤48KB 可携交接简报（停在哪/最近动作/活上下文尾部），任何 agent 都能吃。
 - **vault 备份**——`cv backup`：一致性快照 + 轮换 zip；常驻控制台可选 `CV_SERVE_TOKEN` 鉴权。
 - **诚实迁移**——Codex ⇄ Claude Code 双向（双端真机验证），默认 dry-run，每次迁移产出"什么保住了/什么丢了"的完整报告。
@@ -88,7 +88,7 @@ vault/
 - 195MB Codex rollout → **1.5 秒**导出 → 12MB 快照；39 个压缩边界、2.24 亿 token 用量、838 对工具调用全部保真。
 - **双向迁移真机验证全部通过**：Codex→Claude 在 2.1.181 里 resume 续写；Claude→Codex 在 0.153.4 里恢复 **373,160 tokens 全量上下文**。
 - 逆向并规避 codex 两代格式陷阱（`ordinal` 数字/字符串互不兼容、resume 走 SQLite thread-store、"rollout is empty" 误导性报错）。
-- 测试 **24 用例**，含冷热双路径等价测试——常驻索引与文件扫描回退必须结果一致（"常驻只是加速，不是依赖"被写进了测试）。
+- 测试 **26 用例**，含冷热双路径等价测试——常驻索引与文件扫描回退必须结果一致（"常驻只是加速，不是依赖"被写进了测试）。
 
 ## 设计原则
 

@@ -651,3 +651,28 @@ def test_index_incremental_cache_and_removal(isolated):
     assert len(idx2.meta) == 3 and "cv_aaaa" not in idx2.meta
     assert idx2.stats["full"] == 1 and idx2.stats["cache_load"] == 1  # 全量恰好 +1
     assert (vault / "index_cache.pkl").exists()  # 落盘缓存已生成
+
+
+def test_index_regression_guards(isolated):
+    """复测三高危的回归门: LRU 溢出、损坏缓存回退、缺键快照跳过。"""
+    import collections
+    _, vault = isolated
+    bt = lambda b: b.get("content") or ""
+    _mk_snap(vault, "cv_good1", "正常快照 回归门甲")
+    # H3: 缺 capture/stats 的合法 JSON 必须被跳过, 不炸重建/启动
+    bad = vault / "snapshots" / "cv_bad1.json"
+    bad.write_text(json.dumps({"created_at": "2026-11-01T00:00:00"}), encoding="utf-8")
+    idx = cv.VaultIndex(vault, bt)
+    assert "cv_good1" in idx.meta and "cv_bad1" not in idx.meta
+    assert idx.search("回归门", 5)["hits"], "好快照应可被检索"
+    # H1: LRU 溢出走 OrderedDict 逐出, 不抛 TypeError; 缓存上限被尊重
+    for i in range(70):
+        idx._env_cache[f"cv_pad{i}"] = {"_sid": f"cv_pad{i}"}
+    assert idx.load_env("cv_good1") is not None
+    assert isinstance(idx._env_cache, collections.OrderedDict)
+    assert len(idx._env_cache) <= cv.VaultIndex.ENV_CACHE_MAX
+    # H2: 损坏的 index_cache.pkl 必须静默回退全量, 不让 UnpicklingError 逃出启动
+    (vault / "index_cache.pkl").write_bytes(b"definitely not a pickle \x80\x04\x95")
+    idx2 = cv.VaultIndex(vault, bt)
+    assert idx2.stats["cache_load"] == 0 and idx2.stats["full"] == 1
+    assert len(idx2.meta) == 1  # bad1 被跳过, good1 在

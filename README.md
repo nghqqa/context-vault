@@ -86,7 +86,7 @@ Two rules that don't bend: **snapshots are immutable** (any derived data lives i
 - 195 MB Codex rollout → 12 MB snapshot in **1.5 s**; 39 compaction boundaries, 224M tokens of usage, 838 tool-call pairs intact.
 - **Bidirectional migration, both directions real-machine verified**: Codex→Claude resumes and continues accurately in Claude 2.1.181; Claude→Codex restores **373,160 tokens of full context** in Codex 0.153.4.
 - Reverse-engineered and dodged the two-generation Codex format trap (numeric vs string `ordinal`, resume reading the SQLite thread-store, misleading "rollout is empty").
-- Test suite: **24 tests** including a hot/cold equivalence test — the resident index and the file-scan fallback must return identical results ("the daemon accelerates; it is never a dependency").
+- Test suite: **26 tests** including a hot/cold equivalence test — the resident index and the file-scan fallback must return identical results ("the daemon accelerates; it is never a dependency").
 
 ## Design principles
 
@@ -125,7 +125,7 @@ Porters are upstream adapters, not competitors — `cv ingest` and `cv export-ha
 
 - **M0 ✅** format spec v0.1 · dual-source export · ledger import · probe
 - **M1 ✅** SQLite vault · bidirectional migration (verified both ways) · diff preview
-- **M2 ✅** resident service + web console · MCP backend · cache warming · sentry/watch · 19-format bridged intake
+- **M2 ✅** resident service + web console · MCP backend · cache warming · sentry/watch · 18-format bridged intake
 - **M3 ✅** memory layer (pluggable engine) · fork/tree lineage · audit timeline
 - **Next** launch & feedback · memory provenance spans · optional encryption
 
