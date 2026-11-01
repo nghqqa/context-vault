@@ -18,3 +18,6 @@ console_run.js
 pro/
 dist/
 docs/HANDOFF.md
+
+# impeccable 设计评审快照 (本地 backlog, 工具产物)
+.impeccable/
