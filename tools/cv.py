@@ -2097,7 +2097,8 @@ class VaultIndex:
             fp = self._fp()
             if not force and fp == self.fingerprint:
                 return
-            self.index, self.meta, self.envs = {}, {}, {}
+            # 建到新字典, 末尾原子换装: 重建耗时数分钟, 就地清空会让并发读者看到半成品计数
+            new_index, new_meta, new_envs = {}, {}, {}
             for f in sorted((self.vault / "snapshots").glob("cv_*.json")):
                 try:
                     env = json.loads(f.read_text(encoding="utf-8"))
@@ -2105,20 +2106,21 @@ class VaultIndex:
                     continue
                 sid = f.stem
                 env["_sid"] = sid
-                self.envs[sid] = env
-                self.meta[sid] = {"agent": env["capture"].get("agent"),
-                                  "first": next(((b.get("content") or b.get("summary") or "")[:64]
-                                                 for b in env["conversation"]
-                                                 if b.get("role") == "user"
-                                                 and (b.get("content") or b.get("summary"))), ""),
-                                  "created_at": env.get("created_at"),
-                                  "cwd": env["capture"].get("cwd"),
-                                  "blocks": env["stats"]["blocks_total"],
-                                  "tokens_in": env["stats"]["tokens_in"],
-                                  "completeness": env["capture"].get("completeness")}
+                new_envs[sid] = env
+                new_meta[sid] = {"agent": env["capture"].get("agent"),
+                                 "first": next(((b.get("content") or b.get("summary") or "")[:64]
+                                                for b in env["conversation"]
+                                                if b.get("role") == "user"
+                                                and (b.get("content") or b.get("summary"))), ""),
+                                 "created_at": env.get("created_at"),
+                                 "cwd": env["capture"].get("cwd"),
+                                 "blocks": env["stats"]["blocks_total"],
+                                 "tokens_in": env["stats"]["tokens_in"],
+                                 "completeness": env["capture"].get("completeness")}
                 for i, b in enumerate(env["conversation"]):
                     for t in set(tokenize(self.block_text(b))):
-                        self.index.setdefault(t, []).append((sid, i))
+                        new_index.setdefault(t, []).append((sid, i))
+            self.index, self.meta, self.envs = new_index, new_meta, new_envs
             self.fingerprint = fp
         finally:
             self._last_rebuild = time.monotonic()  # 失败也计时, 别让坏请求反复触发
