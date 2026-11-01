@@ -2368,20 +2368,24 @@ main{padding:26px 32px 60px;max-width:1380px;margin:0 auto}
 section{animation:fadein .18s ease-out}
 @keyframes fadein{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
 
-/* ---------- 数据带 (主指标, Bento 白卡) ---------- */
-.statband{display:grid;grid-template-columns:repeat(6,1fr);gap:16px;
-  padding:6px 0 22px;border-bottom:1px solid var(--line-soft)}
-@media(max-width:1280px){.statband{grid-template-columns:repeat(3,1fr)}}
-@media(max-width:820px){.statband{grid-template-columns:repeat(2,1fr)}}
-.stat{background:#fff;border:1px solid #e4e4e7;border-radius:10px;padding:14px 16px;
-  box-shadow:0 1px 2px rgba(9,9,11,.04);min-width:0}
-.stat .v{font-family:var(--mono);font-size:24px;font-weight:650;letter-spacing:-.01em;
-  font-variant-numeric:tabular-nums;color:#09090b;line-height:1.25;
+/* ---------- 数据带 (瑞士排印: 数字裸排, 发丝线分隔, 一个英雄) ---------- */
+.statband{display:grid;grid-template-columns:1.35fr repeat(5,1fr);
+  padding:12px 0 20px;border-bottom:1px solid var(--line)}
+.stat{min-width:0;padding:2px 18px;border-left:1px solid var(--line-soft)}
+.stat:first-child{padding-left:2px;border-left:none}
+@media(max-width:1280px){.statband{grid-template-columns:repeat(3,1fr);row-gap:20px}
+  .stat:nth-child(4){border-left:none;padding-left:2px}}
+@media(max-width:820px){.statband{grid-template-columns:repeat(2,1fr);row-gap:20px}
+  .stat{border-left:none;padding-left:2px}}
+.stat .v{font-family:var(--mono);font-size:23px;font-weight:650;letter-spacing:-.01em;
+  font-variant-numeric:tabular-nums;color:#09090b;line-height:1.2;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stat.hero .v{font-size:46px;font-weight:700;letter-spacing:-.025em;line-height:1.05}
 .stat .v.neutral{color:#09090b}
 .stat .v.good{color:var(--emerald)}
-.stat .k{font-size:12px;color:var(--ink-3);margin-top:4px;line-height:1.45;
+.stat .k{font-size:12px;color:var(--ink-3);margin-top:6px;line-height:1.45;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:help}
+.stat.hero .k{color:var(--ink-2);margin-top:8px}
 
 /* ---------- 表格 ---------- */
 .tbl-wrap{width:100%}
@@ -2406,7 +2410,7 @@ td .sub{color:var(--ink-3);font-size:12px}
 
 /* ---------- 概览内容网格 (Linear 风白卡系统) ---------- */
 .ovgrid{display:grid;grid-template-columns:8fr 4fr;gap:16px;align-items:stretch;margin-top:16px}
-.ovgrid .side{display:grid;gap:16px;grid-auto-rows:1fr}
+.ovgrid .side{display:grid;gap:0;align-self:stretch}
 .duo{display:grid;grid-template-columns:1fr 1.2fr;gap:16px;align-items:stretch}
 .ovcard,.ocard{background:#fff;border:1px solid #e4e4e7;border-radius:10px;
   box-shadow:0 1px 2px rgba(9,9,11,.04)}
@@ -2416,6 +2420,7 @@ td .sub{color:var(--ink-3);font-size:12px}
   padding:10px 12px 4px}
 .panel .pt{margin-bottom:6px}
 .ocard .pt{padding:10px 12px 4px}
+.ocard .pt.sec2{border-top:1px solid var(--line-soft);margin-top:14px;padding-top:14px}
 .panel .row,.ocard .row{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;
   padding:6px 0;border-bottom:1px solid var(--line-soft)}
 .panel .row:last-child,.ocard .row:last-child{border-bottom:none}
@@ -2594,9 +2599,11 @@ input{flex:1;min-width:260px}
       <div id="ov-latest"><div class="skel" style="height:120px"></div></div>
     </div>
     <div class="side">
-      <div class="ocard"><div class="pt">哨兵 · 最近探测</div><div id="ov-probe"><span class="hint">加载中…</span></div></div>
-      <div class="ocard"><div class="pt">最新记忆</div><div id="ov-mem"><span class="hint">加载中…</span></div></div>
-      <div class="ocard"><div class="pt">审计 · 库内事件</div><div id="ov-audit"><span class="hint">加载中…</span></div></div>
+      <div class="ocard">
+        <div class="pt">哨兵 · 最近探测</div><div id="ov-probe"><span class="hint">加载中…</span></div>
+        <div class="pt sec2">最新记忆</div><div id="ov-mem"><span class="hint">加载中…</span></div>
+        <div class="pt sec2">审计 · 库内事件</div><div id="ov-audit"><span class="hint">加载中…</span></div>
+      </div>
     </div>
   </div>
   <div class="duo">
@@ -2706,7 +2713,7 @@ async function boot(){
   }catch(e){const s=$("#status");s.classList.add("err");s.innerHTML="<span class='pulse'></span>服务异常 · 4s 后重试";
     setTimeout(boot,4000)}   /* 常驻重启/部署窗口期自动恢复, 不定格在连接失败 */
 }
-const stat=(v,k,tip,cls="")=>'<div class="stat"'+(tip?' title="'+String(tip).replace(/"/g,"&quot;")+'"':"")+
+const stat=(v,k,tip,cls="",hero=false)=>'<div class="stat'+(hero?" hero":"")+'"'+(tip?' title="'+String(tip).replace(/"/g,"&quot;")+'"':"")+
   '><div class="v '+cls+'">'+v+'</div><div class="k">'+k+"</div></div>";
 const kv=(k,v)=>"<b>"+k+"</b><span>"+(v==null?"—":v)+"</span>";
 
@@ -2724,7 +2731,7 @@ async function loadOv(){
     let band="";
     /* ① 资产带 (vault 自有): 短副标题 + title Tooltip 承载细节 */
     if(total){
-      band+=stat(num(total),"快照资产","vault/snapshots 内容寻址快照 · 跨 harness 统一库存 · 可预览 / 可迁移");
+      band+=stat(num(total),"快照资产","vault/snapshots 内容寻址快照 · 跨 harness 统一库存 · 可预览 / 可迁移","","hero");
       band+=stat(num(d.memories||0),"跨会话记忆","自动提取 · 每条注明来源快照, 可回读核实","neutral");
       /* top agent: zcode 快照内嵌 usage 低估, 用 model_usage 真实总量替换后排名 */
       const cand=(ow.by_agent||[]).map(a=>({agent:a.agent,snap:a.snapshots,tin:a.tokens_in||0}));
