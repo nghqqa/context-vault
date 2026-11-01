@@ -2546,15 +2546,15 @@ async function loadOv(){
   try{
     const d=await api("/ledger");
     const lt=d.lifetime||{};const ow=d.owned||{};
+    const zu=d.zcode_usage||{};
+    const zt=Object.values(zu).reduce((s,a)=>s+(a.tin||0),0);
+    const zs=d.zcode_snapshots||0;
     let band="";
     /* ① 资产带 (vault 自有): 短副标题 + title Tooltip 承载细节 */
     if(ow.snapshots){
       band+=stat(num(ow.snapshots),"快照资产","跨 harness 统一库存 · 内容寻址 · 自动 lineage");
       band+=stat(num(d.memories||0),"跨会话记忆","自动提取 · 每条注明来源快照, 可回读核实","neutral");
       /* top agent: zcode 快照内嵌 usage 低估, 用 model_usage 真实总量替换后排名 */
-      const zu=d.zcode_usage||{};
-      const zt=Object.values(zu).reduce((s,a)=>s+(a.tin||0),0);
-      const zs=d.zcode_snapshots||0;
       const cand=(ow.by_agent||[]).map(a=>({agent:a.agent,snap:a.snapshots,tin:a.tokens_in||0}));
       const zrow=cand.find(c=>c.agent==="zcode");
       if(zt>0){ if(zrow&&zrow.snap){zrow.tin=zt;} else {cand=cand.filter(c=>c.agent!=="zcode");cand.push({agent:"zcode",snap:zs,tin:zt});} }
