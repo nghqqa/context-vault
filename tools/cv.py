@@ -33,6 +33,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -2074,6 +2075,9 @@ class VaultIndex:
         self.block_text = block_text_fn
         self.fingerprint = None
         self.index, self.meta, self.envs = {}, {}, {}
+        self._rebuild_lock = threading.Lock()  # 单飞: 重建期间其他请求拿现态秒回, 不排队不并发重建
+        self._rebuild_pending = False          # 后台重建已在排队/执行中
+        self._last_rebuild = 0.0               # monotonic; 节流基线 (库在增长时指纹永远追不上, 必须节流)
         self.rebuild(force=True)
 
     def _fp(self) -> str:
@@ -2081,33 +2085,61 @@ class VaultIndex:
         return hashlib.sha256("|".join(f"{f.name}:{int(f.stat().st_mtime)}" for f in
                                        sorted(snap_dir.glob("cv_*.json"))).encode()).hexdigest()
 
-    def rebuild(self, force=False):
-        fp = self._fp()
-        if not force and fp == self.fingerprint:
+    def rebuild(self, force=False, stale_after=0.0):
+        """stale_after>0: 距上次重建不足该秒数时直接返回现态 (热路径防重建风暴);
+        已有重建在跑时非阻塞跳过。force=True (启动) 语义不变。"""
+        now = time.monotonic()
+        if not force and stale_after and now - self._last_rebuild < stale_after:
             return
-        self.index, self.meta, self.envs = {}, {}, {}
-        for f in sorted((self.vault / "snapshots").glob("cv_*.json")):
+        if not self._rebuild_lock.acquire(blocking=False):
+            return
+        try:
+            fp = self._fp()
+            if not force and fp == self.fingerprint:
+                return
+            self.index, self.meta, self.envs = {}, {}, {}
+            for f in sorted((self.vault / "snapshots").glob("cv_*.json")):
+                try:
+                    env = json.loads(f.read_text(encoding="utf-8"))
+                except (ValueError, OSError):
+                    continue
+                sid = f.stem
+                env["_sid"] = sid
+                self.envs[sid] = env
+                self.meta[sid] = {"agent": env["capture"].get("agent"),
+                                  "first": next(((b.get("content") or b.get("summary") or "")[:64]
+                                                 for b in env["conversation"]
+                                                 if b.get("role") == "user"
+                                                 and (b.get("content") or b.get("summary"))), ""),
+                                  "created_at": env.get("created_at"),
+                                  "cwd": env["capture"].get("cwd"),
+                                  "blocks": env["stats"]["blocks_total"],
+                                  "tokens_in": env["stats"]["tokens_in"],
+                                  "completeness": env["capture"].get("completeness")}
+                for i, b in enumerate(env["conversation"]):
+                    for t in set(tokenize(self.block_text(b))):
+                        self.index.setdefault(t, []).append((sid, i))
+            self.fingerprint = fp
+        finally:
+            self._last_rebuild = time.monotonic()  # 失败也计时, 别让坏请求反复触发
+            self._rebuild_lock.release()
+
+    def request_rebuild(self, stale_after=60.0):
+        """热路径 (/healthz, /recent) 专用: 节流 + 后台单飞重建, 本请求立即返回现态。
+        库在持续增长 (托盘每 2 分钟 sync) 时指纹永远追不上, 同步重建会让请求线程挂死数分钟。"""
+        now = time.monotonic()
+        if now - self._last_rebuild < stale_after:
+            return
+        self._last_rebuild = now  # 排队即计时, 防 N 个请求同时排满
+        if self._rebuild_pending:
+            return
+        self._rebuild_pending = True
+        def _bg():
             try:
-                env = json.loads(f.read_text(encoding="utf-8"))
-            except (ValueError, OSError):
-                continue
-            sid = f.stem
-            env["_sid"] = sid
-            self.envs[sid] = env
-            self.meta[sid] = {"agent": env["capture"].get("agent"),
-                              "first": next(((b.get("content") or b.get("summary") or "")[:64]
-                                             for b in env["conversation"]
-                                             if b.get("role") == "user"
-                                             and (b.get("content") or b.get("summary"))), ""),
-                              "created_at": env.get("created_at"),
-                              "cwd": env["capture"].get("cwd"),
-                              "blocks": env["stats"]["blocks_total"],
-                              "tokens_in": env["stats"]["tokens_in"],
-                              "completeness": env["capture"].get("completeness")}
-            for i, b in enumerate(env["conversation"]):
-                for t in set(tokenize(self.block_text(b))):
-                    self.index.setdefault(t, []).append((sid, i))
-        self.fingerprint = fp
+                self.rebuild()  # 指纹门控; 已有重建在跑则单飞锁直接跳过
+            finally:
+                self._rebuild_pending = False
+        threading.Thread(target=_bg, daemon=True).start()
 
     def search(self, query: str, limit: int) -> dict:
         from collections import Counter
@@ -2936,7 +2968,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     self.wfile.write(body)
                     return
                 if u.path == "/healthz":
-                    idx.rebuild()  # 指纹门控: 未变更时仅重算哈希; cv sync 后计数不再陈旧
+                    idx.request_rebuild(60)  # 后台单飞重建; 本请求拿现态秒回, 增长期绝不阻塞
                     return self._json({"service": "context-vault", "status": "ok",
                                        "snapshots": len(idx.envs), "terms": len(idx.index)})
                 if u.path == "/audit":
@@ -3035,7 +3067,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     idx.rebuild()
                     return self._json(idx.context(q.get("q", ""), int(q.get("limit", 3))))
                 if u.path == "/recent":
-                    idx.rebuild()  # 指纹门控: 未变更时仅重算哈希; 分页总数与徽章同源同新鲜度
+                    idx.request_rebuild(60)  # 后台单飞重建; 分页总数与徽章同源同新鲜度且秒回
                     total = len(idx.meta)  # 可列出库存 = 唯一对外口径: 徽章/资产卡/分页同一数字
                     lim = max(1, min(int(q.get("limit", 5)), 200))
                     off = max(int(q.get("offset", 0)), 0)
