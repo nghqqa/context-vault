@@ -2552,10 +2552,12 @@ async function loadOv(){
       band+=stat(num(ow.snapshots),"快照资产","跨 harness 统一库存 · 内容寻址 · 自动 lineage");
       band+=stat(num(d.memories||0),"跨会话记忆","自动提取 · 每条注明来源快照, 可回读核实","neutral");
       /* top agent: zcode 快照内嵌 usage 低估, 用 model_usage 真实总量替换后排名 */
-      const zt=Object.values(d.zcode_usage||{}).reduce((s,a)=>s+(a.tin||0),0);
+      const zu=d.zcode_usage||{};
+      const zt=Object.keys(zu).filter(k=>k[0]!=="_").reduce((s,k)=>s+(zu[k].tin||0),0);
       const cand=(ow.by_agent||[]).map(a=>({agent:a.agent,snap:a.snapshots,tin:a.tokens_in||0}));
       const zrow=cand.find(c=>c.agent==="zcode");
-      if(zt>0){ if(zrow)zrow.tin=zt; else cand.push({agent:"zcode",snap:0,tin:zt}); }
+      if(zt>0){ const zs=zu["_snapshots"]||0;
+        if(zrow&&zrow.snap){zrow.tin=zt;} else {cand=cand.filter(c=>c.agent!=="zcode");cand.push({agent:"zcode",snap:zs,tin:zt});} }
       cand.sort((a,b)=>b.tin-a.tin);
       const top=cand[0];
       if(top)band+=stat(esc(top.agent)+" ×"+num(top.snapshots),
@@ -2563,7 +2565,7 @@ async function loadOv(){
         "按真实模型调用记录排名 (zcode 取 model_usage 表全量, 其他 agent 取快照内嵌用量)","neutral");
     }
     /* ② 消耗带 (自有) */
-    band+=stat(bn(ow.tokens_in),"累计输入 tokens","提取自快照内嵌用量记录, 零外部依赖","neutral");
+    band+=stat(bn(ow.tokens_in+zt),"累计输入 tokens","快照内嵌用量 + zcode model_io 真实调用记录, 零外部依赖","neutral");
     band+=stat((ow.cache_hit_rate*100).toFixed(0)+"%","缓存命中率 · 省约 $"+
       num(Math.round(ow.cache_read*0.9*3/1e6))+"k (估)",
       "估算: 假设输入全价 $3/Mtok, 命中部分按约 1/10 计价, 差值即节省额 (相对'完全无缓存'的假想基准, 非 headroom 账单) · cache 读 "+bn(ow.cache_read),"neutral");
@@ -2934,6 +2936,12 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                             zdb.close()
                     except sqlite3.Error:
                         pass  # 无 zcode / 无表 = 无自有用量, 合法空态
+                    try:
+                        zn = conn.execute("SELECT COUNT(*) FROM snapshots WHERE agent='zcode'").fetchone()[0]
+                        if zn and zcode_usage:
+                            zcode_usage["_snapshots"] = zn
+                    except sqlite3.Error:
+                        pass
                     for m, a in zcode_usage.items():
                         pr = prices.get(m)
                         a["cost"] = (round((a["tin"] * pr["input"] + a["tout"] * pr["output"]
