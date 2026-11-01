@@ -2364,7 +2364,7 @@ nav button.on{color:var(--ink);font-weight:600}
 nav button.on::after{content:"";position:absolute;left:12px;right:12px;bottom:-1px;height:2px;
   background:var(--acc);border-radius:2px 2px 0 0}
 
-main{padding:26px 32px 60px;max-width:1380px;margin:0 auto}
+main{padding:26px 40px 60px;max-width:1560px;margin:0 auto}
 section{animation:fadein .18s ease-out}
 @keyframes fadein{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
 
@@ -2645,11 +2645,9 @@ input{flex:1;min-width:260px;padding-left:34px;
       <div id="ov-latest"><div class="skel" style="height:120px"></div></div>
     </div>
     <div class="side">
-      <div class="ocard">
-        <div class="pt">哨兵 · 最近探测</div><div id="ov-probe"><span class="hint">加载中…</span></div>
-        <div class="pt sec2">最新记忆</div><div id="ov-mem"><span class="hint">加载中…</span></div>
-        <div class="pt sec2">审计 · 库内事件</div><div id="ov-audit"><span class="hint">加载中…</span></div>
-      </div>
+      <div class="ocard"><div class="pt">哨兵 · 最近探测</div><div id="ov-probe"><span class="hint">加载中…</span></div></div>
+      <div class="ocard"><div class="pt">最新记忆</div><div id="ov-mem"><span class="hint">加载中…</span></div></div>
+      <div class="ocard"><div class="pt">审计 · 库内事件</div><div id="ov-audit"><span class="hint">加载中…</span></div></div>
     </div>
   </div>
   <div class="duo">
