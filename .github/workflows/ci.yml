@@ -25,6 +25,6 @@ jobs:
           python tools/check_console_js.py emit
           node --check console_check.js
           python tools/check_console_js.py run
-          timeout 20 node console_run.js || [ 0 -eq 124 ]  # 挂起=页面轮询正常; 崩溃(退出1)即失败
+          node console_run.js  # mock 已替全部定时器, 正常执行即退出 0; 崩溃(非 0)即失败 (Windows pwsh 下禁用 bash 语法, 见 f96c91c 教训)
       - name: stdlib-only check (引擎零第三方依赖)
         run: python -c "import sys; sys.path.insert(0, 'tools'); import cv, mcp_server; print('engine imports OK, zero third-party deps')"
