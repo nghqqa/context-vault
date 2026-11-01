@@ -2610,7 +2610,7 @@ async function loadOv(){
       '<div class="row"><span class="l">上游切换</span><span class="r">'+num(as.switches||0)+"</span></div>"+
       '<div class="row"><span class="l">模型消失事件</span><span class="r">'+num(as.model_missing_events||0)+"</span></div>"
       :'<span class="hint">—</span>';
-    const zu=d.zcode_usage||{};const zrows=Object.entries(zu);
+    const zrows=Object.entries(zu);
     $("#ov-zcode").innerHTML=zrows.length?table(["模型","请求","入 tok","出 tok","成本(估)"],
       zrows.map(([m,a])=>['<span class="mono">'+esc(m)+"</span>",{t:num(a.n),num:1},
         {t:bn(a.tin),num:1},{t:bn(a.tout),num:1},
