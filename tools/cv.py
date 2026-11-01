@@ -2147,13 +2147,14 @@ class VaultIndex:
 CONSOLE_HTML = r"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Context Vault 控制台</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect x='2.5' y='2.5' width='15' height='15' rx='3.5' fill='none' stroke='%232dd4a7' stroke-width='1.7'/%3E%3Crect x='6.5' y='8' width='7' height='6' rx='1' fill='%232dd4a7'/%3E%3Cpath d='M7.5 8V6.5a2.5 2.5 0 0 1 5 0V8' fill='none' stroke='%232dd4a7' stroke-width='1.7' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect x='2.5' y='2.5' width='15' height='15' rx='3.5' fill='none' stroke='%23059669' stroke-width='1.7'/%3E%3Crect x='6.5' y='8' width='7' height='6' rx='1' fill='%23059669'/%3E%3Cpath d='M7.5 8V6.5a2.5 2.5 0 0 1 5 0V8' fill='none' stroke='%23059669' stroke-width='1.7' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
 :root{
   --bg0:#fafafa; --bg1:#f4f4f5; --bg2:#ececee; --bg3:#e4e4e7;
   --line:#e4e4e7; --line-soft:#ececee;
-  --ink:#09090b; --ink-2:#71717a; --ink-3:#a1a1aa;
+  --ink:#09090b; --ink-2:#52525b; --ink-3:#71717a;
   --acc:#18181b; --acc-ink:#ffffff; --acc-deep:#dcfce7;
+  --emerald:#059669;
   --bar:#d4d4d8; --bar-hover:#c8c8cc;
   --warn:#d97706; --err:#ef4444; --info:#2563eb;
   --mono:"Cascadia Code",Consolas,"SF Mono",monospace;
@@ -2161,7 +2162,7 @@ CONSOLE_HTML = r"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
   --rad:8px; --head-h:56px; --nav-h:46px;
 }
 *{box-sizing:border-box;margin:0;padding:0}
-html{color-scheme:dark}
+html{color-scheme:light}
 body{background:var(--bg0);color:var(--ink);font:14px/1.65 var(--sans);
   font-feature-settings:"tnum";-webkit-font-smoothing:antialiased}
 ::selection{background:var(--acc-deep);color:var(--ink)}
@@ -2178,9 +2179,9 @@ header{display:flex;align-items:center;gap:14px;padding:0 28px;height:var(--head
 .brand svg{display:block}
 .badge{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--ink-2);
   border:1px solid var(--line);border-radius:99px;padding:3px 11px;background:var(--bg1)}
-.badge .pulse{width:7px;height:7px;border-radius:50%;background:var(--acc);
-  box-shadow:0 0 0 0 rgba(45,212,167,.45);animation:pulse 2.4s ease-out infinite}
-@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(45,212,167,.4)}70%{box-shadow:0 0 0 7px rgba(45,212,167,0)}100%{box-shadow:0 0 0 0 rgba(45,212,167,0)}}
+.badge .pulse{width:7px;height:7px;border-radius:50%;background:var(--emerald);
+  box-shadow:0 0 0 0 rgba(5,150,105,.45);animation:pulse 2.4s ease-out infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(5,150,105,.4)}70%{box-shadow:0 0 0 7px rgba(5,150,105,0)}100%{box-shadow:0 0 0 0 rgba(5,150,105,0)}}
 .badge.err .pulse{background:var(--err);animation:none}
 header .spacer{flex:1}
 .privacy{font-size:12px;color:var(--ink-3);display:flex;align-items:center;gap:6px}
@@ -2201,9 +2202,6 @@ nav button.on::after{content:"";position:absolute;left:12px;right:12px;bottom:-1
 main{padding:26px 32px 60px;max-width:1380px;margin:0 auto}
 section{animation:fadein .18s ease-out}
 @keyframes fadein{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
-h2{font-size:12px;font-weight:600;color:var(--ink-3);letter-spacing:.08em;
-  margin:26px 0 10px;text-transform:uppercase}
-main > section > h2:first-child{margin-top:0}
 
 /* ---------- 数据带 (主指标, Bento 白卡) ---------- */
 .statband{display:grid;grid-template-columns:repeat(6,1fr);gap:16px;
@@ -2216,28 +2214,29 @@ main > section > h2:first-child{margin-top:0}
   font-variant-numeric:tabular-nums;color:#09090b;line-height:1.25;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .stat .v.neutral{color:#09090b}
-.stat .v.good{color:#10b981}
-.stat .k{font-size:11.5px;color:#71717a;margin-top:4px;line-height:1.45;
+.stat .v.good{color:var(--emerald)}
+.stat .k{font-size:12px;color:var(--ink-3);margin-top:4px;line-height:1.45;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:help}
 
 /* ---------- 表格 ---------- */
 .tbl-wrap{width:100%}
 table{width:100%;border-collapse:collapse;font-size:13px}
-th{font-size:11px;font-weight:600;color:#71717a;text-align:left;letter-spacing:.05em;
-  text-transform:uppercase;padding:7px 12px;border-bottom:1px solid #e4e4e7;
-  background:#f4f4f5;position:sticky;top:calc(var(--head-h) + var(--nav-h))}
-td{padding:8px 12px;border-bottom:1px solid #ececee;vertical-align:baseline}
+th{font-size:11.5px;font-weight:600;color:var(--ink-2);text-align:left;letter-spacing:.03em;
+  padding:7px 12px;border-bottom:1px solid var(--line);
+  background:var(--bg1);position:sticky;top:calc(var(--head-h) + var(--nav-h))}
+td{padding:8px 12px;border-bottom:1px solid var(--line-soft);vertical-align:baseline}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 td.mono{font-family:var(--mono);font-size:12.5px}
+.nowr{white-space:nowrap}
 .linklike{background:none;border:none;padding:0;cursor:pointer;text-align:left}
 .sid{color:var(--acc);font-family:var(--mono);font-size:12.5px}
 .sid:hover{text-decoration:underline;text-underline-offset:3px}
 .chip{display:inline-block;font-size:11px;padding:1px 8px;border-radius:5px;
   background:var(--bg2);color:var(--ink-2);border:1px solid var(--line)}
 .chip.warn{color:var(--warn);border-color:#fde68a}
-.chip.ok{color:var(--acc);border-color:#1d4a40}
+.chip.ok{color:#065f46;background:#ecfdf5;border-color:#a7f3d0}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:2px;vertical-align:1px}
-.dot.ok{background:#22c55e} .dot.err{background:#ef4444} .dot.warn{background:#d97706} .dot.sw{background:#d97706}
+.dot.ok{background:var(--emerald)} .dot.err{background:#ef4444} .dot.warn{background:#d97706} .dot.sw{background:#d97706}
 td .sub{color:var(--ink-3);font-size:12px}
 
 /* ---------- 概览内容网格 (Linear 风白卡系统) ---------- */
@@ -2248,35 +2247,34 @@ td .sub{color:var(--ink-3);font-size:12px}
   box-shadow:0 1px 2px rgba(9,9,11,.04)}
 .ovcard{padding:2px 4px 4px}
 .ocard{padding:12px 14px}
-.ovcard>.oc-h,.ocard .pt{font-size:11.5px;font-weight:600;color:#71717a;letter-spacing:.05em;
-  text-transform:uppercase;padding:10px 12px 4px}
+.ovcard>.oc-h,.ocard .pt{font-size:12px;font-weight:600;color:var(--ink-3);letter-spacing:.03em;
+  padding:10px 12px 4px}
 .panel .pt{margin-bottom:6px}
 .ocard .pt{padding:10px 12px 4px}
 .panel .row,.ocard .row{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;
-  padding:6px 0;border-bottom:1px solid #ececee}
+  padding:6px 0;border-bottom:1px solid var(--line-soft)}
 .panel .row:last-child,.ocard .row:last-child{border-bottom:none}
 .panel .row .l,.ocard .row .l{color:#3f3f46;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.panel .row .r,.ocard .row .r{color:#71717a;white-space:nowrap;font-family:var(--mono);font-size:11.5px}
-.panel .hint,.ocard .hint{color:#a1a1aa;font-size:12px}
+.panel .row .r,.ocard .row .r{color:var(--ink-2);white-space:nowrap;font-family:var(--mono);font-size:12px}
+.panel .hint,.ocard .hint{color:var(--ink-3);font-size:12px}
 .ovcard td{padding:10px 12px}
 .ovcard .foot{display:flex;justify-content:space-between;align-items:center;
-  padding:9px 12px;border-top:1px solid #ececee;font-size:12px;color:#71717a}
+  padding:9px 12px;border-top:1px solid var(--line-soft);font-size:12px;color:var(--ink-2)}
 .ovcard .foot a{cursor:pointer}
-.panel .row:last-child{border-bottom:none}
-.panel .row .l{color:#3f3f46;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.panel .row .r{color:#71717a;white-space:nowrap;font-family:var(--mono);font-size:11.5px}
-.panel .hint{color:#a1a1aa;font-size:12px}
-.pill{display:inline-block;font-size:10.5px;padding:1px 8px;border-radius:999px;font-weight:600;
+.pill{display:inline-block;font-size:11px;padding:1px 8px;border-radius:999px;font-weight:600;
   font-family:var(--mono)}
-.pill.ok{color:#15803d;background:#dcfce7}
+.pill.ok{color:#047857;background:#d1fae5}
 .pill.err{color:#b91c1c;background:#fee2e2}
 .pill.warn{color:#a16207;background:#fefce8}
+.pager{display:flex;justify-content:space-between;align-items:center;gap:10px;
+  padding:10px 2px;font-size:12.5px;color:var(--ink-2)}
+.pager .btn{padding:5px 12px;font-size:12.5px}
 @media(max-width:1100px){.ovgrid,.duo{grid-template-columns:1fr}}
 
 /* ---------- 月度走势 (Y 轴刻度 + 柱顶数值) ---------- */
 .months{display:flex;gap:10px;height:150px;padding:26px 4px 0}
 .yax{width:52px;flex:none;display:flex;flex-direction:column;justify-content:space-between;
-  align-items:flex-end;font-family:var(--mono);font-size:10px;color:#a1a1aa;
+  align-items:flex-end;font-family:var(--mono);font-size:11px;color:var(--ink-3);
   font-variant-numeric:tabular-nums;padding-bottom:18px}
 .duo .oc-h{padding-top:12px}
 .bars{flex:1;display:flex;gap:6px;height:100%;
@@ -2284,17 +2282,17 @@ td .sub{color:var(--ink-3);font-size:12px}
 .mcol{flex:1;position:relative;min-width:0}
 .mcol .val{position:absolute;left:50%;transform:translateX(-50%);
   bottom:calc(22px + var(--h,50) * 0.96%);
-  font-family:var(--mono);font-size:10.5px;color:#3f3f46;white-space:nowrap;
+  font-family:var(--mono);font-size:11px;color:#3f3f46;white-space:nowrap;
   font-variant-numeric:tabular-nums}
 .mcol .stick{position:absolute;left:50%;bottom:22px;width:32px;max-width:60%;
-  height:3%;max-height:calc(100% - 26px);background:#10b981;border-radius:4px 4px 0 0;
+  height:3%;max-height:calc(100% - 26px);background:var(--emerald);border-radius:4px 4px 0 0;
   transform:translateX(-50%) scaleY(1);transform-origin:bottom;
   animation:grow .5s cubic-bezier(.2,.7,.3,1) backwards;animation-delay:calc(var(--i,0)*40ms);
   transition:background .15s ease}
 @keyframes grow{from{transform:translateX(-50%) scaleY(0)}}
-.mcol .stick:hover{background:#059669}
+.mcol .stick:hover{background:#047857}
 .mcol .lb{position:absolute;left:0;right:0;bottom:0;text-align:center;
-  font-size:10.5px;color:#a1a1aa;font-variant-numeric:tabular-nums}
+  font-size:11px;color:var(--ink-3);font-variant-numeric:tabular-nums}
 
 /* ---------- 表单与按钮 ---------- */
 .controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
@@ -2337,24 +2335,24 @@ input{flex:1;min-width:260px}
 .empty .btn{margin-top:12px}
 
 /* ---------- 快照详情抽屉 ---------- */
-.backdrop{position:fixed;inset:0;background:rgba(3,7,9,.55);opacity:0;
+.backdrop{position:fixed;inset:0;background:rgba(9,9,11,.32);opacity:0;
   transition:opacity .22s ease;z-index:40}
 .backdrop.show{opacity:1}
 .drawer{position:fixed;top:0;right:0;bottom:0;width:min(460px,94vw);background:var(--bg1);
   border-left:1px solid var(--line);z-index:41;overflow-y:auto;padding:20px 24px 28px;
   transform:translateX(28px);opacity:0;
   transition:transform .24s cubic-bezier(.2,.7,.3,1),opacity .2s ease;
-  box-shadow:-18px 0 50px rgba(0,0,0,.45)}
+  box-shadow:-12px 0 32px rgba(9,9,11,.14)}
 .drawer.show{transform:none;opacity:1}
 .dw-head{display:flex;align-items:flex-start;gap:12px}
 .dw-head h3{font-size:15px;font-weight:600;margin-top:3px}
-.dw-sub{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);word-break:break-all;margin:2px 0 0}
+.dw-sub{font-family:var(--mono);font-size:12px;color:var(--ink-3);word-break:break-all;margin:2px 0 0}
 .dw-close{margin-left:auto;flex:none;background:none;border:1px solid transparent;border-radius:6px;
   color:var(--ink-3);cursor:pointer;padding:5px;display:inline-flex}
 .dw-close:hover{color:var(--ink);border-color:var(--line);background:var(--bg2)}
 .dw-chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:14px 0 2px}
-.drawer h3.sec{font-size:12px;font-weight:600;color:var(--ink-3);letter-spacing:.06em;
-  text-transform:uppercase;margin:20px 0 8px}
+.drawer h3.sec{font-size:12px;font-weight:600;color:var(--ink-3);letter-spacing:.04em;
+  margin:20px 0 8px}
 .drawer .immlist{border-top:none;padding-top:2px}
 .dw-actions{display:flex;gap:10px;margin-top:22px;padding-top:16px;border-top:1px solid var(--line-soft)}
 
@@ -2364,12 +2362,12 @@ input{flex:1;min-width:260px}
 @keyframes shimmer{to{background-position:-200% 0}}
 
 /* ---------- toast ---------- */
-#toast{position:fixed;bottom:26px;right:26px;background:var(--bg2);border:1px solid var(--line);
+#toast{position:fixed;bottom:26px;right:26px;background:#fff;border:1px solid var(--line);
   border-radius:10px;padding:13px 18px;max-width:440px;font-size:13px;line-height:1.6;
-  box-shadow:0 10px 34px rgba(0,0,0,.55);transform:translateY(8px);opacity:0;
+  box-shadow:0 8px 24px rgba(9,9,11,.12);transform:translateY(8px);opacity:0;
   transition:transform .18s ease,opacity .18s ease;pointer-events:none;z-index:50}
 #toast.show{transform:none;opacity:1}
-#toast.err{border-color:#5a3229;background:#1d1310}
+#toast.err{border-color:#fca5a5}
 
 /* ---------- 动效偏好 ---------- */
 @media(prefers-reduced-motion:reduce){
@@ -2392,9 +2390,9 @@ input{flex:1;min-width:260px}
 <header>
   <div class="brand">
     <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-      <rect x="2.5" y="2.5" width="15" height="15" rx="3.5" stroke="#18181b" stroke-width="1.7"/>
-      <rect x="6.5" y="8" width="7" height="6" rx="1" fill="#18181b"/>
-      <path d="M7.5 8V6.5a2.5 2.5 0 0 1 5 0V8" stroke="#18181b" stroke-width="1.7" stroke-linecap="round"/>
+      <rect x="2.5" y="2.5" width="15" height="15" rx="3.5" stroke="#059669" stroke-width="1.7"/>
+      <rect x="6.5" y="8" width="7" height="6" rx="1" fill="#059669"/>
+      <path d="M7.5 8V6.5a2.5 2.5 0 0 1 5 0V8" stroke="#059669" stroke-width="1.7" stroke-linecap="round"/>
     </svg>
     Context Vault
   </div>
@@ -2439,7 +2437,7 @@ input{flex:1;min-width:260px}
   <div class="duo">
     <div class="ovcard"><div class="oc-h">月度节省走势（数据源：headroom 导入）</div><div class="months" id="ov-months" style="margin:0 8px 10px"></div></div>
     <div class="ovcard"><div class="oc-h">按模型明细（数据源：headroom 导入）</div><div id="ov-models" style="padding:0 4px 4px"></div></div>
-    <div class="ovcard" style="grid-column:1/-1"><div class="oc-h">zcode 用量（model-io 自有 · 成本需 vault/prices.json 价目）</div><div id="ov-zcode" style="padding:0 4px 4px"></div></div>
+    <div class="ovcard" style="grid-column:1/-1"><div class="oc-h">zcode 用量（model_usage 全量 · 无价目模型不计成本）</div><div id="ov-zcode" style="padding:0 4px 4px"></div></div>
   </div>
 </section>
 
@@ -2448,6 +2446,7 @@ input{flex:1;min-width:260px}
     <input id="snap-q" placeholder="搜索全部历史会话 — 项目名、模型、任务关键词…" onkeydown="if(event.key==='Enter')snapSearch()">
     <button class="btn" onclick="snapSearch()">搜索</button>
     <button class="btn" onclick="loadSnaps()">最近</button>
+    <button class="btn" id="snap-sort" onclick="snapSort()">时间 ↓</button>
   </div>
   <div id="snap-list"></div>
 </section>
@@ -2511,7 +2510,7 @@ async function api(p,opt){const r=await fetch(p,opt);
   if(!r.ok)throw new Error((await r.json().catch(()=>({}))).error||r.status);return r.json()}
 
 const WARN='<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 2L15 14H1L8 2Z" stroke="#d97706" stroke-width="1.5" stroke-linejoin="round"/><path d="M8 6.5v3.5M8 12v.5" stroke="#d97706" stroke-width="1.5" stroke-linecap="round"/></svg>';
-const GOOD='<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.3" stroke="#18181b" stroke-width="1.5"/><path d="M5.4 8.2l1.8 1.8 3.4-3.8" stroke="#18181b" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const GOOD='<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.3" stroke="#059669" stroke-width="1.5"/><path d="M5.4 8.2l1.8 1.8 3.4-3.8" stroke="#059669" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const errEmpty=(msg,retry)=>'<div class="empty">'+WARN+esc(msg)+
   (retry?'<br><button class="btn" onclick="'+retry+'">重试</button>':"")+"</div>";
 
@@ -2528,13 +2527,17 @@ function setTab(t){
   ["ov","snap","mig","probe"].forEach(k=>$("#t-"+k).style.display=k===t?"":"none");
   if(t==="mig"&&!$("#mig-sid").options.length)fillMig();
   if(t==="probe"&&!$("#probe-list").dataset.loaded)loadProbe();
+  if(window.history)history.replaceState(null,"","#"+t);  /* tab 可深链: 刷新/分享不丢位置 */
 }
 document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>setTab(b.dataset.t));
 
 async function boot(){
-  try{const h=await api("/healthz");
-    $("#status").innerHTML='<span class="pulse"></span>服务正常 · '+h.snapshots+" 快照 · "+num(h.terms)+" 索引词项";
-    loadOv();loadSnaps();
+  try{let h=await api("/healthz");
+    const setBadge=()=>{$("#status").innerHTML='<span class="pulse"></span>服务正常 · '+
+      h.snapshots+" 快照 · "+num(h.terms)+" 索引词项"};
+    setBadge();
+    await loadOv();loadSnaps();
+    h=await api("/healthz");setBadge();  /* 首屏拉取可能触发索引重建, 徽章二次校准 */
   }catch(e){const s=$("#status");s.classList.add("err");s.innerHTML="<span class='pulse'></span>服务异常 · 4s 后重试";
     setTimeout(boot,4000)}   /* 常驻重启/部署窗口期自动恢复, 不定格在连接失败 */
 }
@@ -2549,10 +2552,14 @@ async function loadOv(){
     const zu=d.zcode_usage||{};
     const zt=Object.values(zu).reduce((s,a)=>s+(a.tin||0),0);
     const zs=d.zcode_snapshots||0;
+    const [rc,pv,mr,au]=await Promise.all([api("/recent?limit=12").catch(()=>null),
+      api("/probe_events?limit=3").catch(()=>[]),api("/memory?q=&limit=3").catch(()=>[]),
+      api("/audit").catch(()=>null)]);
+    const total=(rc&&rc.total)||0;  /* 唯一口径: 资产卡/脚注/分页与徽章同一数字 */
     let band="";
     /* ① 资产带 (vault 自有): 短副标题 + title Tooltip 承载细节 */
-    if(ow.snapshots){
-      band+=stat(num(ow.snapshots),"快照资产","跨 harness 统一库存 · 内容寻址 · 自动 lineage");
+    if(total){
+      band+=stat(num(total),"快照资产","vault/snapshots 内容寻址快照 · 跨 harness 统一库存 · 可预览 / 可迁移");
       band+=stat(num(d.memories||0),"跨会话记忆","自动提取 · 每条注明来源快照, 可回读核实","neutral");
       /* top agent: zcode 快照内嵌 usage 低估, 用 model_usage 真实总量替换后排名 */
       const cand=(ow.by_agent||[]).map(a=>({agent:a.agent,snap:a.snapshots,tin:a.tokens_in||0}));
@@ -2560,15 +2567,17 @@ async function loadOv(){
       if(zt>0){ if(zrow&&zrow.snap){zrow.tin=zt;} else {cand=cand.filter(c=>c.agent!=="zcode");cand.push({agent:"zcode",snap:zs,tin:zt});} }
       cand.sort((a,b)=>b.tin-a.tin);
       const top=cand[0];
-      if(top)band+=stat(esc(top.agent)+" ×"+num(top.snapshots),
+      if(top)band+=stat(esc(top.agent)+(top.snap?" ×"+num(top.snap):""),
         "消耗最大的 agent · "+bn(top.tin||0)+" tokens 输入",
         "按真实模型调用记录排名 (zcode 取 model_usage 表全量, 其他 agent 取快照内嵌用量)","neutral");
     }
     /* ② 消耗带 (自有) */
-    band+=stat(bn(ow.tokens_in+zt),"累计输入 tokens","快照内嵌用量 + zcode model_io 真实调用记录, 零外部依赖","neutral");
-    band+=stat((ow.cache_hit_rate*100).toFixed(0)+"%","缓存命中率 · 省约 $"+
-      num(Math.round(ow.cache_read*0.9*3/1e6))+"k (估)",
-      "估算: 假设输入全价 $3/Mtok, 命中部分按约 1/10 计价, 差值即节省额 (相对'完全无缓存'的假想基准, 非 headroom 账单) · cache 读 "+bn(ow.cache_read),"neutral");
+    band+=stat(bn(ow.tokens_in+zt),"累计输入 tokens","快照内嵌用量 + zcode model_usage 真实调用记录, 零外部依赖","neutral");
+    /* 等值口径: cache 读若按全价输入计值多少 — 可辩护, 不做"节省额"宣称 */
+    const crUsd=(ow.cache_read||0)*3/1e6;
+    band+=stat((ow.cache_hit_rate*100).toFixed(0)+"%","≈ "+
+      (crUsd>=1000?"$"+(crUsd/1000).toFixed(1)+"k":"$"+Math.round(crUsd))+" 全价 · cache 读 "+bn(ow.cache_read),
+      "缓存命中率 (值) · 等值口径: 这些 cache 读 tokens 若按全价输入 $3/Mtok 计值 (命中部分实际约按 1/10 计) · 等值参考, 非节省额也非账单","neutral");
     /* ③ 通路节省 (headroom 增强): 正向指标 = 翡翠绿 */
     const hasLt=(lt.saved_usd||0)+(lt.cache_savings_usd||0)>0;
     if(hasLt){
@@ -2579,17 +2588,15 @@ async function loadOv(){
     }
     $("#ov-band").innerHTML=band;
     /* 内容区: 最近入库会话表 + 哨兵/记忆/审计三卡 (把实体内容带进概览) */
-    const [rc,pv,mr,au]=await Promise.all([api("/recent?limit=12").catch(()=>[]),
-      api("/probe_events?limit=3").catch(()=>[]),api("/memory?q=&limit=3").catch(()=>[]),
-      api("/audit").catch(()=>null)]);
-    const arr=Array.isArray(rc)?rc:[];
-    $("#ov-latest").innerHTML=(arr.length?table(["Agent","会话摘要","位置","入库时间","tok"],
+    const arr=(rc&&rc.rows)||[];
+    $("#ov-latest").innerHTML=(arr.length?table(["Agent","会话摘要","位置","入库时间"],
       arr.map(s=>['<span class="chip">'+esc(s.agent||"?")+"</span>",
         '<span class="sub" title="'+esc(s.first||"")+'">'+esc(s.first||"(无文本)")+"</span>",
-        '<span class="sub" title="'+esc(s.cwd||"")+'">'+esc(String(s.cwd||"—").split(/[\\\\/]/).pop()||"—")+"</span>",
-        frel(s.created_at),{t:bn(s.tokens_in||0),num:1}]))
+        '<span class="sub nowr" title="'+esc(s.cwd||"")+'">'+esc(String(s.cwd||"—").split(/[\\\\/]/).pop()||"—")+"</span>",
+        '<span class="nowr">'+frel(s.created_at)+"</span>"]))
       :errEmpty("还没有会话入库 · 先运行 cv sync",""))+
-      '<div class="foot"><span>显示最近 '+arr.length+' 条 · 共 '+num((d.owned||{}).snapshots||0)+' 条会话</span>'+
+      '<div class="foot"><span>显示最近 '+arr.length+' 条 · 共 '+num(total)+' 条会话 · 数据加载于 '+
+      ftime(new Date().toISOString())+"</span>"+
       '<a onclick="setTab(\'snap\')">查看全部 →</a></div>';
     const pe=Array.isArray(pv)?pv:[];
     $("#ov-probe").innerHTML=pe.length?pe.map(e=>{
@@ -2611,10 +2618,13 @@ async function loadOv(){
       '<div class="row"><span class="l">模型消失事件</span><span class="r">'+num(as.model_missing_events||0)+"</span></div>"
       :'<span class="hint">—</span>';
     const zrows=Object.entries(zu);
-    $("#ov-zcode").innerHTML=zrows.length?table(["模型","请求","入 tok","出 tok","成本(估)"],
-      zrows.map(([m,a])=>['<span class="mono">'+esc(m)+"</span>",{t:num(a.n),num:1},
-        {t:bn(a.tin),num:1},{t:bn(a.tout),num:1},
-        {t:a.cost==null?"—":usd(a.cost),num:1}]))
+    const anyPrice=zrows.some(([,a])=>a.cost!=null);  /* 无价目时不渲染全 "—" 列, 诚实显示订阅制 */
+    $("#ov-zcode").innerHTML=zrows.length?table(
+      anyPrice?["模型","请求","入 tok","出 tok","成本(按价目)"]:["模型","请求","入 tok","出 tok"],
+      zrows.map(([m,a])=>{const r=['<span class="mono">'+esc(m)+"</span>",{t:num(a.n),num:1},
+        {t:bn(a.tin),num:1},{t:bn(a.tout),num:1}];
+        if(anyPrice)r.push({t:a.cost==null?"无价目":usd(a.cost),num:1});
+        return r;}))
       :'<span class="hint">暂无记录 · cv ledger import-zcode</span>';
     const ms=d.monthly||[];
     if(!ms.length)$("#ov-months").innerHTML='<div class="empty">暂无月度数据<br>导入账本 <code>cv ledger import-headroom</code></div>';
@@ -2639,21 +2649,37 @@ async function loadOv(){
 
 const sidBtn=sid=>"<button class='linklike sid' title=\""+sid+"\" onclick=\"snapDetail('"+sid+"')\">"+shortSid(sid)+"</button>";
 const agentCell=r=>"<span class='chip'>"+esc(r.agent||"?")+"</span>";
-const whenCell=r=>"<span class='sub'>"+ftime(r.created_at)+"<br>"+esc(r.cwd||"—")+"</span>";
+const whenCell=r=>"<span class='sub'><span class='nowr'>"+ftime(r.created_at)+"</span><br>"+esc(r.cwd||"—")+"</span>";
 const compCell=r=>r.completeness&&r.completeness!=="full"
   ?"<span class='chip warn'>"+esc(r.completeness)+"</span>"
   :"<span style='color:var(--ink-3)'>完整</span>";
 
-async function loadSnaps(){
+let snapPage=0,snapAsc=false;  /* 分页 + 排序状态: 资产页要能翻完全库存, 不能止步 30 条 */
+async function loadSnaps(page){
+  if(typeof page==="number")snapPage=Math.max(0,page);else snapPage=0;
+  await renderSnaps();
+}
+function snapSort(){
+  snapAsc=!snapAsc;snapPage=0;
+  const b=$("#snap-sort");if(b)b.textContent=snapAsc?"时间 ↑":"时间 ↓";
+  renderSnaps();
+}
+async function renderSnaps(){
+  const LIM=30;
   try{
-    const rows=await api("/recent?limit=30");
-    $("#snap-list").innerHTML=table(["快照","会话摘要","来源","块数","入 tokens","完整性","时间 / 目录"],
+    const d=await api("/recent?limit="+LIM+"&offset="+(snapPage*LIM)+"&order="+(snapAsc?"asc":"desc"));
+    const rows=d.rows||[],total=d.total||0;
+    const pager=total>LIM?'<div class="pager"><span>第 '+(snapPage*LIM+1)+"–"+(snapPage*LIM+rows.length)+
+      " 条 · 共 "+num(total)+" 条</span><span>"+
+      '<button class="btn"'+(snapPage<=0?" disabled":"")+' onclick="loadSnaps('+(snapPage-1)+')">← 上一页</button> '+
+      '<button class="btn"'+(snapPage*LIM+LIM>=total?" disabled":"")+' onclick="loadSnaps('+(snapPage+1)+')">下一页 →</button></span></div>':"";
+    $("#snap-list").innerHTML=pager+(rows.length?table(
+      ["快照","会话摘要","来源","块数","完整性","时间 / 目录"],
       rows.map(r=>[sidBtn(r.sid),
         '<span class="sub" title="'+esc(r.first||"")+'">'+esc(r.first||"(无文本)")+"</span>",
-        agentCell(r),{t:num(r.blocks),num:1},{t:bn(r.tokens_in),num:1},
+        agentCell(r),{t:num(r.blocks),num:1},
         compCell(r),whenCell(r)]))
-      ||'<div class="empty">vault 还是空的<br>导出第一个会话 <code>python tools/cv.py export ~/.codex/sessions/…/rollout-*.jsonl</code></div>';
-    fillMig(rows);
+      :'<div class="empty">vault 还是空的<br>导出第一个会话 <code>python tools/cv.py export ~/.codex/sessions/…/rollout-*.jsonl</code></div>')+pager;
   }catch(e){$("#snap-list").innerHTML=errEmpty("快照列表加载失败："+e.message,"loadSnaps()")}
 }
 async function snapSearch(){
@@ -2683,7 +2709,15 @@ function closeDrawer(){
   setTimeout(()=>{d.hidden=true;b.hidden=true},240);
   if(lastFocus&&lastFocus.focus)lastFocus.focus();
 }
-document.addEventListener("keydown",e=>{if(e.key==="Escape")closeDrawer()});
+document.addEventListener("keydown",e=>{
+  if(e.key==="Escape")closeDrawer();
+  if(e.key==="Tab"&&drawerOpen){  /* 焦点陷阱: aria-modal 抽屉的 Tab 循环留在抽屉内 */
+    const f=$("#drawer").querySelectorAll("button,[href],input,select,textarea");
+    if(!f.length)return;
+    const first=f[0],last=f[f.length-1];
+    if(e.shiftKey&&document.activeElement===first){last.focus();e.preventDefault()}
+    else if(!e.shiftKey&&document.activeElement===last){first.focus();e.preventDefault()}
+  }});
 $("#backdrop").addEventListener("click",closeDrawer);
 
 async function snapDetail(sid){
@@ -2725,14 +2759,21 @@ function copySid(sid){navigator.clipboard&&navigator.clipboard.writeText(sid).th
 async function toMig(sid){
   closeDrawer();setTab("mig");
   if(!$("#mig-sid").options.length)await fillMig();
-  const has=[...$("#mig-sid").options].some(o=>o.value===sid);
-  if(has)$("#mig-sid").value=sid;
+  const sel=$("#mig-sid");
+  const has=[...sel.options].some(o=>o.value===sid);
+  if(has)sel.value=sid;
+  else{  /* 搜索/抽屉的快照可能不在最近 50 列表里: 注入并选中, 绝不静默预览别的快照 */
+    const o=document.createElement("option");
+    o.value=sid;o.selected=true;
+    o.textContent=shortSid(sid)+" · 指定快照";
+    sel.appendChild(o);
+  }
   migPreview();
 }
 
-async function fillMig(rows){
-  if(!rows)rows=await api("/recent?limit=50").catch(()=>[]);
-  $("#mig-sid").innerHTML=rows.map(r=>'<option value="'+r.sid+'">'+esc(shortSid(r.sid))+" · "+
+async function fillMig(){
+  const d=await api("/recent?limit=50&offset=0").catch(()=>({rows:[]}));
+  $("#mig-sid").innerHTML=(d.rows||[]).map(r=>'<option value="'+r.sid+'">'+esc(shortSid(r.sid))+" · "+
     esc(r.agent||"?")+" · "+num(r.blocks)+" 块 · "+ftime(r.created_at)+"</option>").join("");
 }
 async function migPreview(){
@@ -2794,6 +2835,8 @@ async function probeNow(){
   }catch(e){toast("探测失败："+e.message,1)}
   if(b)b.disabled=false;
 }
+const h0=(location.hash||"").slice(1);  /* 深链恢复: #snap / #mig / #probe */
+if(["snap","mig","probe"].includes(h0))setTab(h0);
 boot();setInterval(()=>{if($("#t-probe").style.display!=="none"){delete $("#probe-list").dataset.loaded;loadProbe()}},30000);
 </script></body></html>"""
 
@@ -2893,6 +2936,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     self.wfile.write(body)
                     return
                 if u.path == "/healthz":
+                    idx.rebuild()  # 指纹门控: 未变更时仅重算哈希; cv sync 后计数不再陈旧
                     return self._json({"service": "context-vault", "status": "ok",
                                        "snapshots": len(idx.envs), "terms": len(idx.index)})
                 if u.path == "/audit":
@@ -2991,9 +3035,15 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     idx.rebuild()
                     return self._json(idx.context(q.get("q", ""), int(q.get("limit", 3))))
                 if u.path == "/recent":
+                    idx.rebuild()  # 指纹门控: 未变更时仅重算哈希; 分页总数与徽章同源同新鲜度
+                    total = len(idx.meta)  # 可列出库存 = 唯一对外口径: 徽章/资产卡/分页同一数字
+                    lim = max(1, min(int(q.get("limit", 5)), 200))
+                    off = max(int(q.get("offset", 0)), 0)
+                    desc = q.get("order", "desc") != "asc"
                     rows = sorted(idx.meta.items(), key=lambda kv: kv[1]["created_at"] or "",
-                                  reverse=True)[:int(q.get("limit", 5))]
-                    return self._json([{"sid": k, **v} for k, v in rows])
+                                  reverse=desc)[off:off + lim]
+                    return self._json({"total": total,
+                                       "rows": [{"sid": k, **v} for k, v in rows]})
                 if u.path == "/stats":
                     return self._json({"stats": ledger_summary(vault), "owned": owned_stats(vault)})
                 if u.path == "/snapshot":

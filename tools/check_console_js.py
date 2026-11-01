@@ -21,8 +21,9 @@ if out == "run":
     mock = ('const _el=()=>({innerHTML:"",textContent:"",classList:{add(){},toggle(){},remove(){}},style:{},'
             'dataset:{},setAttribute(){},removeAttribute(){},addEventListener(){},options:[],value:""});'
             'const document={querySelector:_el,querySelectorAll:()=>[],getElementById:_el,addEventListener(){},body:_el()};'
-            'const location={search:""};const window={addEventListener(){},location:{}};'
-            'const navigator={clipboard:{writeText:async()=>{}}};const setTimeout=()=>{};'
+            'const location={search:"",hash:""};const window={addEventListener(){},location:{}};'
+            'const navigator={clipboard:{writeText:async()=>{}}};'
+            'const setTimeout=()=>{};const setInterval=()=>{};const clearTimeout=()=>{};'  # 定时器全替掉, 否则真实 30s 轮询挂住 node 不退出
             'const fetch=async()=>({ok:true,json:async()=>({})});'
             'process.on("unhandledRejection",e=>{console.error("unhandledRejection:",e);process.exit(1)});')
     Path("console_run.js").write_text(mock + js, encoding="utf-8")
