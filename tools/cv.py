@@ -2553,11 +2553,11 @@ async function loadOv(){
       band+=stat(num(d.memories||0),"跨会话记忆","自动提取 · 每条注明来源快照, 可回读核实","neutral");
       /* top agent: zcode 快照内嵌 usage 低估, 用 model_usage 真实总量替换后排名 */
       const zu=d.zcode_usage||{};
-      const zt=Object.keys(zu).filter(k=>k[0]!=="_").reduce((s,k)=>s+(zu[k].tin||0),0);
+      const zt=Object.values(zu).reduce((s,a)=>s+(a.tin||0),0);
+      const zs=d.zcode_snapshots||0;
       const cand=(ow.by_agent||[]).map(a=>({agent:a.agent,snap:a.snapshots,tin:a.tokens_in||0}));
       const zrow=cand.find(c=>c.agent==="zcode");
-      if(zt>0){ const zs=zu["_snapshots"]||0;
-        if(zrow&&zrow.snap){zrow.tin=zt;} else {cand=cand.filter(c=>c.agent!=="zcode");cand.push({agent:"zcode",snap:zs,tin:zt});} }
+      if(zt>0){ if(zrow&&zrow.snap){zrow.tin=zt;} else {cand=cand.filter(c=>c.agent!=="zcode");cand.push({agent:"zcode",snap:zs,tin:zt});} }
       cand.sort((a,b)=>b.tin-a.tin);
       const top=cand[0];
       if(top)band+=stat(esc(top.agent)+" ×"+num(top.snapshots),
@@ -2924,6 +2924,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                         except (ValueError, AttributeError):
                             pass
                     zcode_usage = {}
+                    zcode_snapshots = 0
                     try:  # 真相源: zcode 主库 model_usage (全量调用); model-io 审计文件仅零头
                         zdb = sqlite3.connect(f"file:{ZCODE_DB}?mode=ro", uri=True)
                         try:
@@ -2938,8 +2939,8 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                         pass  # 无 zcode / 无表 = 无自有用量, 合法空态
                     try:
                         zn = conn.execute("SELECT COUNT(*) FROM snapshots WHERE agent='zcode'").fetchone()[0]
-                        if zn and zcode_usage:
-                            zcode_usage["_snapshots"] = zn
+                        if zn:
+                            zcode_snapshots = zn
                     except sqlite3.Error:
                         pass
                     for m, a in zcode_usage.items():
@@ -2961,7 +2962,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                                        "by_model": [dict(r) for r in by_model],
                                        "monthly": [dict(r) for r in monthly],
                                        "owned": owned_stats(vault), "memories": mem_n,
-                                       "zcode_usage": zcode_usage})
+                                       "zcode_usage": zcode_usage, "zcode_snapshots": zcode_snapshots})
                 if u.path == "/preview":
                     env2 = idx.envs.get(q.get("id", ""))
                     if not env2:
