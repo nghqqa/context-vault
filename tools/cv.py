@@ -2368,24 +2368,19 @@ main{padding:26px 32px 60px;max-width:1380px;margin:0 auto}
 section{animation:fadein .18s ease-out}
 @keyframes fadein{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
 
-/* ---------- 数据带 (瑞士排印: 数字裸排, 发丝线分隔, 一个英雄) ---------- */
-.statband{display:grid;grid-template-columns:1.35fr repeat(5,1fr);
-  padding:12px 0 20px;border-bottom:1px solid var(--line)}
-.stat{min-width:0;padding:2px 18px;border-left:1px solid var(--line-soft)}
-.stat:first-child{padding-left:2px;border-left:none}
-@media(max-width:1280px){.statband{grid-template-columns:repeat(3,1fr);row-gap:20px}
-  .stat:nth-child(4){border-left:none;padding-left:2px}}
-@media(max-width:820px){.statband{grid-template-columns:repeat(2,1fr);row-gap:20px}
-  .stat{border-left:none;padding-left:2px}}
-.stat .v{font-family:var(--mono);font-size:23px;font-weight:650;letter-spacing:-.01em;
+/* ---------- 数据带 (KPI: 6 张等大白卡, 24px 均一) ---------- */
+.statband{display:grid;grid-template-columns:repeat(6,1fr);gap:16px;
+  padding:0 0 22px;border-bottom:1px solid var(--line-soft)}
+@media(max-width:1280px){.statband{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:820px){.statband{grid-template-columns:repeat(2,1fr)}}
+.stat{background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:0}
+.stat .v{font-family:var(--mono);font-size:24px;font-weight:650;letter-spacing:-.01em;
   font-variant-numeric:tabular-nums;color:#09090b;line-height:1.2;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.stat.hero .v{font-size:46px;font-weight:700;letter-spacing:-.025em;line-height:1.05}
 .stat .v.neutral{color:#09090b}
 .stat .v.good{color:var(--emerald)}
-.stat .k{font-size:12px;color:var(--ink-3);margin-top:6px;line-height:1.45;
+.stat .k{font-size:12px;color:var(--ink-3);margin-top:5px;line-height:1.45;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:help}
-.stat.hero .k{color:var(--ink-2);margin-top:8px}
 
 /* ---------- 表格 ---------- */
 .tbl-wrap{width:100%}
@@ -2410,7 +2405,7 @@ td .sub{color:var(--ink-3);font-size:12px}
 
 /* ---------- 概览内容网格 (Linear 风白卡系统) ---------- */
 .ovgrid{display:grid;grid-template-columns:8fr 4fr;gap:16px;align-items:stretch;margin-top:16px}
-.ovgrid .side{display:grid;gap:0;align-self:stretch}
+.ovgrid .side{display:grid;grid-template-rows:repeat(3,1fr);gap:16px;align-self:stretch}
 .duo{display:grid;grid-template-columns:1fr 1.2fr;gap:16px;align-items:stretch}
 .ovcard,.ocard{background:#fff;border:1px solid #e4e4e7;border-radius:10px;
   box-shadow:0 1px 2px rgba(9,9,11,.04)}
@@ -2420,7 +2415,55 @@ td .sub{color:var(--ink-3);font-size:12px}
   padding:10px 12px 4px}
 .panel .pt{margin-bottom:6px}
 .ocard .pt{padding:10px 12px 4px}
-.ocard .pt.sec2{border-top:1px solid var(--line-soft);margin-top:14px;padding-top:14px}
+.ocard .row:last-child .r{padding-bottom:2px}
+/* Relay 节点徽章 */
+.relay-badge{display:inline-flex;align-items:center;gap:6px;background:var(--bg1);
+  border:1px solid var(--line);border-radius:6px;padding:2px 8px;line-height:1.5;vertical-align:middle}
+.relay-badge svg{opacity:.65;flex:none}
+.relay-badge .rl{color:var(--ink-3);font-size:11px}
+.relay-badge .rn{font-family:var(--mono);color:var(--ink);font-weight:600;font-size:12px}
+/* 会话摘要清洗: 单行 44px, 标签徽章 */
+.sum-line{display:flex;align-items:center;gap:6px;overflow:hidden;white-space:nowrap;height:100%;min-width:0}
+.sum-main{overflow:hidden;text-overflow:ellipsis;min-width:0;flex:0 1 auto}
+.mini-tag{flex:none;font-family:var(--mono);font-size:11px;color:var(--ink-3);
+  background:var(--bg1);border:1px solid var(--line-soft);border-radius:4px;padding:0 5px;line-height:16px}
+.tbl-44 td{height:44px;padding:5px 12px;vertical-align:middle}
+.tbl-44 td:nth-child(2){max-width:620px}
+.dir{font-family:var(--mono);font-size:11px;color:var(--ink-3);white-space:nowrap;
+  display:inline-flex;align-items:center;gap:5px}
+.dir svg{opacity:.6;flex:none}
+/* 卡片化表格容器 (overflow:clip 而非 hidden: 不破坏 th 的 sticky 视口参照) */
+.cardbox{border:1px solid var(--line);border-radius:12px;background:#fff;
+  box-shadow:0 1px 2px rgba(9,9,11,.04);overflow:clip}
+.cardbox tbl, .cardbox .tbl-wrap table{width:100%}
+.cardbox th{background:var(--bg0)}
+/* 延迟分级 */
+.lat{font-family:var(--mono);font-size:12.5px;white-space:nowrap}
+.lat.good{color:#047857}.lat.mid{color:var(--ink-2)}.lat.warm{color:var(--warn)}
+.latbar{width:52px;height:3px;background:var(--bg2);border-radius:2px;overflow:hidden;
+  display:inline-block;vertical-align:middle;margin-left:8px}
+.latbar i{display:block;height:100%;background:currentColor;border-radius:2px}
+/* 终端代码块 (迁移恢复命令) */
+.term{background:#09090b;color:#e4e4e7;border-radius:8px;padding:10px 14px;
+  font-family:var(--mono);font-size:12.5px;margin-top:12px;line-height:1.7}
+.term .tp{display:block;color:#8b93a3;font-size:10.5px;letter-spacing:.06em;margin-bottom:3px;
+  font-family:var(--sans)}
+.term code{color:#7ee2a8}
+/* 迁移工作台 */
+.mig-flow{display:grid;grid-template-columns:1fr auto 1fr;gap:18px;align-items:stretch;margin:14px 0 4px}
+.mig-block{background:var(--bg0);border:1px solid var(--line);border-radius:10px;padding:14px 16px;min-width:0}
+.mig-lab{font-size:11px;font-weight:600;color:var(--ink-3);letter-spacing:.05em;margin-bottom:9px}
+.mig-lab b{color:var(--ink-2)}
+.mig-block select{width:100%;flex:none;min-width:0}
+.mig-arrow{display:flex;align-items:center;padding:0 4px;color:var(--ink-3)}
+.mig-btn-row{display:flex;gap:8px;margin-top:10px}
+.mig-idle{border:1px dashed var(--line);border-radius:10px;padding:28px 20px;text-align:center;
+  color:var(--ink-3);font-size:13px;margin-top:14px;line-height:1.9}
+.mig-idle code{font-family:var(--mono);font-size:12px;color:var(--ink-2);
+  background:var(--bg1);padding:2px 7px;border-radius:5px}
+.stat-inline{display:inline-flex;align-items:baseline;gap:6px;font-size:12.5px;color:var(--ink-2);
+  padding:6px 12px;background:#fff;border:1px solid var(--line);border-radius:8px}
+.stat-inline b{font-family:var(--mono);font-weight:650;font-variant-numeric:tabular-nums;color:var(--ink)}
 .panel .row,.ocard .row{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;
   padding:6px 0;border-bottom:1px solid var(--line-soft)}
 .panel .row:last-child,.ocard .row:last-child{border-bottom:none}
@@ -2474,7 +2517,10 @@ select{appearance:none;-webkit-appearance:none;padding-right:30px;cursor:pointer
   background-repeat:no-repeat;background-position:right 10px center}
 input::placeholder{color:var(--ink-3)}
 input:focus,select:focus{border-color:var(--acc);background:var(--bg2)}
-input{flex:1;min-width:260px}
+input{flex:1;min-width:260px;padding-left:34px;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:11px center}
+.controls .btn{height:36px;padding:0 14px;display:inline-flex;align-items:center}
 .btn{display:inline-flex;align-items:center;gap:7px;background:var(--bg2);border:1px solid var(--line);
   border-radius:var(--rad);padding:8px 14px;font-size:13.5px;cursor:pointer;
   transition:border-color .15s ease,background .15s ease,transform .1s ease}
@@ -2624,27 +2670,48 @@ input{flex:1;min-width:260px}
 </section>
 
 <section id="t-mig" style="display:none">
-  <div class="panel">
-    <b>把历史会话迁移到另一个 agent</b>
-    <div class="controls" style="margin-top:14px;margin-bottom:4px">
-      <select id="mig-sid" style="flex:1;min-width:260px"></select>
-      <select id="mig-target"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="markdown">Markdown 简报 · 任意 agent</option></select>
-      <button class="btn primary" onclick="migPreview()">预览迁移</button>
+  <div class="ocard" style="padding:18px 20px 16px">
+    <b style="font-size:14px">迁移工作台</b>
+    <span class="sub" style="font-size:12px"> — 源会话 → 目标 Agent，预览确认后才落盘</span>
+    <div class="mig-flow">
+      <div class="mig-block">
+        <div class="mig-lab"><b>①</b> 源会话 · SOURCE SNAPSHOT</div>
+        <select id="mig-sid" onchange="migPreview()" style="width:100%"></select>
+      </div>
+      <div class="mig-arrow">
+        <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h17m0 0-5-5m5 5-5 5"/></svg>
+      </div>
+      <div class="mig-block">
+        <div class="mig-lab"><b>②</b> 目标 AGENT
+          <span style="margin-left:8px;font-weight:400">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8M12 18v3"/></svg>
+            Codex
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-left:8px"><path d="M18 10c0-4-3-6-6-6S6 6 6 10c-2 0-3 1.5-3 3.5S4.5 17 6.5 17h11c2 0 3.5-1.5 3.5-3.5S20 10 18 10Z"/></svg>
+            Claude Code
+          </span>
+        </div>
+        <select id="mig-target"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="markdown">Markdown 简报 · 任意 agent</option></select>
+        <div class="mig-btn-row">
+          <button class="btn primary" style="background:var(--acc);border-color:var(--acc);color:#fff;width:100%;justify-content:center" onclick="migPreview()">生成迁移预览</button>
+        </div>
+      </div>
     </div>
-    <div id="mig-preview"></div>
-    <div class="controls" id="mig-actions" style="display:none;margin-top:6px">
+    <div id="mig-preview"><div class="mig-idle">选中源会话后，这里展示<b>保真度预览</b>：将保留的上下文块、预计 tokens、可迁移性损失清单与恢复命令。<br>迁移采用 stateless replay——压缩边界之后为活上下文，摘要注入为新会话首条消息。</div></div>
+    <div class="controls" id="mig-actions" style="display:none;margin-top:12px">
       <button class="btn" onclick="migGo(false)">生成到 outbox（安全）</button>
       <button class="btn danger" onclick="migGo(true)">写入目标会话目录</button>
     </div>
-    <div class="note">stateless replay：压缩边界之后为活上下文，摘要将注入为新会话首条消息。<br>
-    写入后用 <b>codex resume</b> / <b>claude --resume</b> 恢复会话。</div>
+    <div class="note">写入后用 <b>codex resume</b> / <b>claude --resume</b> 恢复会话；Markdown 简报始终落 outbox，无 apply 语义。</div>
   </div>
 </section>
 
 <section id="t-probe" style="display:none">
   <div class="controls">
     <button class="btn primary" onclick="probeNow()">立即探测上游</button>
-    <span class="note" id="probe-last" style="margin:0"></span>
+    <span class="stat-inline">当前监控节点 <b id="sn-nodes">—</b></span>
+    <span class="stat-inline">24h 可用率 <b id="sn-avail">—</b></span>
+    <span class="stat-inline">平均延迟 <b id="sn-lat">—</b></span>
+    <span class="note" id="probe-last" style="margin:0 0 0 auto"></span>
   </div>
   <div id="probe-list"></div>
 </section>
@@ -2669,6 +2736,20 @@ const usd=v=>v==null?"—":"$"+(+v).toLocaleString("en-US",{minimumFractionDigit
 const num=v=>(+v||0).toLocaleString();
 const bn=v=>{v=+v||0;return v>=1e9?(v/1e9).toFixed(2)+"B":v>=1e6?(v/1e6).toFixed(1)+"M":num(v)};
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const relayBadge=p=>'<span class="relay-badge" title="上游中转节点 '+esc(p||"")+'">'+
+  '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>'+
+  '<span class="rl">Relay ·</span><span class="rn">'+esc(p||"—")+"</span></span>";
+const cleanSummary=s=>{let t=String(s||"");const tags=[];
+  t=t.replace(/https?:\/\/\S+/g," ");  /* 剥本地 URL */
+  t=t.replace(/\[([^\]\n]{1,24})\]\([^)\n]{0,40}/g,(m,g)=>{tags.push(g);return " "});  /* [$tag](path 截断形态 */
+  t=t.replace(/\(([A-Za-z]:\\?[^)\n]{0,30})/g,(m,g)=>{tags.push(g);return " "});  /* (C:\U 残尾 */
+  t=t.replace(/\b[A-Za-z]:\\[^\s",;)]+/g,(m)=>{tags.push(m);return " "});
+  t=t.replace(/\s+/g," ").trim();
+  return {text:t||"(无文本)",tags:[...new Set(tags)].slice(0,2)}};
+const sumCell=s=>{const c=cleanSummary(s);
+  return '<span class="sum-line"><span class="sum-main" title="'+esc(s||"")+'">'+esc(c.text)+"</span>"+
+    c.tags.map(t=>'<span class="mini-tag">'+esc(t)+"</span>").join("")+"</span>"};
+const dirCell=p=>'<span class="dir"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6Z"/></svg>'+esc(String(p||"—"))+"</span>";
 const ftime=s=>{if(!s)return"—";const d=new Date(s);return isNaN(d)?String(s).slice(0,19)
   :d.toLocaleString("zh-CN",{year:"2-digit",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})};
 const frel=s=>{if(!s)return"";const d=new Date(s);if(isNaN(d))return String(s).slice(0,19);
@@ -2688,10 +2769,11 @@ const errEmpty=(msg,retry)=>'<div class="empty">'+WARN+esc(msg)+
 
 /* 单元格允许裸字符串或 {t,num} 对象 — 两种写法都渲染, 避免 undefined */
 const cell=c=>(c&&typeof c==="object")?c:{t:c};
-const table=(heads,rows)=>{if(!rows||!rows.length)return"";
+const table=(heads,rows,cls)=>{if(!rows||!rows.length)return"";
   const hs=heads.map((h,i)=>{const c=cell(rows[0][i]);return "<th"+(c.num?' class="num"':"")+">"+h+"</th>"}).join("");
   const bs=rows.map(r=>"<tr>"+r.map(c0=>{const c=cell(c0);return "<td"+(c.num?' class="num"':"")+">"+c.t+"</td>"}).join("")+"</tr>").join("");
-  return '<div class="tbl-wrap"><table><thead><tr>'+hs+"</tr></thead><tbody>"+bs+"</tbody></table></div>"};
+  const open='<div class="tbl-wrap"><table'+(cls?' class="'+cls+'"':"")+">";
+  return open+"<thead><tr>"+hs+"</tr></thead><tbody>"+bs+"</tbody></table></div>"};
 
 function setTab(t){
   document.querySelectorAll("nav button").forEach(x=>{const on=x.dataset.t===t;
@@ -2713,7 +2795,7 @@ async function boot(){
   }catch(e){const s=$("#status");s.classList.add("err");s.innerHTML="<span class='pulse'></span>服务异常 · 4s 后重试";
     setTimeout(boot,4000)}   /* 常驻重启/部署窗口期自动恢复, 不定格在连接失败 */
 }
-const stat=(v,k,tip,cls="",hero=false)=>'<div class="stat'+(hero?" hero":"")+'"'+(tip?' title="'+String(tip).replace(/"/g,"&quot;")+'"':"")+
+const stat=(v,k,tip,cls="")=>'<div class="stat"'+(tip?' title="'+String(tip).replace(/"/g,"&quot;")+'"':"")+
   '><div class="v '+cls+'">'+v+'</div><div class="k">'+k+"</div></div>";
 const kv=(k,v)=>"<b>"+k+"</b><span>"+(v==null?"—":v)+"</span>";
 
@@ -2724,14 +2806,14 @@ async function loadOv(){
     const zu=d.zcode_usage||{};
     const zt=Object.values(zu).reduce((s,a)=>s+(a.tin||0),0);
     const zs=d.zcode_snapshots||0;
-    const [rc,pv,mr,au]=await Promise.all([api("/recent?limit=12").catch(()=>null),
+    const [rc,pv,mr,au]=await Promise.all([api("/recent?limit=10").catch(()=>null),
       api("/probe_events?limit=3").catch(()=>[]),api("/memory?q=&limit=3").catch(()=>[]),
       api("/audit").catch(()=>null)]);
     const total=(rc&&rc.total)||0;  /* 唯一口径: 资产卡/脚注/分页与徽章同一数字 */
     let band="";
     /* ① 资产带 (vault 自有): 短副标题 + title Tooltip 承载细节 */
     if(total){
-      band+=stat(num(total),"快照资产","vault/snapshots 内容寻址快照 · 跨 harness 统一库存 · 可预览 / 可迁移","","hero");
+      band+=stat(num(total),"快照资产","vault/snapshots 内容寻址快照 · 跨 harness 统一库存 · 可预览 / 可迁移");
       band+=stat(num(d.memories||0),"跨会话记忆","自动提取 · 每条注明来源快照, 可回读核实","neutral");
       /* top agent: zcode 快照内嵌 usage 低估, 用 model_usage 真实总量替换后排名 */
       const cand=(ow.by_agent||[]).map(a=>({agent:a.agent,snap:a.snapshots,tin:a.tokens_in||0}));
@@ -2763,9 +2845,9 @@ async function loadOv(){
     const arr=(rc&&rc.rows)||[];
     $("#ov-latest").innerHTML=(arr.length?table(["Agent","会话摘要","位置","入库时间"],
       arr.map(s=>['<span class="chip">'+esc(s.agent||"?")+"</span>",
-        '<span class="sub" title="'+esc(s.first||"")+'">'+esc(s.first||"(无文本)")+"</span>",
-        '<span class="sub nowr" title="'+esc(s.cwd||"")+'">'+esc(String(s.cwd||"—").split(/[\\\\/]/).pop()||"—")+"</span>",
-        '<span class="nowr">'+frel(s.created_at)+"</span>"]))
+        sumCell(s.first),
+        dirCell(s.cwd),
+        '<span class="nowr">'+frel(s.created_at)+"</span>"]),"tbl-44")
       :errEmpty("还没有会话入库 · 先运行 cv sync",""))+
       '<div class="foot"><span>显示最近 '+arr.length+' 条 · 共 '+num(total)+' 条会话 · 数据加载于 '+
       ftime(new Date().toISOString())+"</span>"+
@@ -2773,7 +2855,7 @@ async function loadOv(){
     const pe=Array.isArray(pv)?pv:[];
     $("#ov-probe").innerHTML=pe.length?pe.map(e=>{
       const st=e.status||"?";const cls=st==="ok"?"ok":(st==="http_error"||st==="error")?"err":"warn";
-      return '<div class="row"><span class="l"><span class="dot '+cls+'"></span>'+esc(e.profile||"?")+
+      return '<div class="row"><span class="l"><span class="dot '+cls+'"></span>'+relayBadge(e.profile)+
       ' <span class="pill '+cls+'">'+esc(st)+'</span></span><span class="r">'+frel(e.ts)+"</span></div>"}).join("")
       :'<span class="hint">暂无探测记录 · cv probe 或托盘哨兵</span>';
     const mm=Array.isArray(mr)?mr:(mr&&mr.memories||[]);
@@ -2821,7 +2903,6 @@ async function loadOv(){
 
 const sidBtn=sid=>"<button class='linklike sid' title=\""+sid+"\" onclick=\"snapDetail('"+sid+"')\">"+shortSid(sid)+"</button>";
 const agentCell=r=>"<span class='chip'>"+esc(r.agent||"?")+"</span>";
-const whenCell=r=>"<span class='sub'><span class='nowr'>"+ftime(r.created_at)+"</span><br>"+esc(r.cwd||"—")+"</span>";
 const compCell=r=>r.completeness&&r.completeness!=="full"
   ?"<span class='chip warn'>"+esc(r.completeness)+"</span>"
   :"<span style='color:var(--ink-3)'>完整</span>";
@@ -2845,13 +2926,16 @@ async function renderSnaps(){
       " 条 · 共 "+num(total)+" 条</span><span>"+
       '<button class="btn"'+(snapPage<=0?" disabled":"")+' onclick="loadSnaps('+(snapPage-1)+')">← 上一页</button> '+
       '<button class="btn"'+(snapPage*LIM+LIM>=total?" disabled":"")+' onclick="loadSnaps('+(snapPage+1)+')">下一页 →</button></span></div>':"";
-    $("#snap-list").innerHTML=pager+(rows.length?table(
-      ["快照","会话摘要","来源","块数","完整性","时间 / 目录"],
-      rows.map(r=>[sidBtn(r.sid),
-        '<span class="sub" title="'+esc(r.first||"")+'">'+esc(r.first||"(无文本)")+"</span>",
-        agentCell(r),{t:num(r.blocks),num:1},
-        compCell(r),whenCell(r)]))
-      :'<div class="empty">vault 还是空的<br>导出第一个会话 <code>python tools/cv.py export ~/.codex/sessions/…/rollout-*.jsonl</code></div>')+pager;
+    const body=rows.length?'<div class="cardbox">'+
+      table(["快照","会话摘要","来源","块数","完整性","时间","目录"],
+        rows.map(r=>[sidBtn(r.sid),
+          sumCell(r.first),
+          agentCell(r),{t:num(r.blocks),num:1},
+          compCell(r),
+          '<span class="mono nowr" style="font-size:12px">'+ftime(r.created_at)+"</span>",
+          dirCell(r.cwd)]),"tbl-44")+"</div>"
+      :'<div class="empty">vault 还是空的<br>导出第一个会话 <code>python tools/cv.py export ~/.codex/sessions/…/rollout-*.jsonl</code></div>';
+    $("#snap-list").innerHTML=pager+body+pager;
   }catch(e){$("#snap-list").innerHTML=errEmpty("快照列表加载失败："+e.message,"loadSnaps()")}
 }
 async function snapSearch(){
@@ -2859,8 +2943,12 @@ async function snapSearch(){
   $("#snap-list").innerHTML='<div class="skel" style="width:40%"></div><div class="skel" style="width:70%"></div>';
   try{
     const d=await api("/search?q="+encodeURIComponent(q)+"&limit=20");
-    $("#snap-list").innerHTML=table(["快照","来源","得分","时间 / 目录"],
-      d.hits.map(h=>[sidBtn(h.sid),agentCell(h),{t:num(h.score),num:1},whenCell(h)]))
+    $("#snap-list").innerHTML='<div class="cardbox">'+
+      table(["快照","会话摘要","来源","得分","时间","目录"],
+        d.hits.map(h=>[sidBtn(h.sid),sumCell(h.first),agentCell(h),
+          {t:num(Math.round(h.score)),num:1},
+          '<span class="mono nowr" style="font-size:12px">'+ftime(h.created_at)+"</span>",
+          dirCell(h.cwd)]),"tbl-44")+"</div>"
       ||'<div class="empty">没有命中「'+esc(q)+'」<br>换个关键词试试 — 项目名、文件路径、任务描述都行</div>';
   }catch(e){$("#snap-list").innerHTML=errEmpty("搜索失败："+e.message,"snapSearch()")}
 }
@@ -2947,6 +3035,7 @@ async function fillMig(){
   const d=await api("/recent?limit=50&offset=0").catch(()=>({rows:[]}));
   $("#mig-sid").innerHTML=(d.rows||[]).map(r=>'<option value="'+r.sid+'">'+esc(shortSid(r.sid))+" · "+
     esc(r.agent||"?")+" · "+num(r.blocks)+" 块 · "+ftime(r.created_at)+"</option>").join("");
+  if((d.rows||[]).length)migPreview();  /* 默认选中即出保真度预览, 页面不空 */
 }
 async function migPreview(){
   const id=$("#mig-sid").value;if(!id)return toast("vault 为空，无快照可迁移",1);
@@ -2962,7 +3051,9 @@ async function migPreview(){
       kv("活上下文",p.live_blocks+" 块 · ~"+num(p.live_tokens_est)+" tokens"+(p.compactions?"（"+p.compactions+" 次压缩边界之后）":""))+
       kv("构成",Object.entries(p.live_dist).map(([k,v])=>esc(k)+" ×"+num(v)).join("　"))+
       kv("历史累计输入",num(p.history_tokens_in)+" tokens")+"</div>"+
-      '<ul class="immlist">'+(imm.length?imm.map(i=>"<li>"+WARN+i+"</li>").join(""):"<li class='good'>"+GOOD+"无可迁移性损失</li>")+"</ul>";
+      '<ul class="immlist">'+(imm.length?imm.map(i=>"<li>"+WARN+i+"</li>").join(""):"<li class='good'>"+GOOD+"无可迁移性损失</li>")+"</ul>"+
+      '<div class="term"><span class="tp">恢复命令 · 迁移写入成功后在目标 agent CLI 执行</span><code>$ '+
+      ($("#mig-target").value==="claude"?"claude --resume":$("#mig-target").value==="markdown"?"code outbox/brief-*.md":"codex resume")+"</code></div>";
     $("#mig-actions").style.display="flex";
   }catch(e){$("#mig-preview").innerHTML=errEmpty("预览失败："+e.message);$("#mig-actions").style.display="none"}
 }
@@ -2983,16 +3074,39 @@ async function migGo(apply){
 async function loadProbe(){
   const el=$("#probe-list");el.innerHTML='<div class="skel" style="width:60%"></div><div class="skel" style="width:45%"></div>';
   try{
-    const rows=await api("/probe_events?limit=100");
+    const rows=await api("/probe_events?limit=200");
     $("#probe-last").textContent=rows.length?"最近事件 · "+frel(rows[0].ts):"";
-    const cls=s=>s==="ok"?"ok":(s==="warm"||s==="probe"?"warm":(s==="switch"?"sw":"err"));
-    el.innerHTML=table(["","时间","profile","状态","详情"],
-      rows.map(r=>["<span class='dot "+cls(r.status)+"'></span>",
-        "<span class='mono'>"+ftime(r.ts)+"</span>","<b style='font-weight:500'>"+esc(r.profile)+"</b>",
-        esc(r.status)+(r.http_code?" · "+r.http_code:"")+(r.latency_ms?" · "+r.latency_ms+"ms":""),
-        r.missing_models&&r.missing_models!=="[]"?"<span style='color:var(--err)'>消失 "+esc(r.missing_models)+"</span>":
-          (r.status==="switch"?("<span class='sub'>切换检测 · "+shortModels(r.models)+"</span>"):"")]))
-      ||'<div class="empty">暂无事件<br>点「立即探测上游」或等哨兵周期（托盘模式下每 5 分钟自动探测）</div>';
+    /* 头部统计: 节点数 / 24h 可用率 / 平均延迟 (ok 事件) */
+    const nodes=new Set(rows.map(r=>r.profile).filter(Boolean));
+    const dayAgo=Date.now()-864e5;
+    const day=rows.filter(r=>{const t=new Date(r.ts);return !isNaN(t)&&t.getTime()>=dayAgo});
+    const okN=day.filter(r=>r.status==="ok").length;
+    const lats=rows.filter(r=>r.status==="ok"&&r.latency_ms).map(r=>r.latency_ms);
+    $("#sn-nodes").textContent=nodes.size||"—";
+    $("#sn-avail").textContent=day.length?((okN/day.length)*100).toFixed(1)+"%":"—";
+    $("#sn-lat").textContent=lats.length?Math.round(lats.reduce((a,b)=>a+b,0)/lats.length)+" ms":"—";
+    const httpCell=r=>{
+      if(r.status==="ok")return '<span class="pill ok">'+(r.http_code||200)+" OK</span>";
+      if(r.status==="switch")return '<span class="pill warn">SWITCH</span>';
+      if(r.status==="http_error"||r.status==="error")return '<span class="pill err">'+(r.http_code||"5xx")+" ERR</span>";
+      return '<span class="pill warn">'+esc(r.status||"—")+"</span>"};
+    const latCell=r=>{
+      if(!r.latency_ms)return '<span class="sub">—</span>';
+      const v=r.latency_ms;const cls=v<800?"good":v<=1000?"mid":"warm";
+      const pct=Math.min(100,Math.round(v/2000*100));
+      return '<span class="lat '+cls+'">'+v+" ms"+'<span class="latbar"><i style="width:'+pct+'%"></i></span></span>'};
+    const detCell=r=>{
+      if(r.missing_models&&r.missing_models!=="[]")return '<span style="color:var(--err)">模型消失 '+esc(r.missing_models)+"</span>";
+      if(r.status==="ok")return '<span class="sub">模型可用性校验通过</span> <span class="mini-tag">GET /v1/models</span>';
+      if(r.status==="switch")return '<span class="sub">切换检测 · '+esc(shortModels(r.models)||"profile 变更")+"</span>";
+      if(r.status==="http_error"||r.status==="error")return '<span class="sub">上游无响应 / 非 2xx</span>';
+      return '<span class="sub">—</span>'};
+    el.innerHTML=rows.length?'<div class="cardbox">'+
+      table(["时间","上游节点 (Profile)","HTTP 状态","响应延迟","详情"],
+        rows.map(r=>{const cls=r.status==="ok"?"ok":(r.status==="warm"||r.status==="probe")?"warn":(r.status==="switch"?"sw":"err");
+          return ['<span class="dot '+cls+'"></span><span class="mono nowr" style="font-size:12px">'+ftime(r.ts)+"</span>",
+            relayBadge(r.profile),httpCell(r),latCell(r),detCell(r)]}),"tbl-44")+"</div>"
+      :'<div class="empty">暂无事件<br>点「立即探测上游」或等哨兵周期（托盘模式下每 5 分钟自动探测）</div>';
     el.dataset.loaded=1;
   }catch(e){el.innerHTML=errEmpty("哨兵事件加载失败："+e.message,"loadProbe()")}
 }
