@@ -36,6 +36,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import hmac
 import uuid
 from pathlib import Path
 
@@ -666,6 +667,8 @@ def blocks_to_brief(env: dict, max_chars: int = 48 * 1024) -> str:
             txt = (b.get("content") or "").strip()
             out += [txt[:2000] + ("…[截断]" if len(txt) > 2000 else ""), ""]
             break
+    else:
+        out += ["(会话中无 assistant 文本输出)", ""]
     out += ["## 最近动作 (工具调用, 末 12 条)", ""]
     calls = [b for b in blocks if b["type"] == "tool_call"][-12:]
     for b in reversed(calls):
@@ -695,8 +698,9 @@ def do_import(vault: Path, sid: str, target: str, apply: bool, strip_thinking=Fa
     (vault / "outbox").mkdir(parents=True, exist_ok=True)
     if target == "markdown":  # 交接简报: 可携降级档, 不写真实会话目录, 无 apply 语义
         dest = vault / "outbox" / f"brief-{sid}.md"
-        atomic_write_text(dest, blocks_to_brief(env))
-        return {"lines": dest.stat().st_size, "dropped": 0, "dest": str(dest),
+        lines_text = blocks_to_brief(env)
+        atomic_write_text(dest, lines_text)
+        return {"lines": len(lines_text.splitlines()), "dropped": 0, "dest": str(dest),
                 "new_sid": None, "applied": False}
     if target == "codex":
         lines, dropped, new_sid, name = blocks_to_codex(env, strip_thinking)
@@ -2841,7 +2845,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
             (挡恶意网页跨站); POST 强制 application/json (跨站简单请求发不出该类型 = 强制预检,
             预检无 CORS 应答即被浏览器拦截)。本地进程 (MCP 热索引/托盘/CLI) 不受影响。"""
             host = (self.headers.get("Host") or "").strip().lower()
-            hn = host.rsplit(":", 1)[0].strip("[]") if ":" in host else host
+            hn = host.rsplit(":", 1)[0].strip("[]") if host.count(":") == 1 else host.strip("[]")
             if hn not in ("127.0.0.1", "localhost", "::1"):
                 self._json({"error": f"forbidden: host '{host}' 不在本地白名单"}, 403)
                 return False
@@ -2864,7 +2868,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                             break
                 if not given and not post:
                     given = parse_qs(urlparse(self.path).query).get("token", [""])[0]
-                if given == token:
+                if hmac.compare_digest(str(given), str(token)):
                     if "vault_token=" not in (self.headers.get("Cookie") or ""):
                         self._new_cookie = f"vault_token={token}; Path=/; HttpOnly; SameSite=Strict"
                     return True
@@ -2897,7 +2901,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                                        "memories": memory_search_api(vault, q.get("q", ""),
                                                                      int(q.get("limit", 8)))})
                 if u.path == "/probe_events":
-                    conn = db(vault)
+                    conn = db(vault)  # ThreadingHTTPServer 每请求短连接; 显式关闭归还 WAL 句柄
                     rows = conn.execute("SELECT ts,profile,status,http_code,latency_ms,models,missing_models"
                                         " FROM probe_events ORDER BY id DESC LIMIT ?",
                                         (int(q.get("limit", 100)),)).fetchall()
@@ -2920,14 +2924,16 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     zcode_usage = {}
                     try:  # 真相源: zcode 主库 model_usage (全量调用); model-io 审计文件仅零头
                         zdb = sqlite3.connect(f"file:{ZCODE_DB}?mode=ro", uri=True)
-                        for r in zdb.execute("SELECT model_id, COUNT(*), COALESCE(SUM(input_tokens),0),"
-                                             " COALESCE(SUM(output_tokens),0), COALESCE(SUM(cache_read_input_tokens),0)"
-                                             " FROM model_usage GROUP BY model_id"):
-                            zcode_usage.setdefault(r[0] or "未知",
-                                                   {"n": r[1], "tin": r[2], "tout": r[3], "cr": r[4]})
-                        zdb.close()
+                        try:
+                            for r in zdb.execute("SELECT model_id, COUNT(*), COALESCE(SUM(input_tokens),0),"
+                                                 " COALESCE(SUM(output_tokens),0), COALESCE(SUM(cache_read_input_tokens),0)"
+                                                 " FROM model_usage GROUP BY model_id"):
+                                zcode_usage.setdefault(r[0] or "未知",
+                                                       {"n": r[1], "tin": r[2], "tout": r[3], "cr": r[4]})
+                        finally:
+                            zdb.close()
                     except sqlite3.Error:
-                        pass
+                        pass  # 无 zcode / 无表 = 无自有用量, 合法空态
                     for m, a in zcode_usage.items():
                         pr = prices.get(m)
                         a["cost"] = (round((a["tin"] * pr["input"] + a["tout"] * pr["output"]
