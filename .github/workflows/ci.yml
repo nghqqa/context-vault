@@ -20,9 +20,11 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: pip install pytest
       - run: python -m pytest tests/ -v
-      - name: console JS syntax check (内嵌脚本崩一则整页失灵)
+      - name: console JS syntax + runtime check (内嵌脚本崩一则整页失灵)
         run: |
-          python tools/check_console_js.py
+          python tools/check_console_js.py emit
           node --check console_check.js
+          python tools/check_console_js.py run
+          timeout 20 node console_run.js || [ 0 -eq 124 ]  # 挂起=页面轮询正常; 崩溃(退出1)即失败
       - name: stdlib-only check (引擎零第三方依赖)
         run: python -c "import sys; sys.path.insert(0, 'tools'); import cv, mcp_server; print('engine imports OK, zero third-party deps')"
