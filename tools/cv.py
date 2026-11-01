@@ -37,6 +37,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from array import array
 import hmac
 import uuid
 from pathlib import Path
@@ -2074,11 +2075,34 @@ class VaultIndex:
         self.vault = vault
         self.block_text = block_text_fn
         self.fingerprint = None
-        self.index, self.meta, self.envs = {}, {}, {}
+        self.index, self.meta = {}, {}   # 常驻: 只有倒排索引 + 轻量 meta; 全文 env 按需加载
+        self._sids: list[str] = []       # postings 里 sid 的解码表 (与 index 同批原子换装)
+        self._env_cache = {}             # sid -> env, 小 LRU (快照内容寻址不可变, 无失效问题)
         self._rebuild_lock = threading.Lock()  # 单飞: 重建期间其他请求拿现态秒回, 不排队不并发重建
         self._rebuild_pending = False          # 后台重建已在排队/执行中
         self._last_rebuild = 0.0               # monotonic; 节流基线 (库在增长时指纹永远追不上, 必须节流)
         self.rebuild(force=True)
+
+    # postings 位编码: q = (sid 序号 << 24) | 块号。tuple 存 4900 万条 ≈ 4.5GB, 位编码 ≈ 0.4GB。
+    # 块号 < 2**24 (单快照 1670 万块, 实际最大 ~3000), sid 序号 < 2**39 (容量充足)。
+    _BLOCK_BITS = 24
+    _BLOCK_MASK = (1 << 24) - 1
+
+    ENV_CACHE_MAX = 64  # ≈64 × 数 MB 解析对象, 上限半 GB 级; 全量常驻曾是 12GB+ 内存的根源
+
+    def load_env(self, sid):
+        """按需读快照全文 (磁盘 JSON -> 解析), LRU 缓存; 不存在/损坏返回 None。"""
+        env = self._env_cache.pop(sid, None)
+        if env is None:
+            try:
+                env = json.loads((self.vault / "snapshots" / f"{sid}.json").read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                return None
+            env["_sid"] = sid
+        self._env_cache[sid] = env  # 重插入 = LRU 触碰
+        while len(self._env_cache) > self.ENV_CACHE_MAX:
+            self._env_cache.popitem(last=False)
+        return env
 
     def _fp(self) -> str:
         snap_dir = self.vault / "snapshots"
@@ -2098,15 +2122,16 @@ class VaultIndex:
             if not force and fp == self.fingerprint:
                 return
             # 建到新字典, 末尾原子换装: 重建耗时数分钟, 就地清空会让并发读者看到半成品计数
-            new_index, new_meta, new_envs = {}, {}, {}
+            # 只建 index+meta; 全文 env 走 load_env 按需加载 (全量常驻曾吃 12GB+ 内存)
+            new_index, new_meta, new_sids = {}, {}, []
             for f in sorted((self.vault / "snapshots").glob("cv_*.json")):
                 try:
                     env = json.loads(f.read_text(encoding="utf-8"))
                 except (ValueError, OSError):
                     continue
                 sid = f.stem
-                env["_sid"] = sid
-                new_envs[sid] = env
+                sid_code = len(new_sids) << self._BLOCK_BITS
+                new_sids.append(sid)
                 new_meta[sid] = {"agent": env["capture"].get("agent"),
                                  "first": next(((b.get("content") or b.get("summary") or "")[:64]
                                                 for b in env["conversation"]
@@ -2119,8 +2144,11 @@ class VaultIndex:
                                  "completeness": env["capture"].get("completeness")}
                 for i, b in enumerate(env["conversation"]):
                     for t in set(tokenize(self.block_text(b))):
-                        new_index.setdefault(t, []).append((sid, i))
-            self.index, self.meta, self.envs = new_index, new_meta, new_envs
+                        arr = new_index.get(t)
+                        if arr is None:
+                            arr = new_index[t] = array("q")
+                        arr.append(sid_code | i)
+            self.index, self.meta, self._sids = new_index, new_meta, new_sids
             self.fingerprint = fp
         finally:
             self._last_rebuild = time.monotonic()  # 失败也计时, 别让坏请求反复触发
@@ -2148,8 +2176,8 @@ class VaultIndex:
         terms = tokenize(query)
         sc = Counter()
         for t in terms:
-            for sid, _ in self.index.get(t, []):
-                sc[sid] += 1
+            for v in self.index.get(t, ()):
+                sc[self._sids[v >> self._BLOCK_BITS]] += 1
         return {"query": query, "terms": terms,
                 "hits": [{"sid": sid, "score": n, **self.meta[sid]}
                          for sid, n in sc.most_common(limit)]}
@@ -2159,8 +2187,8 @@ class VaultIndex:
         terms = tokenize(query)
         pairs = Counter()
         for t in terms:
-            for sid, i in self.index.get(t, []):
-                pairs[(sid, i)] += 1
+            for v in self.index.get(t, ()):
+                pairs[(self._sids[v >> self._BLOCK_BITS], v & self._BLOCK_MASK)] += 1
         out, seen = [], set()
         for (sid, i), n in pairs.most_common():
             if len(out) >= limit:
@@ -2168,7 +2196,10 @@ class VaultIndex:
             if sid in seen:
                 continue
             seen.add(sid)
-            b = self.envs[sid]["conversation"][i]
+            env = self.load_env(sid)
+            if env is None:
+                continue
+            b = env["conversation"][i]
             text = self.block_text(b)
             pos = text.lower().find(terms[0]) if terms else 0
             start = max(0, pos - 200)
@@ -2972,7 +3003,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                 if u.path == "/healthz":
                     idx.request_rebuild(60)  # 后台单飞重建; 本请求拿现态秒回, 增长期绝不阻塞
                     return self._json({"service": "context-vault", "status": "ok",
-                                       "snapshots": len(idx.envs), "terms": len(idx.index)})
+                                       "snapshots": len(idx.meta), "terms": len(idx.index)})
                 if u.path == "/audit":
                     return self._json(audit_summary_and_timeline(
                         vault, q.get("since", ""), "all"))
@@ -3042,7 +3073,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                                        "owned": owned_stats(vault), "memories": mem_n,
                                        "zcode_usage": zcode_usage, "zcode_snapshots": zcode_snapshots})
                 if u.path == "/preview":
-                    env2 = idx.envs.get(q.get("id", ""))
+                    env2 = idx.load_env(q.get("id", ""))
                     if not env2:
                         return self._json({"error": "not found"}, 404)
                     from collections import Counter
@@ -3081,7 +3112,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                 if u.path == "/stats":
                     return self._json({"stats": ledger_summary(vault), "owned": owned_stats(vault)})
                 if u.path == "/snapshot":
-                    env = idx.envs.get(q.get("id", ""))
+                    env = idx.load_env(q.get("id", ""))
                     if not env:
                         return self._json({"error": "not found"}, 404)
                     from collections import Counter
@@ -3125,7 +3156,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
 def cmd_serve(args):
     token = args.token or os.environ.get("CV_SERVE_TOKEN")
     srv, idx = build_vault_server(vault_dir(args), args.port, token=token)
-    print(f"vault 热索引就绪: {len(idx.envs)} 快照, {len(idx.index)} 词项")
+    print(f"vault 热索引就绪: {len(idx.meta)} 快照, {len(idx.index)} 词项")
     print(f"Context Vault 服务已启动: http://127.0.0.1:{args.port} (Ctrl+C 退出)")
     if token:
         print("  鉴权已启用: 首访 http://127.0.0.1:{}/?token=*** 自动登录; "
