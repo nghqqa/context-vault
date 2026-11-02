@@ -2455,10 +2455,10 @@ svg{flex:none}
   padding:0 20px;background:var(--bg-surface);border-bottom:1px solid var(--line)}
 .topbar h1{font-size:var(--fs-lg);font-weight:650;white-space:nowrap}
 .gsearch{flex:1;max-width:520px;margin:0 auto;position:relative;display:flex}
-.gsearch input{width:100%;height:var(--ctl-h);background:var(--bg-subtle);border:1px solid var(--line);
+.gsearch input[type=search]{width:100%;height:var(--ctl-h);background:var(--bg-subtle);border:1px solid var(--line);
   border-radius:var(--rad-m);padding:0 12px 0 32px;font-size:13.5px;outline:none;
   transition:border-color .12s ease,background .12s ease}
-.gsearch input:focus{border-color:var(--acc);background:var(--bg-surface)}
+.gsearch input[type=search]:focus{border-color:var(--acc);background:var(--bg-surface)}
 .gsearch .gs-ic{position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--ink-3);pointer-events:none}
 .gsearch kbd{position:absolute;right:8px;top:50%;transform:translateY(-50%);font-family:var(--mono);
   font-size:11.5px;color:var(--ink-3);border:1px solid var(--line);border-radius:4px;
@@ -2594,13 +2594,15 @@ details.card .card-b{border-top:1px solid var(--line-soft)}
 .section-note{font-size:var(--fs-xs);color:var(--ink-3);line-height:1.7;margin-top:10px}
 
 /* 月度走势 */
-.months{display:flex;gap:10px;height:150px;padding:24px 4px 0}
+.months{display:flex;gap:10px;height:150px;padding:24px 4px 0;max-width:680px}
 .yax{width:52px;flex:none;display:flex;flex-direction:column;justify-content:space-between;align-items:flex-end;
   font-family:var(--mono);font-size:var(--fs-xs);color:var(--ink-3);font-variant-numeric:tabular-nums;padding-bottom:18px}
 .bars{flex:1;display:flex;gap:6px;height:100%;
   background:repeating-linear-gradient(to top,transparent 0 36px,var(--line-soft) 36px 37px)}
 .mcol{flex:1;position:relative;min-width:0}
-.mcol .val{position:absolute;left:50%;transform:translateX(-50%);bottom:calc(22px + var(--h,50)*.96%);
+.mcol .val{position:absolute;left:50%;transform:translateX(-50%);
+  /* 100% 高柱子的标签会逃出容器上沿压到卡片标题 — clamp 在容器顶内 */
+  bottom:min(calc(22px + var(--h,50)*.96%),calc(100% - 4px));
   font-family:var(--mono);font-size:11.5px;color:var(--ink-2);white-space:nowrap;font-variant-numeric:tabular-nums}
 .mcol .stick{position:absolute;left:50%;bottom:22px;width:32px;max-width:60%;height:3%;
   max-height:calc(100% - 26px);background:var(--acc);border-radius:4px 4px 0 0;transform:translateX(-50%);
@@ -2643,7 +2645,7 @@ details.card .card-b{border-top:1px solid var(--line-soft)}
 
 /* 迁移工作台 */
 .mig-wrap{display:flex;flex-direction:column;gap:12px}
-.mig-steps{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.mig-steps{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start}
 .mig-step{background:var(--bg-surface);border:1px solid var(--line);border-radius:var(--rad-m);box-shadow:var(--shadow-1)}
 .mig-step>.card-h .stepno{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;
   border-radius:50%;background:var(--acc);color:var(--acc-ink);font-size:11.5px;font-weight:700;font-family:var(--mono)}
@@ -3207,7 +3209,9 @@ function renderUsage(d){
     if(ms.length){
       const mx=Math.max(...ms.map(m=>m.c||0),1);
       const fmt=v=>"$"+(v>=1000?(v/1000).toFixed(1)+"k":v.toFixed(0));
-      h+='<div class="months"><div class="yax"><span>'+fmt(mx)+'</span><span>'+fmt(mx/2)+
+      /* 月少时收紧图宽 (~90px/月), 避免 2 根柱子摊满整卡显得稀疏; 680px CSS 上限兜底 */
+      const mw=Math.min(680,ms.length*90+120);
+      h+='<div class="months" style="max-width:'+mw+'px"><div class="yax"><span>'+fmt(mx)+'</span><span>'+fmt(mx/2)+
         '</span><span>$0</span></div><div class="bars">'+ms.map((m,i)=>{const hh=Math.max(100*(m.c||0)/mx,3);
         return '<div class="mcol"><div class="val" style="--h:'+hh.toFixed(1)+'">'+usd(m.c||0)+
         '</div><div class="stick" style="height:'+hh.toFixed(2)+'%;--i:'+i+'" title="'+
