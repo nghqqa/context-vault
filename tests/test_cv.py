@@ -606,6 +606,64 @@ def test_serve_token_auth(isolated, tmp_path):
         srv.server_close()
 
 
+def test_serve_token_root_seeds_cookie(isolated):
+    """回归 (2026-11-02 审查 #3): 首访 /?token= 的 HTML 响应曾不发 Set-Cookie,
+    控制台页面加载后的所有 fetch 全部 401。根路径必须与 /healthz 同样种 cookie。"""
+    _, vault = isolated
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    conn.commit()
+    srv, _ = cv.build_vault_server(vault, 0, token="sekret")
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        c.request("GET", "/?token=sekret")
+        r = c.getresponse(); body = r.read(); setc = r.getheader("Set-Cookie"); c.close()
+        assert r.status == 200 and b"<!doctype html>" in body[:40].lower()
+        assert "vault_token=sekret" in (setc or "")
+        # 带首访种下的 cookie 复访根路径与数据接口: 不再 401
+        code, _ = _req(port, "GET", "/", headers={"Cookie": "vault_token=sekret"})
+        assert code == 200
+        code, h = _req(port, "GET", "/healthz", headers={"Cookie": "vault_token=sekret"})
+        assert code == 200 and h["status"] == "ok"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_migrate_unknown_sid_stable_json(isolated, tmp_path):
+    """回归 (2026-11-02 审查 #8): 不存在的迁移 sid 曾让 load_snapshot 抛 SystemExit
+    (BaseException), 逃过 HTTP 的 except Exception, 客户端收到断连而非 JSON 错误。"""
+    _, vault = isolated
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    conn.commit()
+    srv, _ = cv.build_vault_server(vault, 0)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        post = lambda sid: _req(port, "POST", "/migrate",
+                                body=json.dumps({"id": sid, "target": "codex", "apply": False}),
+                                headers={"Content-Type": "application/json"})
+        # 形态非法 (含路径穿越) → 400 稳定 JSON
+        code, r = post("../../etc/passwd")
+        assert code == 400 and "invalid id" in r["error"]
+        # 形态合法但不存在 → 404 稳定 JSON, 不再断连
+        code, r = post("cv_0000000000000000")
+        assert code == 404 and "not found" in r["error"]
+        # GET /snapshot 与 /preview 同样受 id 形态校验保护
+        code, _ = _req(port, "GET", "/snapshot?id=../vault.db%00")
+        assert code == 400
+        code, _ = _req(port, "GET", "/preview?id=cv_zzz")
+        assert code == 400
+        code, _ = _req(port, "GET", "/snapshot?id=cv_0000000000000000")
+        assert code == 404
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
 def _mk_snap(vault: Path, sid: str, first_user: str, blocks: int = 3):
     """写一个 VaultIndex 可解析的最小快照文件, 返回其 mtime 前的文件对象。"""
     p = vault / "snapshots" / f"{sid}.json"

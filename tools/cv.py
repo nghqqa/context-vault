@@ -3157,17 +3157,29 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
             except OSError:
                 pass
 
-        def _json(self, obj, code=200):
-            body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        def _send(self, body: bytes, ctype: str, code: int = 200):
+            """统一响应出口: _new_cookie (首访 ?token= 种 cookie) 对 HTML 与 JSON 一视同仁 —
+            曾只在 _json 发, 致控制台首访 HTML 后的 fetch 全部 401。"""
             self.send_response(code)
             nc = getattr(self, "_new_cookie", None)
             if nc:
                 self.send_header("Set-Cookie", nc)
                 self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def _json(self, obj, code=200):
+            self._send(json.dumps(obj, ensure_ascii=False).encode("utf-8"),
+                       "application/json; charset=utf-8", code)
+
+        @staticmethod
+        def _sid_ok(sid: str) -> bool:
+            # 快照 id 形态校验 (cv_ + hex): 挡路径穿越与任意文件读; 同时给迁移一个
+            # 稳定的 JSON 400/404, 而不是让 load_snapshot 的 SystemExit 逃过 except 断连
+            import re as _re
+            return bool(_re.fullmatch(r"cv_[0-9a-f]{8,64}", str(sid or "")))
 
         def _guard(self, post: bool) -> bool:
             """本地访问防护: Host 必须回环 (挡 DNS rebinding 读会话史); Origin 若带必须回环
@@ -3212,12 +3224,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                 return
             try:
                 if u.path == "/":
-                    body = CONSOLE_HTML.encode("utf-8")
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/html; charset=utf-8")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
+                    self._send(CONSOLE_HTML.encode("utf-8"), "text/html; charset=utf-8")
                     return
                 if u.path == "/healthz":
                     idx.request_rebuild(60)  # 后台单飞重建; 本请求拿现态秒回, 增长期绝不阻塞
@@ -3293,7 +3300,10 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                                        "owned": owned_stats(vault), "memories": mem_n,
                                        "zcode_usage": zcode_usage, "zcode_snapshots": zcode_snapshots})
                 if u.path == "/preview":
-                    env2 = idx.load_env(q.get("id", ""))
+                    qid = q.get("id", "")
+                    if not self._sid_ok(qid):
+                        return self._json({"error": "invalid id: 需要 cv_ 前缀的快照 id"}, 400)
+                    env2 = idx.load_env(qid)
                     if not env2:
                         return self._json({"error": "not found"}, 404)
                     from collections import Counter
@@ -3335,7 +3345,10 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                 if u.path == "/stats":
                     return self._json({"stats": ledger_summary(vault), "owned": owned_stats(vault)})
                 if u.path == "/snapshot":
-                    env = idx.load_env(q.get("id", ""))
+                    qid = q.get("id", "")
+                    if not self._sid_ok(qid):
+                        return self._json({"error": "invalid id: 需要 cv_ 前缀的快照 id"}, 400)
+                    env = idx.load_env(qid)
                     if not env:
                         return self._json({"error": "not found"}, 404)
                     from collections import Counter
@@ -3358,7 +3371,14 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                 n = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
                 if u.path == "/migrate":
-                    r = do_import(vault, body.get("id", ""), body.get("target", "codex"),
+                    # 回归: 不存在的 sid 曾让 load_snapshot 抛 SystemExit (BaseException),
+                    # 逃过 except Exception 断连无 JSON; 先校验形态与存在性, 稳定 400/404
+                    mid = str(body.get("id", ""))
+                    if not self._sid_ok(mid):
+                        return self._json({"error": "invalid id: 需要 cv_ 前缀的快照 id"}, 400)
+                    if not (vault / "snapshots" / f"{mid}.json").exists():
+                        return self._json({"error": f"snapshot not found: {mid}"}, 404)
+                    r = do_import(vault, mid, body.get("target", "codex"),
                                   bool(body.get("apply")))
                     return self._json(r)
                 if u.path == "/probe":
