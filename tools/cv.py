@@ -683,7 +683,9 @@ def blocks_to_brief(env: dict, max_chars: int = 48 * 1024) -> str:
            f"- 来源快照: `{env.get('_sid', snapshot_id(env))}` (可用 cv import --target codex|claude 精确迁移)",
            "", "## 它停在哪儿", ""]
     for b in reversed(blocks):  # 最后一条 assistant 输出 = 停点
-        if b["type"] == "agent_message":
+        # 停点检索 (2026-11-02 审查 #5): 原生 Codex/Claude exporter 的普通 assistant 消息
+        # 是 text 块 (role=assistant), agent_message 只是多 agent 场景的类型 — 两者都要认
+        if b["type"] == "agent_message" or (b["type"] == "text" and b.get("role") == "assistant"):
             txt = (b.get("content") or "").strip()
             out += [txt[:2000] + ("…[截断]" if len(txt) > 2000 else ""), ""]
             break
@@ -959,11 +961,20 @@ def owned_stats(vault: Path) -> dict:
     by_agent = conn.execute(f"SELECT agent, COUNT(*) n, SUM(tokens_in) i FROM snapshots"
                             f" WHERE {leaf} GROUP BY agent ORDER BY i DESC").fetchall()
     versions = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
-    hit = (r["cr"] / (r["i"] or 1))
+    # 命中率分母按来源字段语义归一 (2026-11-02 审查 #2): Claude 的 tokens_in 只是未缓存输入,
+    # 缓存读/写单独计数, 命中率 = cache读 / (未缓存+读+写); OpenAI 系 (codex) 的 input_tokens
+    # 已含缓存部分 (缓存读是子集), 分母 = input。混源 vault 按各自分母加权, 不再出现 >100%。
+    per_fmt = conn.execute(f"SELECT source_format, COALESCE(SUM(tokens_in),0) i,"
+                           f" COALESCE(SUM(cache_read),0) cr, COALESCE(SUM(cache_write),0) cw"
+                           f" FROM snapshots WHERE {leaf} GROUP BY source_format").fetchall()
+    denom = sum((r["i"] + r["cr"] + r["cw"]) if r["source_format"] == "claude-projects" else r["i"]
+                for r in per_fmt)
+    hit = (r["cr"] / denom) if denom else 0.0
     return {"snapshots": versions, "sessions": r["n"], "tokens_in": r["i"], "tokens_out": r["o"],
             "cache_read": r["cr"], "cache_write": r["cw"], "total_tokens": r["t"],
             "cache_hit_rate": round(hit, 3),
-            "by_agent": [{"agent": a["agent"], "snapshots": a["n"], "tokens_in": a["i"]}
+            "by_agent": [{"agent": a["agent"], "snapshots": a["n"], "sessions": a["n"],
+                          "tokens_in": a["i"]}
                          for a in by_agent],
             "source": "vault-owned (from agent session usage records)"}
 
@@ -2105,6 +2116,42 @@ def tokenize(text: str) -> list:
     return words + cjk
 
 
+def block_text(b: dict) -> str:
+    """块的检索文本。热索引 (VaultIndex) 与冷回退 (mcp_server) 共用同一实现 —
+    两侧命中集必须一致, 不允许各自维护副本 (2026-11-02 审查 #7)。"""
+    if b["type"] in ("text", "agent_message"):
+        return b.get("content", "") or ""
+    if b["type"] == "thinking":
+        return b.get("summary", "") or ""
+    if b["type"] == "tool_call":
+        return b.get("name", "") + " " + json.dumps(b.get("arguments", {}), ensure_ascii=False)[:200]
+    if b["type"] == "tool_result":
+        return (b.get("content", "") or "")[:500]
+    return ""
+
+
+def score_blocks(env: dict, terms: list) -> list:
+    """块级检索评分, 与热索引同语义: 词项 ∈ set(tokenize(块文本)) 计 1 分/词项/块
+    (索引侧 postings 即按 set(tokenize) 落键)。冷回退必须经此函数, 不得自写匹配。"""
+    tset = set(terms)
+    if not tset:
+        return []
+    hits = []
+    for i, b in enumerate(env["conversation"]):
+        if not isinstance(b, dict):
+            continue
+        try:
+            text = block_text(b)
+        except (AttributeError, TypeError, KeyError, ValueError):
+            continue
+        if not text:
+            continue
+        n = len(tset & set(tokenize(text)))
+        if n:
+            hits.append((n, i, text))
+    return hits
+
+
 class VaultIndex:
     """内存倒排索引: term -> [(sid, block_idx)]; 指纹失效自动重建。"""
 
@@ -2310,7 +2357,7 @@ class VaultIndex:
         terms = tokenize(query)
         index, meta, sids = self._state[:3]  # 单次读取, 全量换装期间不见撕裂
         sc = Counter()
-        for t in terms:
+        for t in set(terms):  # 与冷回退 score_blocks 同语义: 每词项每块只计 1 分
             for v in index.get(t, ()):
                 sc[sids[v >> self._BLOCK_BITS]] += 1
         return {"query": query, "terms": terms,
@@ -2322,7 +2369,7 @@ class VaultIndex:
         terms = tokenize(query)
         index, meta, sids = self._state[:3]  # 单次读取, 全量换装期间不见撕裂
         pairs = Counter()
-        for t in terms:
+        for t in set(terms):  # 与冷回退 score_blocks 同语义: 每 (词项, 块) 计 1 分
             for v in index.get(t, ()):
                 pairs[(sids[v >> self._BLOCK_BITS], v & self._BLOCK_MASK)] += 1
         out, seen = [], set()
@@ -2821,6 +2868,8 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>setTab(b.datase
 
 async function boot(){
   try{let h=await api("/healthz");
+    if(location.search.indexOf("token=")>=0&&window.history)
+      history.replaceState(null,"",location.pathname+location.hash);  /* B03: token 已种成 cookie, 别留在地址栏/历史 */
     const setBadge=()=>{$("#status").innerHTML='<span class="pulse"></span>服务正常 · '+
       h.snapshots+" 快照 · "+num(h.terms)+" 索引词项"};
     setBadge();
@@ -2850,7 +2899,7 @@ async function loadOv(){
       band+=stat(num(total),"快照资产","vault/snapshots 内容寻址快照 · 跨 harness 统一库存 · 可预览 / 可迁移");
       band+=stat(num(d.memories||0),"跨会话记忆","自动提取 · 每条注明来源快照, 可回读核实","neutral");
       /* top agent: zcode 快照内嵌 usage 低估, 用 model_usage 真实总量替换后排名 */
-      const cand=(ow.by_agent||[]).map(a=>({agent:a.agent,snap:a.snapshots,tin:a.tokens_in||0}));
+      let cand=(ow.by_agent||[]).map(a=>({agent:a.agent,snap:a.sessions||a.snapshots||0,tin:a.tokens_in||0}));
       const zrow=cand.find(c=>c.agent==="zcode");
       if(zt>0){ if(zrow&&zrow.snap){zrow.tin=zt;} else {cand=cand.filter(c=>c.agent!=="zcode");cand.push({agent:"zcode",snap:zs,tin:zt});} }
       cand.sort((a,b)=>b.tin-a.tin);
@@ -2977,13 +3026,15 @@ async function snapSearch(){
   $("#snap-list").innerHTML='<div class="skel" style="width:40%"></div><div class="skel" style="width:70%"></div>';
   try{
     const d=await api("/search?q="+encodeURIComponent(q)+"&limit=20");
-    $("#snap-list").innerHTML='<div class="cardbox">'+
+    const hits=d.hits||[];  /* B06: 先判空再选拼接分支 — 字符串拼接恒真, || 后的空态曾永不可达 */
+    $("#snap-list").innerHTML=hits.length?'<div class="cardbox">'+
       table(["快照","会话摘要","来源","得分","时间","目录"],
-        d.hits.map(h=>[sidBtn(h.sid),sumCell(h.first),agentCell(h),
+        hits.map(h=>[sidBtn(h.sid),sumCell(h.first),agentCell(h),
           {t:num(Math.round(h.score)),num:1},
           '<span class="mono nowr" style="font-size:12px">'+ftime(h.created_at)+"</span>",
           dirCell(h.cwd)]),"tbl-44")+"</div>"
-      ||'<div class="empty">没有命中「'+esc(q)+'」<br>换个关键词试试 — 项目名、文件路径、任务描述都行</div>';
+      :'<div class="empty">没有命中「'+esc(q)+'」<br>换个关键词试试 — 项目名、文件路径、任务描述都行'+
+       '<br><button class="btn" onclick="loadSnaps()">返回全部快照</button></div>';
   }catch(e){$("#snap-list").innerHTML=errEmpty("搜索失败："+e.message,"snapSearch()")}
 }
 
@@ -3172,8 +3223,8 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import urlparse, parse_qs
     sys.path.insert(0, str(Path(__file__).parent))
-    from mcp_server import block_text, ledger_summary  # ledger_summary: /stats 端点 (曾漏导入致 500)
-    idx = VaultIndex(vault, block_text)
+    from mcp_server import ledger_summary  # ledger_summary: /stats 端点 (曾漏导入致 500)
+    idx = VaultIndex(vault, block_text)  # block_text 用本模块规范实现, 与 mcp 冷回退同源
 
     class H(BaseHTTPRequestHandler):
         # HTTP/1.0 下 Chromium 系 webview 会复用已被服务端关闭的连接, fetch 全部挂起
@@ -3184,11 +3235,13 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
             pass
 
         def log_request(self, code="-", size="-"):
-            # 请求落盘: 诊断"浏览器 fetch 挂起"类问题的关键证据 (请求到没到服务)
+            # 请求落盘: 诊断"浏览器 fetch 挂起"类问题的关键证据 (请求到没到服务)。
+            # token 脱敏 (B03): ?token= 会随 requestline 落盘, 不能明文进日志。
+            line = re.sub(r"([?&])token=[^& ]*", r"\1token=***", self.requestline)
             try:
                 with (vault / "serve_http.log").open("a", encoding="utf-8") as fh:
                     fh.write(f"{dt.datetime.now().isoformat(timespec='seconds')} "
-                             f"{self.client_address[0]} \"{self.requestline}\" {code} "
+                             f"{self.client_address[0]} \"{line}\" {code} "
                              f"UA={str(self.headers.get('User-Agent', ''))[:48]}\n")
             except OSError:
                 pass
@@ -3414,8 +3467,13 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                         return self._json({"error": "invalid id: 需要 cv_ 前缀的快照 id"}, 400)
                     if not (vault / "snapshots" / f"{mid}.json").exists():
                         return self._json({"error": f"snapshot not found: {mid}"}, 404)
-                    r = do_import(vault, mid, body.get("target", "codex"),
-                                  bool(body.get("apply")))
+                    try:
+                        r = do_import(vault, mid, body.get("target", "codex"),
+                                      bool(body.get("apply")))
+                    except SnapshotNotFound as e:  # 存在性检查到加载之间被删的竞态兜底
+                        return self._json({"error": str(e)}, 404)
+                    except BadMigrateTarget as e:  # HTTP 层没有 argparse choices, 未知 target 挡在这
+                        return self._json({"error": str(e)}, 400)
                     return self._json(r)
                 if u.path == "/probe":
                     baseline_p = vault / "probe_baseline.json"

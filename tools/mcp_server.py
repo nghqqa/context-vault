@@ -94,36 +94,22 @@ def t_recent(args_vault, limit: int) -> str:
 
 
 def block_text(b: dict) -> str:
-    if b["type"] in ("text", "agent_message"):
-        return b.get("content", "") or ""
-    if b["type"] == "thinking":
-        return b.get("summary", "") or ""
-    if b["type"] == "tool_call":
-        return b.get("name", "") + " " + json.dumps(b.get("arguments", {}), ensure_ascii=False)[:200]
-    if b["type"] == "tool_result":
-        return (b.get("content", "") or "")[:500]
-    return ""
-
-
-def score_blocks(env: dict, terms: list) -> list:
-    hits = []
-    for i, b in enumerate(env["conversation"]):
-        text = block_text(b)
-        low = text.lower()
-        n = sum(low.count(t) for t in terms)
-        if n:
-            hits.append((n, i, text))
-    return hits
+    """检索文本 — 委托 cv.block_text (规范实现, 与热索引同源; 2026-11-02 审查 #7)。"""
+    import cv as _cv
+    return _cv.block_text(b)
 
 
 def t_search(args_vault, query: str, limit: int) -> str:
-    terms = [t.lower() for t in query.split() if len(t) >= 2]
+    """冷回退搜索 — 分词与评分必须走 cv.tokenize/cv.score_blocks, 与热索引命中集一致
+    (此前自写整段子串匹配, 中文 query 在冷热两侧命中的快照集合不同)。"""
+    import cv as _cv
+    terms = _cv.tokenize(query)
     if not terms:
         return "查询词太短"
     snaps = load_all_snapshots(args_vault)
     results = []
     for env in snaps:
-        hits = score_blocks(env, terms)
+        hits = _cv.score_blocks(env, terms)
         if hits:
             total = sum(h[0] for h in hits)
             results.append((total, env, len(hits)))
@@ -139,14 +125,16 @@ def t_search(args_vault, query: str, limit: int) -> str:
 
 
 def t_context(args_vault, query: str, limit: int) -> str:
-    """记忆检索: 跨快照找最相关的上下文摘录, 供当前会话引用。"""
-    terms = [t.lower() for t in query.split() if len(t) >= 2]
+    """记忆检索: 跨快照找最相关的上下文摘录, 供当前会话引用。
+    分词/评分与热索引共用 (同 t_search), 保证启停常驻服务不改变命中集合。"""
+    import cv as _cv
+    terms = _cv.tokenize(query)
     if not terms:
         return "查询词太短"
     snaps = load_all_snapshots(args_vault)
     candidates = []  # (score, sid, block_idx, excerpt)
     for env in snaps:
-        hits = score_blocks(env, terms)
+        hits = _cv.score_blocks(env, terms)
         for n, i, text in hits:
             role = env["conversation"][i].get("role") or env["conversation"][i]["type"]
             # 摘录取命中位置附近窗口

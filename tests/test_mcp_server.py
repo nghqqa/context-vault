@@ -83,3 +83,35 @@ def test_mcp_hot_cold_equivalence(tmp_path, monkeypatch):
     assert sid in hot and sid in cold
     assert "命中 1 个快照" in hot and "命中 1 个快照" in cold
     assert sid in hot_recent and sid in cold_recent
+
+
+def test_mcp_hot_cold_equivalence_cjk(tmp_path, monkeypatch):
+    """回归 (2026-11-02 审查 #7): 冷回退曾按整段查询子串匹配, 中文 query 在冷热两侧
+    命中的快照集合不同 — 库里只有"数据库迁移"时, 搜"数据库备份"热命中 (bigram) /
+    冷未命中 (整段子串)。两侧现共用 cv.tokenize + cv.score_blocks, 命中集必须一致。"""
+    vault, _ = mk_vault(tmp_path)
+    env2 = cv.build_envelope({"capture": {"agent": "codex", "cwd": "D:\\proj"},
+                              "conversation": [{"type": "text", "role": "user",
+                                                "content": "数据库迁移的回滚方案"}],
+                              "stats": cv.zero_stats()})
+    sid2 = cv.snapshot_id(env2)
+    cv.atomic_write_text(vault / "snapshots" / f"{sid2}.json",
+                         json.dumps(env2, ensure_ascii=False))
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    conn.commit()
+    srv, _ = cv.build_vault_server(vault, 0)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setattr(mcp_server, "SVC_BASE", f"http://127.0.0.1:{port}")
+        hot_hit = mcp_server.dispatch("vault_search", {"query": "数据库备份"}, vault)
+        hot_miss = mcp_server.dispatch("vault_search", {"query": "联邦学习调度"}, vault)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    monkeypatch.setattr(mcp_server, "SVC_BASE", "http://127.0.0.1:1")
+    cold_hit = mcp_server.dispatch("vault_search", {"query": "数据库备份"}, vault)
+    cold_miss = mcp_server.dispatch("vault_search", {"query": "联邦学习调度"}, vault)
+    assert sid2 in hot_hit and sid2 in cold_hit        # bigram 部分重叠 → 两侧同命中
+    assert "未命中" in hot_miss and "未命中" in cold_miss  # 无重叠 → 两侧同未命中

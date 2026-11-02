@@ -12,6 +12,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 console_check.js
+console_unit.js
 console_run.js
 
 # Pro 闭源层 (托盘程序源码与构建产物, open-core 商业边界)

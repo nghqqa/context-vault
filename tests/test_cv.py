@@ -321,6 +321,44 @@ def test_owned_stats_zero_external(isolated):
     assert own["tokens_in"] == 100 and own["cache_read"] == 60
     assert own["cache_hit_rate"] == 0.6
     assert own["by_agent"][0]["agent"] == "codex"
+    assert own["by_agent"][0]["sessions"] == 1
+
+
+def _register_env(vault: Path, capture: dict, stats: dict, created_at: str) -> str:
+    """注册一个手工 stats 的快照 (账本口径测试用), 返回 sid。"""
+    import uuid as _u
+    env = cv.build_envelope({"capture": capture, "conversation":
+                             [{"type": "text", "role": "user", "content": "x"}],
+                             "stats": {**cv.zero_stats(), **stats}})
+    env["created_at"] = created_at
+    sid = "cv_t" + _u.uuid4().hex[:12]
+    out = vault / "snapshots" / f"{sid}.json"
+    out.parent.mkdir(exist_ok=True)
+    out.write_text(json.dumps(env), encoding="utf-8")
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    cv.register_snapshot(conn, env, sid, out)
+    conn.commit()
+    return sid
+
+
+def test_owned_stats_cache_hit_normalized(isolated):
+    """回归 (2026-11-02 审查 #2): Claude 的 tokens_in 只是未缓存输入, 缓存读/写单独计数,
+    旧公式 cache_read/tokens_in 在 10+90 时得出 900%。按来源语义归一分母后:
+    claude-projects 分母 = 未缓存+读+写; codex 的 input 已含缓存部分, 分母 = input。"""
+    _, vault = isolated
+    _register_env(vault, {"agent": "claude-code", "source_format": "claude-projects"},
+                  {"tokens_in": 10, "cache_read": 90, "cache_write": 0,
+                   "total_tokens": 110, "usage_events": 1}, "2026-11-01T00:00:00")
+    own = cv.owned_stats(vault)
+    assert own["cache_hit_rate"] == 0.9                      # 90/100, 不再是 9.0
+    # 混源: 加一个 codex 叶子 (input=100 已含 cached 60, 写 10) → 加权 150/(100 + 100) = 0.75
+    _register_env(vault, {"agent": "codex", "source_format": "codex-rollout"},
+                  {"tokens_in": 100, "cache_read": 60, "cache_write": 10,
+                   "total_tokens": 120, "usage_events": 1}, "2026-11-01T01:00:00")
+    own = cv.owned_stats(vault)
+    assert own["cache_hit_rate"] == round(150 / 200, 3)
+    assert own["cache_hit_rate"] <= 1.0
 
 
 def test_owned_stats_dedup_cumulative(isolated, monkeypatch):
@@ -608,6 +646,52 @@ def test_brief_generation(isolated, tmp_path):
     assert "precise" not in brief and r["applied"] is False      # 简报不写真实会话目录
 
 
+def test_brief_stop_point_prefers_last_assistant_output(isolated, tmp_path):
+    """回归 (2026-11-02 审查 #5): 原生 Codex/Claude exporter 的普通 assistant 消息是
+    text 块 (role=assistant), 停点检索曾只认 agent_message → 明明有进展文本,
+    简报却写"会话中无 assistant 文本输出"。"""
+    _, vault = isolated
+    env = cv.build_envelope({"capture": {"agent": "claude-code", "cwd": "D:\\proj",
+                                         "completeness": "full"},
+                             "conversation": [
+                                 {"type": "text", "role": "user", "content": "继续修 bug", "ts": ""},
+                                 {"type": "text", "role": "assistant",
+                                  "content": "已定位空指针, 修复已提交", "ts": ""}],
+                             "stats": cv.zero_stats()})
+    sid = cv.snapshot_id(env)
+    (vault / "snapshots").mkdir(exist_ok=True)
+    cv.atomic_write_text(vault / "snapshots" / f"{sid}.json", json.dumps(env, ensure_ascii=False))
+    r = cv.do_import(vault, sid, "markdown", apply=False)
+    brief = Path(r["dest"]).read_text(encoding="utf-8")
+    stop = brief.split("## 它停在哪儿", 1)[1].split("## 最近动作", 1)[0]
+    assert "已定位空指针, 修复已提交" in stop                      # 停点 = 最后一条 assistant 文本
+    assert "会话中无 assistant 文本输出" not in stop
+    # agent_message 仍是合法停点 (多 agent 场景)
+    env["conversation"].append({"type": "agent_message", "author": "a",
+                                "recipient": "b", "content": "移交给 b 处理", "ts": ""})
+    sid2 = cv.snapshot_id(env)
+    cv.atomic_write_text(vault / "snapshots" / f"{sid2}.json", json.dumps(env, ensure_ascii=False))
+    stop2 = Path(cv.do_import(vault, sid2, "markdown", apply=False)["dest"]).read_text("utf-8")
+    stop2 = stop2.split("## 它停在哪儿", 1)[1].split("## 最近动作", 1)[0]
+    assert "移交给 b 处理" in stop2
+
+
+def test_do_import_catchable_errors(isolated):
+    """回归 (2026-11-02 审查 #8): 领域层抛可捕获异常 (SnapshotNotFound/BadMigrateTarget),
+    不再是 SystemExit (BaseException) — HTTP 层才能映射 404/400, CLI 在 main() 统一转退出。"""
+    _, vault = isolated
+    with pytest.raises(cv.SnapshotNotFound):
+        cv.do_import(vault, "cv_not0000000000000000000000000000000", "codex", False)
+    with pytest.raises(cv.SnapshotNotFound):
+        cv.load_snapshot(vault, "cv_not0000000000000000000000000000000")
+    with pytest.raises(cv.BadMigrateTarget):
+        cv.do_import(vault, "cv_x", "nosuchtarget", False)
+    try:
+        cv.do_import(vault, "cv_not0000000000000000000000000000000", "codex", False)
+    except Exception as e:  # SystemExit 不是 Exception 子类 — 这正是当年 HTTP 断连的根因
+        assert not isinstance(e, SystemExit)
+
+
 def test_serve_token_auth(isolated, tmp_path):
     """鉴权档: 无凭据 401; ?token= 首访 200+Set-Cookie; cookie 复访 200; 错 token 401。"""
     _, vault = isolated
@@ -688,9 +772,45 @@ def test_migrate_unknown_sid_stable_json(isolated, tmp_path):
         assert code == 400
         code, _ = _req(port, "GET", "/snapshot?id=cv_0000000000000000")
         assert code == 404
+        # 未知迁移目标 → 400 (BadMigrateTarget), 不落通用 500
+        code, r = _req(port, "POST", "/migrate",
+                       body=json.dumps({"id": "cv_0000000000000000", "target": "nosuch",
+                                        "apply": False}),
+                       headers={"Content-Type": "application/json"})
+        assert code == 404  # 先撞存在性 404; 换真实快照验证 target 分支
+        env = make_env(tmp_path)
+        sid = cv.snapshot_id(env)
+        (vault / "snapshots").mkdir(exist_ok=True)
+        cv.atomic_write_text(vault / "snapshots" / f"{sid}.json", json.dumps(env, ensure_ascii=False))
+        code, r = _req(port, "POST", "/migrate",
+                       body=json.dumps({"id": sid, "target": "nosuch", "apply": False}),
+                       headers={"Content-Type": "application/json"})
+        assert code == 400 and "未知迁移目标" in r["error"]
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_serve_log_redacts_token(isolated):
+    """回归 (2026-11-02 审查 #3 附带): ?token= 随 requestline 落 serve_http.log,
+    鉴权档下必须脱敏为 token=***, 明文不得进日志。"""
+    import re as _re
+    _, vault = isolated
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    conn.commit()
+    srv, _ = cv.build_vault_server(vault, 0, token="sekret-value")
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        code, _ = _req(port, "GET", "/healthz?token=sekret-value")
+        assert code == 200
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    log = (vault / "serve_http.log").read_text(encoding="utf-8")
+    assert "token=***" in log
+    assert "sekret-value" not in log
 
 
 def _mk_snap(vault: Path, sid: str, first_user: str, blocks: int = 3):
