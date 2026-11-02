@@ -60,7 +60,8 @@ CREATE TABLE IF NOT EXISTS snapshots(
   provider TEXT, model TEXT, session_ref TEXT, originator TEXT,
   completeness TEXT, tokens_in INTEGER, tokens_out INTEGER, reasoning_tokens INTEGER,
   cache_read INTEGER, cache_write INTEGER, total_tokens INTEGER, cost_usd REAL,
-  usage_events INTEGER, blocks_total INTEGER, blocks_dropped INTEGER, path TEXT);
+  usage_events INTEGER, blocks_total INTEGER, blocks_dropped INTEGER, path TEXT,
+  parent_snapshot TEXT);
 CREATE TABLE IF NOT EXISTS ledger_events(
   id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, occurred_at TEXT, kind TEXT,
   model TEXT, provider TEXT, client TEXT, tokens_saved INTEGER, cost_usd REAL,
@@ -84,6 +85,13 @@ def db(vault: Path) -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode=WAL")
     except sqlite3.OperationalError:
         pass  # 其他连接持锁时切不上就下次再切, 不阻塞本次
+    try:
+        # 索引层派生数据 (快照文件本身不变): sync 增量演进把新版本挂到 parent 上,
+        # owned_stats 据此只数每条演进链的叶子, 累计快照的用量不再逐版本重复累计
+        conn.execute("ALTER TABLE snapshots ADD COLUMN parent_snapshot TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # 列已存在 = 老库迁移完成
     return conn
 
 
@@ -347,18 +355,18 @@ def build_envelope(exported: dict) -> dict:
 
 SNAP_COLS = ("id,created_at,agent,source_format,provider,model,session_ref,originator,"
              "completeness,tokens_in,tokens_out,reasoning_tokens,cache_read,cache_write,"
-             "total_tokens,cost_usd,usage_events,blocks_total,blocks_dropped,path")
+             "total_tokens,cost_usd,usage_events,blocks_total,blocks_dropped,path,parent_snapshot")
 
 
 def register_snapshot(conn, envelope: dict, sid: str, path: Path):
     c, s = envelope["capture"], envelope["stats"]
     conn.execute(
-        f"INSERT OR REPLACE INTO snapshots({SNAP_COLS}) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        f"INSERT OR REPLACE INTO snapshots({SNAP_COLS}) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (sid, envelope["created_at"], c.get("agent"), c.get("source_format"), c.get("provider"),
          c.get("model"), c.get("session_ref"), c.get("originator"), c.get("completeness"),
          s["tokens_in"], s["tokens_out"], s["reasoning_tokens"], s["cache_read"], s["cache_write"],
          s["total_tokens"], s["cost_usd"], s["usage_events"], s["blocks_total"], s["blocks_dropped"],
-         str(path)))
+         str(path), (envelope.get("lineage") or {}).get("parent_snapshot")))
 
 
 def cmd_export(args):
@@ -385,11 +393,20 @@ def cmd_export(args):
     return sid
 
 
+class SnapshotNotFound(LookupError):
+    """快照不存在 — 领域层可捕获错误。此前抛 SystemExit, 它不是 Exception 子类,
+    HTTP 层的 except Exception 接不住, 控制台 /migrate 会直接断连而非返回 404 JSON。"""
+
+
+class BadMigrateTarget(ValueError):
+    """迁移目标不合法 (HTTP 层映射 400; CLI 由 argparse choices 前置拦截)。"""
+
+
 def load_snapshot(args_or_vault, sid: str) -> dict:
     vault = args_or_vault if isinstance(args_or_vault, Path) else vault_dir(args_or_vault)
     p = vault / "snapshots" / f"{sid}.json"
     if not p.exists():
-        raise SystemExit(f"快照不存在: {p}")
+        raise SnapshotNotFound(f"快照不存在: {p}")
     return json.loads(p.read_text(encoding="utf-8"))
 
 
@@ -697,6 +714,8 @@ def blocks_to_brief(env: dict, max_chars: int = 48 * 1024) -> str:
 
 def do_import(vault: Path, sid: str, target: str, apply: bool, strip_thinking=False) -> dict:
     """迁移执行核心 (CLI 与控制台 HTTP 共用)。返回 {lines, dropped, dest, new_sid, applied}。"""
+    if target not in ("markdown", "codex", "claude"):
+        raise BadMigrateTarget(f"未知迁移目标: {target!r} (可选 markdown|codex|claude)")
     env = load_snapshot(vault, sid)
     (vault / "outbox").mkdir(parents=True, exist_ok=True)
     if target == "markdown":  # 交接简报: 可携降级档, 不写真实会话目录, 无 apply 语义
@@ -923,16 +942,25 @@ def cmd_ledger_import_headroom(args):
 
 
 def owned_stats(vault: Path) -> dict:
-    """Vault 自有账本: 全部快照的 token 消耗聚合 (零外部依赖, 人人开箱即有)。
-    与 headroom lifetime (压缩/缓存节省金额) 分轨: 那是通路层增强, 这是资产层自有数据。"""
+    """Vault 自有账本: 快照内嵌 usage 聚合 (零外部依赖, 人人开箱即有)。
+    与 headroom lifetime (压缩/缓存节省金额) 分轨: 那是通路层增强, 这是资产层自有数据。
+
+    口径 (2026-11-02 审查 #1): sync 对同一会话保存多个累计快照 (演进链), 全版本求和会把
+    同一批 usage 逐版本重复累计。用量与 by_agent 只累计 lineage 叶子 (未被任何更新的
+    parent_snapshot 引用 = 每条演进链的当前版本); fork 是独立资产副本, 计自己的叶子。
+      snapshots  — 快照版本总数 (含被演进替代的历史版本)
+      sessions   — 独立会话数 (叶子数; 手动 export 的无 lineage 重复会各自成链, 此口径的诚实上界)"""
     conn = db(vault)
-    r = conn.execute("SELECT COUNT(*) n, COALESCE(SUM(tokens_in),0) i, COALESCE(SUM(tokens_out),0) o,"
-                     " COALESCE(SUM(cache_read),0) cr, COALESCE(SUM(cache_write),0) cw,"
-                     " COALESCE(SUM(total_tokens),0) t FROM snapshots").fetchone()
-    by_agent = conn.execute("SELECT agent, COUNT(*) n, SUM(tokens_in) i FROM snapshots"
-                            " GROUP BY agent ORDER BY i DESC").fetchall()
+    leaf = ("id NOT IN (SELECT parent_snapshot FROM snapshots"
+            " WHERE parent_snapshot IS NOT NULL)")
+    r = conn.execute(f"SELECT COUNT(*) n, COALESCE(SUM(tokens_in),0) i, COALESCE(SUM(tokens_out),0) o,"
+                     f" COALESCE(SUM(cache_read),0) cr, COALESCE(SUM(cache_write),0) cw,"
+                     f" COALESCE(SUM(total_tokens),0) t FROM snapshots WHERE {leaf}").fetchone()
+    by_agent = conn.execute(f"SELECT agent, COUNT(*) n, SUM(tokens_in) i FROM snapshots"
+                            f" WHERE {leaf} GROUP BY agent ORDER BY i DESC").fetchall()
+    versions = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
     hit = (r["cr"] / (r["i"] or 1))
-    return {"snapshots": r["n"], "tokens_in": r["i"], "tokens_out": r["o"],
+    return {"snapshots": versions, "sessions": r["n"], "tokens_in": r["i"], "tokens_out": r["o"],
             "cache_read": r["cr"], "cache_write": r["cw"], "total_tokens": r["t"],
             "cache_hit_rate": round(hit, 3),
             "by_agent": [{"agent": a["agent"], "snapshots": a["n"], "tokens_in": a["i"]}
@@ -971,7 +999,8 @@ def cmd_ledger_stats(args):
               f" · 模型: {', '.join(r['model'] for r in zx[:3])}")
     own = owned_stats(vault_dir(args))
     if own["snapshots"]:
-        print(f"== vault 自有账本 ({own['snapshots']} 快照, 零外部依赖) ==")
+        print(f"== vault 自有账本 ({own['sessions']} 独立会话 / {own['snapshots']} 快照版本,"
+              f" 零外部依赖, 用量按 lineage 叶子去重) ==")
         print(f"  会话累计消耗: 入 {own['tokens_in']:,} · 出 {own['tokens_out']:,} · "
               f"cache 读 {own['cache_read']:,} (命中率 {own['cache_hit_rate']*100:.0f}%)")
         for a in own["by_agent"][:5]:
@@ -1543,6 +1572,13 @@ def cmd_fork(args):
     if args.message:
         env["capture"]["fork_note"] = args.message
     sid = snapshot_id(env)
+    if sid == args.snapshot_id:
+        # lineage (含 fork_of) 不参与内容哈希 (spec §7: 内容寻址 + lineage 指针), 无 fork_note
+        # 的 fork 必与源快照撞 id —— 曾直接 INSERT OR REPLACE 覆盖源行并抹掉其 parent 链接。
+        # fork 的身份 = 内容 + fork_of: 确定性派生, 重复 fork 同源幂等。
+        sid = "cv_" + hashlib.sha256(
+            canonical_bytes(env) + b"|fork_of:" + str(args.snapshot_id).encode()
+        ).hexdigest()[:16]
     out = vault / "snapshots" / f"{sid}.json"
     if out.exists():
         print(f"该分叉已存在 (幂等): {out.name}")
@@ -3631,7 +3667,11 @@ def main(argv=None):
 
 
     args = ap.parse_args(argv)
-    args.func(args)
+    try:
+        args.func(args)
+    except (SnapshotNotFound, BadMigrateTarget) as e:
+        # CLI 边界统一转进程退出 (领域层抛可捕获异常, HTTP 层映射 404/400, 这里兜底)
+        raise SystemExit(str(e))
 
 
 if __name__ == "__main__":

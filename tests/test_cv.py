@@ -317,9 +317,38 @@ def test_owned_stats_zero_external(isolated):
     conn.commit()
     own = cv.owned_stats(vault)
     assert own["snapshots"] == 1
+    assert own["sessions"] == 1
     assert own["tokens_in"] == 100 and own["cache_read"] == 60
     assert own["cache_hit_rate"] == 0.6
     assert own["by_agent"][0]["agent"] == "codex"
+
+
+def test_owned_stats_dedup_cumulative(isolated, monkeypatch):
+    """回归 (2026-11-02 审查 #1): sync 对同一会话保存多个累计快照, owned_stats 曾对
+    全版本求和 → 同一批 usage 逐版本重复累计 (100 变 200)。现在只累计 lineage 叶子。"""
+    home, vault = isolated
+    src = mini_rollout(home / ".codex" / "sessions" / "2026" / "10" / "01")
+    import os as _os
+    from types import SimpleNamespace
+    A = lambda: SimpleNamespace(vault=str(vault), root=None)
+    cv.cmd_sync(A())                                    # v1: input=100, cache_read=60
+    w(src, [json.loads(l) for l in src.read_text(encoding="utf-8").splitlines()]
+      + [{"timestamp": "2026-10-01T03:00:00.000Z", "ordinal": 8, "type": "response_item",
+          "payload": {"type": "message", "id": "msg_9", "role": "user",
+                      "content": [{"type": "input_text", "text": "follow up"}]}}])
+    _os.utime(src)
+    cv.cmd_sync(A())                                    # v2 累计含 v1 全部 usage, parent=v1
+    conn = cv.db(vault)
+    leaf_sid = conn.execute("SELECT snapshot_id FROM sync_sources").fetchone()[0]
+    own = cv.owned_stats(vault)
+    assert own["snapshots"] == 2                        # 版本总数: 诚实包含被替代的历史版本
+    assert own["sessions"] == 1                         # 独立会话 = 1 条演进链
+    assert own["tokens_in"] == 100 and own["cache_read"] == 60   # 只数叶子, 不再 200/120
+    assert own["by_agent"][0]["snapshots"] == 1
+    # fork 是用户主动创建的独立资产副本: 计自己的叶子 (会话 +1, 用量按副本重复)
+    cv.cmd_fork(SimpleNamespace(vault=str(vault), snapshot_id=leaf_sid, message=None))
+    own2 = cv.owned_stats(vault)
+    assert own2["snapshots"] == 3 and own2["sessions"] == 2 and own2["tokens_in"] == 200
 
 
 # ---------------- M3 记忆层 ----------------
