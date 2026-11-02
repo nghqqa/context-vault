@@ -45,10 +45,13 @@ def load_all_snapshots(vault: Path) -> list:
     for f in sorted(snap_dir.glob("cv_*.json")):
         try:
             env = json.loads(f.read_text(encoding="utf-8"))
-            env["_sid"] = f.stem  # 文件名即快照 id (内容寻址)
-            out.append(env)
         except (ValueError, OSError):
             continue
+        if not isinstance(env, dict) or not isinstance(env.get("capture"), dict) \
+                or not isinstance(env.get("stats"), dict) or not isinstance(env.get("conversation"), list):
+            continue  # 可解析但结构不完整: 与热索引一致地跳过, 不让单文件废掉冷路径 (全面测试 M6)
+        env["_sid"] = f.stem  # 文件名即快照 id (内容寻址)
+        out.append(env)
     out.sort(key=lambda e: e.get("created_at", ""), reverse=True)
     return out
 
@@ -60,8 +63,12 @@ def ledger_summary(vault: Path) -> dict:
     conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row
     out = {}
-    row = conn.execute("SELECT tokens_saved, cost_usd, raw FROM ledger_events "
-                       "WHERE source='headroom-lifetime'").fetchone()
+    try:
+        row = conn.execute("SELECT tokens_saved, cost_usd, raw FROM ledger_events "
+                           "WHERE source='headroom-lifetime'").fetchone()
+    except sqlite3.OperationalError:
+        conn.close()
+        return {}  # 零表空库 (曾由只 connect 不建表的 /stats 路径造出): 诚实按无账本处理, 不毒化冷路径
     if row:
         out["lifetime_compression_saved_usd"] = row["cost_usd"]
         out["lifetime_tokens_saved"] = row["tokens_saved"]
@@ -227,6 +234,8 @@ def _via_service(name: str, args_dict: dict):
         if name == "vault_search":
             r = _svc_get(f"/search?q={urllib.parse.quote(args_dict.get('query', ''))}"
                          f"&limit={int(args_dict.get('limit', 5))}")
+            if not r.get("terms"):
+                return "查询词太短"  # 与冷回退同口径: 参数无效不是一次真实搜索的无命中
             if not r["hits"]:
                 return f"未命中: {r['query']} (via 热索引)"
             lines = [f"搜索 '{r['query']}' 命中 {len(r['hits'])} 个快照 (via 热索引):"]
@@ -237,6 +246,8 @@ def _via_service(name: str, args_dict: dict):
         if name == "vault_context":
             r = _svc_get(f"/context?q={urllib.parse.quote(args_dict.get('query', ''))}"
                          f"&limit={int(args_dict.get('limit', 3))}")
+            if not r.get("terms"):
+                return "查询词太短"  # 与冷回退同口径
             if not r["results"]:
                 return f"vault 中无相关上下文: {r['query']}"
             lines = [f"来自 context-vault 的相关历史上下文 (查询: '{r['query']}', via 热索引):"]
@@ -255,11 +266,13 @@ def _via_service(name: str, args_dict: dict):
         if name == "vault_stats":
             r = _svc_get("/stats")["stats"]
             usd = lambda v: f"${v:,.2f}" if isinstance(v, (int, float)) else "-"
+            # 行集与冷路径 t_stats 对齐 (曾漏"历史总输入"一行, 同账本两条路径内容不同)
             return ("token 账本 (context-vault, via 热索引):\n"
                     f"  快照数: {r.get('snapshots', 0)}\n"
                     f"  压缩节省: {r.get('lifetime_tokens_saved', 0):,} tokens = "
                     f"{usd(r.get('lifetime_compression_saved_usd'))}\n"
-                    f"  缓存节省: {usd(r.get('lifetime_cache_saved_usd'))}")
+                    f"  缓存节省: {usd(r.get('lifetime_cache_saved_usd'))}\n"
+                    f"  历史总输入: {r.get('lifetime_total_input_tokens', 0):,} tokens")
     except Exception:
         return None
     return None  # vault_snapshot 等复杂工具直接走本地, 避免双实现漂移
@@ -368,6 +381,10 @@ def main():
     try:  # 中文 Windows 管道默认 GBK, MCP 规范要求 UTF-8
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        # stdin 同样必须 UTF-8: 按 cp936 解码 UTF-8 中文 query 会产生孤立代理字符,
+        # 响应写回 UnicodeEncodeError 直接杀死 server (全面测试 H3); 坏字节替换为
+        # U+FFFD — 乱码 query 顶多搜不到, 不再致命
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
     ap = argparse.ArgumentParser(prog="context-vault-mcp")

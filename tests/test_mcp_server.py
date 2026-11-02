@@ -115,3 +115,26 @@ def test_mcp_hot_cold_equivalence_cjk(tmp_path, monkeypatch):
     cold_miss = mcp_server.dispatch("vault_search", {"query": "联邦学习调度"}, vault)
     assert sid2 in hot_hit and sid2 in cold_hit        # bigram 部分重叠 → 两侧同命中
     assert "未命中" in hot_miss and "未命中" in cold_miss  # 无重叠 → 两侧同未命中
+
+
+def test_short_query_hot_cold_same(tmp_path, monkeypatch):
+    """mcp-6 回归: <2 字符 query 热路径不再把参数无效伪装成"未命中", 两侧同口径。"""
+    vault, _ = mk_vault(tmp_path)
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    conn.commit()
+    srv, _ = cv.build_vault_server(vault, 0)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setattr(mcp_server, "SVC_BASE", f"http://127.0.0.1:{port}")
+        hot = mcp_server.dispatch("vault_search", {"query": "a"}, vault)
+        hot_ctx = mcp_server.dispatch("vault_context", {"query": "a"}, vault)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    monkeypatch.setattr(mcp_server, "SVC_BASE", "http://127.0.0.1:1")
+    cold = mcp_server.dispatch("vault_search", {"query": "a"}, vault)
+    cold_ctx = mcp_server.dispatch("vault_context", {"query": "a"}, vault)
+    assert hot == cold == "查询词太短"
+    assert hot_ctx == cold_ctx == "查询词太短"

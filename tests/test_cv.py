@@ -883,3 +883,330 @@ def test_index_regression_guards(isolated):
     idx2 = cv.VaultIndex(vault, bt)
     assert idx2.stats["cache_load"] == 0 and idx2.stats["full"] == 1
     assert len(idx2.meta) == 1  # bad1 被跳过, good1 在
+
+
+# ---------------- 全面测试回归 (dwfrun-bdea7af6 发现) ----------------
+
+def _mk_chain_rollout(tmp: Path, sid: str) -> Path:
+    """带 token_usage_record 的最小 codex rollout (账本/同步回归用)。"""
+    return w(tmp / f"rollout-2026-11-01T00-00-00-{sid}.jsonl", [
+        {"timestamp": "2026-11-01T00:00:00.000Z", "ordinal": 0, "type": "session_meta",
+         "payload": {"id": sid, "session_id": sid, "timestamp": "2026-11-01T00:00:00.000Z",
+                     "cwd": "D:\\proj", "cli_version": "0.153.4", "source": "exec"}},
+        {"timestamp": "2026-11-01T00:00:01.000Z", "ordinal": 1, "type": "response_item",
+         "payload": {"type": "message", "id": "m1", "role": "user",
+                     "content": [{"type": "input_text", "text": "hello"}]}},
+        {"timestamp": "2026-11-01T00:00:02.000Z", "ordinal": 2, "type": "token_usage_record",
+         "payload": {"turn_id": "t1", "turn_token_usage": {"input_tokens": "100", "output_tokens": "20",
+                                                           "cached_input_tokens": "60",
+                                                           "cache_write_input_tokens": "10",
+                                                           "reasoning_output_tokens": "5",
+                                                           "total_tokens": "120"}}},
+    ])
+
+
+def test_export_idempotent_preserves_chain(isolated):
+    """H1 回归: sync 已成链后 cv export 幂等跳过, 不得用 parent=NULL 的 envelope 覆盖链
+    (旧代码让同一会话 usage 双计, 重新引入 09f90a6 修掉的缺陷)。"""
+    from types import SimpleNamespace
+    import os as _os
+    home, vault = isolated
+    src = _mk_chain_rollout(home / ".codex" / "sessions" / "2026" / "11" / "01",
+                            "11111111-1111-1111-1111-111111111111")
+    sync = lambda: cv.cmd_sync(SimpleNamespace(vault=str(vault), root=None))  # noqa: E731
+    sync()
+    rows = [json.loads(l) for l in src.read_text(encoding="utf-8").splitlines()]
+    rows.append({"timestamp": "2026-11-01T01:00:00.000Z", "ordinal": 3, "type": "response_item",
+                 "payload": {"type": "message", "id": "m2", "role": "user",
+                             "content": [{"type": "input_text", "text": "follow up"}]}})
+    w(src, rows)
+    sync()                                             # 建链 v1→v2
+    own0 = cv.owned_stats(vault)
+    assert own0["sessions"] == 1 and own0["tokens_in"] == 100
+    cv.cmd_export(SimpleNamespace(vault=str(vault), source=str(src), drop_developer=False))
+    own1 = cv.owned_stats(vault)
+    assert own1["sessions"] == 1 and own1["tokens_in"] == 100   # 不再 2/200
+    conn = cv.db(vault)
+    linked = conn.execute("SELECT COUNT(*) n FROM snapshots WHERE parent_snapshot IS NOT NULL").fetchone()["n"]
+    assert linked == 1                                 # 链完好
+
+
+def test_sync_content_unchanged_no_self_parent(isolated):
+    """M2 回归: 仅 mtime 变化 (内容未变) 的二次 sync 不得产生 parent==id 自环
+    (自环会被叶子过滤把会话从账本清零)。"""
+    from types import SimpleNamespace
+    import os as _os
+    home, vault = isolated
+    src = _mk_chain_rollout(home / ".codex" / "sessions" / "2026" / "11" / "01",
+                            "22222222-2222-2222-2222-222222222222")
+    sync = lambda: cv.cmd_sync(SimpleNamespace(vault=str(vault), root=None))  # noqa: E731
+    sync()
+    _os.utime(src, (src.stat().st_atime, src.stat().st_mtime + 5))
+    sync()
+    conn = cv.db(vault)
+    rows = conn.execute("SELECT id, parent_snapshot FROM snapshots").fetchall()
+    assert all(r["parent_snapshot"] != r["id"] for r in rows)     # 无自环
+    own = cv.owned_stats(vault)
+    assert own["sessions"] == 1 and own["tokens_in"] == 100       # 会话未从账本消失
+
+
+def test_headroom_detail_import_idempotent(isolated, monkeypatch):
+    """H2 回归: 重跑 import-headroom, compression 明细与 lifetime 一样幂等, 不再翻倍。"""
+    from types import SimpleNamespace
+    home, vault = isolated
+    head = home / ".headroom"
+    head.mkdir(parents=True, exist_ok=True)
+    w(head / "savings_events.jsonl", [
+        {"v": 1, "ts": "2026-11-01T10:30:27Z", "before": 100, "after": 40, "saved": 60,
+         "cost_usd": 0.03, "model": "gpt-5.6-sol", "client": "codex", "source": "proxy"},
+        {"v": 1, "ts": "2026-11-01T11:00:00Z", "before": 50, "after": 10, "saved": 40,
+         "cost_usd": 0.02, "model": "gpt-5.6-sol", "client": "codex", "source": "proxy"}])
+    (head / "proxy_savings.json").write_text(json.dumps(
+        {"schema_version": "6", "generated_at": "2026-11-01T00:00:00Z",
+         "lifetime": {"tokens_saved": 1000, "compression_savings_usd": 0.5}}), encoding="utf-8")
+    monkeypatch.setattr(cv, "HEADROOM_DIR", head)
+    imp = lambda: cv.cmd_ledger_import_headroom(SimpleNamespace(vault=str(vault)))  # noqa: E731
+    imp()
+    imp()
+    imp()                                              # 连跑三次
+    conn = cv.db(vault)
+    n = conn.execute("SELECT COUNT(*) n, COALESCE(SUM(tokens_saved),0) t FROM ledger_events"
+                     " WHERE kind='compression'").fetchone()
+    assert n["n"] == 2 and n["t"] == 100               # 旧代码 6/300
+
+
+def test_ledger_stats_minimal_lifetime(isolated, monkeypatch):
+    """ledger-7 防御: lifetime 缺 cache_read_tokens/total_input_tokens 键 (写入端存 null)
+    时 cmd_ledger_stats 不再 int(None) TypeError。"""
+    from types import SimpleNamespace
+    home, vault = isolated
+    head = home / ".headroom"
+    head.mkdir(parents=True, exist_ok=True)
+    (head / "proxy_savings.json").write_text(json.dumps(
+        {"lifetime": {"tokens_saved": 1000, "compression_savings_usd": 0.5}}), encoding="utf-8")
+    monkeypatch.setattr(cv, "HEADROOM_DIR", head)
+    cv.cmd_ledger_import_headroom(SimpleNamespace(vault=str(vault)))
+    cv.cmd_ledger_stats(SimpleNamespace(vault=str(vault)))       # 旧代码在此崩溃
+
+
+def test_fork_of_fork_not_swallowed(isolated, capsys):
+    """M4 回归: fork 的 fork 必须产生 fork_of=F1 的新实体, 不被祖先的"已存在"吞掉。"""
+    from types import SimpleNamespace
+    _, vault = isolated
+    env = cv.build_envelope({"capture": {"agent": "codex", "cwd": "D:\\x"},
+                             "conversation": [{"type": "text", "role": "user", "content": "base"}],
+                             "stats": cv.zero_stats()})
+    a_sid = cv.snapshot_id(env)
+    (vault / "snapshots").mkdir(parents=True, exist_ok=True)
+    (vault / "snapshots" / f"{a_sid}.json").write_text(json.dumps(env), encoding="utf-8")
+    fk = lambda sid: cv.cmd_fork(  # noqa: E731
+        SimpleNamespace(vault=str(vault), snapshot_id=sid, message=None))
+    fk(a_sid)
+    f1_sid = capsys.readouterr().out.split("→ ")[1].split("\n")[0].strip()
+    n0 = len(list((vault / "snapshots").glob("cv_*.json")))
+    fk(f1_sid)                                         # 旧代码在此报"已存在"指向 A
+    f2 = [p for p in (vault / "snapshots").glob("cv_*.json")
+          if json.loads(p.read_text(encoding="utf-8")).get("lineage", {}).get("fork_of") == f1_sid]
+    assert len(list((vault / "snapshots").glob("cv_*.json"))) == n0 + 1
+    assert len(f2) == 1
+
+
+def test_export_codex_compaction_replaced_range():
+    """migrate-1 回归: replaced_blocks = 上次压缩边界到当前最后一个会话块 (含端点)。"""
+    import tempfile
+    d = Path(tempfile.mkdtemp())
+    p = w(d / "rollout-c.jsonl", [
+        {"timestamp": "t", "ordinal": 0, "type": "session_meta",
+         "payload": {"session_id": "s", "cwd": "D:\\p"}},
+        {"timestamp": "t", "ordinal": 1, "type": "response_item",
+         "payload": {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": "q1"}]}},
+        {"timestamp": "t", "ordinal": 2, "type": "response_item",
+         "payload": {"type": "message", "role": "assistant",
+                     "content": [{"type": "output_text", "text": "a1"}]}},
+        {"timestamp": "t", "ordinal": 3, "type": "compacted", "payload": {"message": "sum1"}},
+        {"timestamp": "t", "ordinal": 4, "type": "response_item",
+         "payload": {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": "q2"}]}},
+        {"timestamp": "t", "ordinal": 5, "type": "response_item",
+         "payload": {"type": "message", "role": "assistant",
+                     "content": [{"type": "output_text", "text": "a2"}]}},
+        {"timestamp": "t", "ordinal": 6, "type": "compacted", "payload": {"message": "sum2"}}])
+    rb = [b["replaced_blocks"] for b in cv.export_codex(p, False)["conversation"]
+          if b["type"] == "compaction"]
+    assert rb == [[0, 1], [3, 4]]                      # 旧代码 [[0, 0], [0, 2]]
+
+
+def test_blocks_to_codex_last_agent_message():
+    """migrate-2 回归: agent_message 结尾的会话, task_complete.last_agent_message 不再为空。"""
+    env = cv.build_envelope({"capture": {"agent": "codex", "cwd": "C:\\w", "completeness": "full"},
+                             "conversation": [{"type": "agent_message", "author": "a", "recipient": "b",
+                                               "content": "final agent message", "ts": ""}],
+                             "stats": cv.zero_stats()})
+    lines, _, _, _ = cv.blocks_to_codex(env, False)
+    tc = [l for l in lines if l.get("type") == "event_msg"
+          and l.get("payload", {}).get("type") == "task_complete"][0]
+    assert tc["payload"]["last_agent_message"] == "final agent message"
+
+
+def test_owned_stats_ingest_denominator(isolated):
+    """ledger-3 回归: via-smigrate 产物是 Claude 语义 usage, 命中率分母按 Claude 归一。"""
+    _, vault = isolated
+    _register_env(vault, {"agent": "cursor", "source_format": "via-smigrate:cursor"},
+                  {"tokens_in": 10, "cache_read": 90, "cache_write": 0,
+                   "total_tokens": 110, "usage_events": 1}, "2026-11-01T00:00:00")
+    own = cv.owned_stats(vault)
+    assert own["cache_hit_rate"] == 0.9                # 旧代码 9.0 (900%)
+
+
+def test_guard_rejection_drains_body(isolated):
+    """M1 回归: 守卫拒绝的 POST 已先读净 body — 同一 keep-alive 连接的下一条请求完好。"""
+    _, vault = isolated
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    conn.commit()
+    srv, _ = cv.build_vault_server(vault, 0)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        c.request("POST", "/migrate", body=json.dumps({"id": "cv_bad", "target": "codex"}),
+                  headers={"Content-Type": "text/plain"})          # 跨站简单请求 → 403
+        r1 = c.getresponse()
+        r1.read()
+        assert r1.status == 403
+        c.request("GET", "/healthz")                               # 同一 keep-alive 连接
+        r2 = c.getresponse()
+        body2 = r2.read()
+        assert r2.status == 200                                    # 旧代码收到 501/400 垃圾
+        assert json.loads(body2)["status"] == "ok"
+        c.close()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_client_errors_are_400_not_500(isolated):
+    """serve-2 回归: 数值参数坏 / JSON body 坏 → 400 稳定 JSON, 不落 500 兜底回显异常文本。"""
+    _, vault = isolated
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    conn.commit()
+    srv, _ = cv.build_vault_server(vault, 0)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        code, r = _req(port, "GET", "/recent?limit=abc")
+        assert code == 400 and "limit" in r["error"]
+        code, r = _req(port, "POST", "/migrate", body="{not json",
+                       headers={"Content-Type": "application/json"})
+        assert code == 400 and "error" in r
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_stats_dbless_no_poison(isolated, monkeypatch):
+    """M5 回归: 无 vault.db 时 /stats 200 且不留零表空库; 事后冷路径 vault_stats 仍诚实。"""
+    _, vault = isolated
+    (vault / "snapshots").mkdir(parents=True, exist_ok=True)
+    env = cv.build_envelope({"capture": {"agent": "codex", "cwd": "D:\\x"},
+                             "conversation": [{"type": "text", "role": "user", "content": "hi"}],
+                             "stats": cv.zero_stats()})
+    sid = cv.snapshot_id(env)
+    (vault / "snapshots" / f"{sid}.json").write_text(json.dumps(env), encoding="utf-8")
+    srv, _ = cv.build_vault_server(vault, 0)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        code, r = _req(port, "GET", "/stats")
+        assert code == 200                                          # 旧代码 500 + 留零表空库
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    import mcp_server  # noqa: E402
+    monkeypatch.setattr(mcp_server, "SVC_BASE", "http://127.0.0.1:1")
+    out = mcp_server.dispatch("vault_stats", {}, vault)
+    # 修复后 /stats 会把库建齐 (不再留零表毒化), 冷路径两种诚实空态都合法:
+    # 库不存在 → "账本为空"回退; 库为空表 → 全 0 数字。唯独不能再 isError
+    assert "isError" not in out and "no such table" not in out
+    assert "账本为空" in out or "快照数: 0" in out
+
+
+def test_cold_search_skips_malformed_snapshot(isolated, monkeypatch):
+    """M6 回归: 畸形快照文件不废掉冷路径 search/recent (与热索引一致地跳过)。"""
+    import mcp_server  # noqa: E402
+    _, vault = isolated
+    (vault / "snapshots").mkdir(parents=True, exist_ok=True)
+    good = cv.build_envelope({"capture": {"agent": "codex", "cwd": "D:\\x"},
+                              "conversation": [{"type": "text", "role": "user",
+                                                "content": "phantom 迁移方案"}],
+                              "stats": cv.zero_stats()})
+    sid = cv.snapshot_id(good)
+    (vault / "snapshots" / f"{sid}.json").write_text(json.dumps(good), encoding="utf-8")
+    (vault / "snapshots" / "cv_malformed000001.json").write_text(
+        json.dumps({"conversation": [{"type": "text", "role": "user", "content": "phantom 迁移"}]}),
+        encoding="utf-8")
+    monkeypatch.setattr(mcp_server, "SVC_BASE", "http://127.0.0.1:1")
+    out = mcp_server.dispatch("vault_search", {"query": "phantom"}, vault)
+    assert sid in out and "isError" not in out
+    out2 = mcp_server.dispatch("vault_recent", {"limit": 5}, vault)
+    assert sid in out2
+
+
+def test_search_tie_hot_cold_same_order(isolated, monkeypatch):
+    """M7 回归: 得分并列时冷热返回同一快照 (limit 截断边界命中集一致, 不随哈希种子漂移)。"""
+    import mcp_server  # noqa: E402
+    _, vault = isolated
+    (vault / "snapshots").mkdir(parents=True, exist_ok=True)
+    for fname, cat, text in (("cv_aaaa111111111111.json", "2026-01-01T00:00:00", "alpha here"),
+                             ("cv_bbbb222222222222.json", "2026-02-02T00:00:00", "beta here")):
+        env = cv.build_envelope({"capture": {"agent": "codex", "cwd": "D:\\x"},
+                                 "conversation": [{"type": "text", "role": "user", "content": text}],
+                                 "stats": cv.zero_stats()})
+        env["created_at"] = cat
+        (vault / "snapshots" / fname).write_text(json.dumps(env), encoding="utf-8")
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    conn.commit()
+    srv, _ = cv.build_vault_server(vault, 0)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        code, hot = _req(port, "GET", "/search?q=alpha%20beta&limit=1")
+        assert code == 200
+        hot_sid = hot["hits"][0]["sid"]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    monkeypatch.setattr(mcp_server, "SVC_BASE", "http://127.0.0.1:1")
+    cold = mcp_server.dispatch("vault_search", {"query": "alpha beta", "limit": 1}, vault)
+    assert hot_sid in cold
+
+
+def test_zcode_subsecond_update_syncs(isolated, monkeypatch, tmp_path):
+    """ledger-8 回归: zcode 水位严格前进 — 秒内的新消息增量不再被 <1s 容差吞掉。"""
+    import sqlite3 as _s
+    from types import SimpleNamespace
+    _, vault = isolated
+    zdb_p = tmp_path / "zcode.sqlite"
+    db = _s.connect(zdb_p)
+    db.executescript("""CREATE TABLE session(id TEXT, directory TEXT, title TEXT, time_updated INTEGER,
+        time_deleted INTEGER, time_created INTEGER);
+        CREATE TABLE message(id TEXT, session_id TEXT, data TEXT, time_created INTEGER, sequence INTEGER);
+        CREATE TABLE part(id TEXT, message_id TEXT, session_id TEXT, data TEXT, sequence INTEGER);""")
+    db.execute("INSERT INTO session VALUES('s1','D:\\p',NULL,1000,NULL,1000)")
+    db.execute("INSERT INTO message VALUES('m1','s1',?,900,1)", (json.dumps({"role": "user"}),))
+    db.execute("INSERT INTO part VALUES('p1','m1','s1',?,1)",
+               (json.dumps({"type": "text", "text": "第一句"}),))
+    db.commit()
+    monkeypatch.setattr(cv, "ZCODE_DB", zdb_p)
+    sync = lambda: cv.cmd_sync(SimpleNamespace(vault=str(vault), root=None))  # noqa: E731
+    sync()
+    db.execute("INSERT INTO part VALUES('p2','m1','s1',?,2)",
+               (json.dumps({"type": "text", "text": "秒回"}),))
+    db.execute("UPDATE session SET time_updated=1500 WHERE id='s1'")   # 仅 +500ms
+    db.commit()
+    sync()                                             # 旧代码: 0.5s < 1s 容差 → "秒回"永久丢失
+    snaps = sorted((vault / "snapshots").glob("cv_*.json"))
+    assert any("秒回" in p.read_text(encoding="utf-8") for p in snaps)

@@ -195,8 +195,11 @@ def export_codex(path: Path, drop_developer: bool) -> dict:
         elif t == "token_usage_record":
             turn_usage[payload.get("turn_id")] = payload.get("turn_token_usage") or payload.get("usage") or {}
         elif t == "compacted":
+            # replaced_blocks = 上次压缩边界之后到当前最后一个会话块 (含端点) —
+            # 旧算式 [0, max(pending_conv_idx-1,0)] 首压缩恒 [0,0]、后续漏掉两压缩之间的块
             blocks.append({"type": "compaction", "summary": (payload.get("message") or "")[:2000],
-                           "replaced_blocks": [0, max(pending_conv_idx - 1, 0)], "ts": ts})
+                           "replaced_blocks": [pending_conv_idx, max(len(blocks) - 1, pending_conv_idx)],
+                           "ts": ts})
             pending_conv_idx = len(blocks)
         elif t == "response_item":
             pt = payload.get("type")
@@ -380,15 +383,20 @@ def cmd_export(args):
     vault = vault_dir(args)
     (vault / "snapshots").mkdir(parents=True, exist_ok=True)
     out = vault / "snapshots" / f"{sid}.json"
+    conn = db(vault)
+    conn.executescript(SCHEMA)
     if out.exists():
         print(f"已存在 (幂等跳过): {out.name}")
+        if conn.execute("SELECT 1 FROM snapshots WHERE id=?", (sid,)).fetchone() is None:
+            # 库里没这行 (如 vault.db 重建过): 用磁盘文件注册 — 它的 lineage 可能带 sync 挂的 parent
+            register_snapshot(conn, json.loads(out.read_text(encoding="utf-8")), sid, out)
+        # 库里已有则不重注册: INSERT OR REPLACE 会用 parent=None 的新 envelope 覆盖 sync
+        # 挂好的 parent_snapshot, 演进链断裂后同会话 usage 双计 (全面测试 H1 的回归)
     else:
         atomic_write_text(out, json.dumps(envelope, ensure_ascii=False, indent=1))
         s = exported["stats"]
         print(f"已导出 {out.name}  格式={fmt}  块={s['blocks_total']}  入token={s['tokens_in']}  cache读={s['cache_read']}")
-    conn = db(vault)
-    conn.executescript(SCHEMA)
-    register_snapshot(conn, envelope, sid, out)
+        register_snapshot(conn, envelope, sid, out)
     conn.commit()
     return sid
 
@@ -577,6 +585,7 @@ def blocks_to_codex(env: dict, strip_thinking: bool) -> tuple:
             emit({"type": "response_item", "payload": {"type": "function_call_output",
                   "id": f"fco_{uuid.uuid4()}", "call_id": b["call_id"], "output": b["content"]}})
         elif bt == "agent_message":
+            last_assistant = b["content"]  # task_complete.last_agent_message 与 text 分支同权 (B05 同源)
             emit({"type": "response_item", "payload": {"type": "message", "id": f"msg_{uuid.uuid4()}",
                   "role": "assistant", "content": [{"type": "output_text",
                   "text": f"[{b.get('author')} → {b.get('recipient')}] {b['content']}"}]}})
@@ -915,12 +924,16 @@ def cmd_ledger_import_headroom(args):
         for obj in iter_jsonl(se):
             if obj.get("v") != 1:
                 continue
+            raw = json.dumps(obj, ensure_ascii=False)
+            dup = conn.execute("SELECT 1 FROM ledger_events WHERE source='headroom-savings' AND raw=?",
+                               (raw,)).fetchone()
+            if dup:
+                continue  # 明细幂等: 重跑导入不翻倍 (lifetime 侧本就先删后插; 全面测试 H2)
             conn.execute("INSERT INTO ledger_events(source,occurred_at,kind,model,provider,client,"
                          "tokens_saved,cost_usd,snapshot_id,raw) VALUES(?,?,?,?,?,?,?,?,?,?)",
                          ("headroom-savings", obj.get("ts"), "compression",
                           obj.get("model"), obj.get("source"), obj.get("client"),
-                          int(obj.get("saved", 0)), float(obj.get("cost_usd", 0)), None,
-                          json.dumps(obj, ensure_ascii=False)))
+                          int(obj.get("saved", 0)), float(obj.get("cost_usd", 0)), None, raw))
             n1 += 1
     # 2) 汇总: proxy_savings.json lifetime + by_model (kind=summary, 幂等: 先删旧 summary)
     ps = HEADROOM_DIR / "proxy_savings.json"
@@ -953,6 +966,11 @@ def owned_stats(vault: Path) -> dict:
       snapshots  — 快照版本总数 (含被演进替代的历史版本)
       sessions   — 独立会话数 (叶子数; 手动 export 的无 lineage 重复会各自成链, 此口径的诚实上界)"""
     conn = db(vault)
+    try:  # 只 connect 不建表的调用路径 (如 /stats 直查) 曾留下零表空库毒化冷路径 — 这里兜底建表
+        conn.executescript(SCHEMA)
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
     leaf = ("id NOT IN (SELECT parent_snapshot FROM snapshots"
             " WHERE parent_snapshot IS NOT NULL)")
     r = conn.execute(f"SELECT COUNT(*) n, COALESCE(SUM(tokens_in),0) i, COALESCE(SUM(tokens_out),0) o,"
@@ -967,7 +985,8 @@ def owned_stats(vault: Path) -> dict:
     per_fmt = conn.execute(f"SELECT source_format, COALESCE(SUM(tokens_in),0) i,"
                            f" COALESCE(SUM(cache_read),0) cr, COALESCE(SUM(cache_write),0) cw"
                            f" FROM snapshots WHERE {leaf} GROUP BY source_format").fetchall()
-    denom = sum((r["i"] + r["cr"] + r["cw"]) if r["source_format"] == "claude-projects" else r["i"]
+    denom = sum((r["i"] + r["cr"] + r["cw"]) if (r["source_format"] == "claude-projects"
+                 or (r["source_format"] or "").startswith("via-smigrate")) else r["i"]
                 for r in per_fmt)
     hit = (r["cr"] / denom) if denom else 0.0
     return {"snapshots": versions, "sessions": r["n"], "tokens_in": r["i"], "tokens_out": r["o"],
@@ -990,8 +1009,8 @@ def cmd_ledger_stats(args):
         raw = json.loads(conn.execute("SELECT raw FROM ledger_events WHERE source='headroom-lifetime'").fetchone()[0])
         print("== lifetime (headroom 通路层累计) ==")
         print(f"  压缩节省: {row['tokens_saved']:,} tokens = {fmt_usd(row['cost_usd'])}")
-        print(f"  缓存节省: {int(raw.get('cache_read_tokens', 0)):,} cache-read tokens = {fmt_usd(raw.get('cache_savings_usd'))}")
-        print(f"  总输入:   {int(raw.get('total_input_tokens', 0)):,} tokens = {fmt_usd(raw.get('total_input_cost_usd'))}")
+        print(f"  缓存节省: {int(raw.get('cache_read_tokens') or 0):,} cache-read tokens = {fmt_usd(raw.get('cache_savings_usd'))}")
+        print(f"  总输入:   {int(raw.get('total_input_tokens') or 0):,} tokens = {fmt_usd(raw.get('total_input_cost_usd'))}")
     rows = conn.execute("SELECT model, COUNT(*) n, SUM(tokens_saved) t, SUM(cost_usd) c "
                         "FROM ledger_events WHERE kind='compression' GROUP BY model "
                         "ORDER BY c DESC LIMIT 10").fetchall()
@@ -1209,9 +1228,19 @@ def sync_one(conn, vault: Path, path: Path) -> str:
     envelope = build_envelope(exported)
     if exported["stats"]["blocks_total"] == 0:
         return "empty"  # 辅助文件/空会话不入库
-    if row and row["snapshot_id"]:
-        envelope["lineage"]["parent_snapshot"] = row["snapshot_id"]  # 同源演进 → 会话树
     sid = snapshot_id(envelope)
+    if row and row["snapshot_id"]:
+        if row["snapshot_id"] == sid:
+            # 内容寻址未变 (仅 mtime 抖动/追加导出器忽略的辅助行): 链不推进, 只推水位 —
+            # 先挂 parent 再算 sid 会得到 parent==id 自环, 叶子过滤把会话从账本清零
+            out = vault / "snapshots" / f"{sid}.json"
+            if not out.exists():  # 快照文件丢了 (如手删): 重新落盘, 无链可挂
+                atomic_write_text(out, json.dumps(envelope, ensure_ascii=False, indent=1))
+                register_snapshot(conn, envelope, sid, out)
+            conn.execute("INSERT OR REPLACE INTO sync_sources(path,mtime,size,snapshot_id,synced_at)"
+                         " VALUES(?,?,?,?,?)", (str(path), st.st_mtime, st.st_size, sid, now_iso()))
+            return "skip"
+        envelope["lineage"]["parent_snapshot"] = row["snapshot_id"]  # 同源演进 → 会话树
     out = vault / "snapshots" / f"{sid}.json"
     if not out.exists():
         atomic_write_text(out, json.dumps(envelope, ensure_ascii=False, indent=1))
@@ -1297,8 +1326,8 @@ def _sync_zcode_db(conn, vault: Path) -> tuple:
         mtime = (srow["time_updated"] or 0) / 1000
         prev = conn.execute("SELECT mtime, snapshot_id FROM sync_sources WHERE path=?",
                             (key,)).fetchone()
-        if prev and abs(prev["mtime"] - mtime) < 1:
-            continue
+        if prev and mtime <= prev["mtime"]:
+            continue  # 水位必须严格前进 (旧的 <1s 容差会吞掉秒内新消息的增量)
         try:
             exported = export_zcode_session(db_conn, srow)
         except Exception:
@@ -1306,9 +1335,14 @@ def _sync_zcode_db(conn, vault: Path) -> tuple:
         if exported["stats"]["blocks_total"] == 0:
             continue
         envelope = build_envelope(exported)
-        if prev and prev["snapshot_id"]:
-            envelope["lineage"]["parent_snapshot"] = prev["snapshot_id"]
         sid = snapshot_id(envelope)
+        if prev and prev["snapshot_id"]:
+            if prev["snapshot_id"] == sid:
+                # 内容未变仅 time_updated 前进: 只推水位, 不挂 parent (自环会把会话从账本清零)
+                conn.execute("INSERT OR REPLACE INTO sync_sources(path,mtime,size,snapshot_id,synced_at)"
+                             " VALUES(?,?,?,?,?)", (key, mtime, 0, sid, now_iso()))
+                continue
+            envelope["lineage"]["parent_snapshot"] = prev["snapshot_id"]
         out = vault / "snapshots" / f"{sid}.json"
         if not out.exists():
             atomic_write_text(out, json.dumps(envelope, ensure_ascii=False, indent=1))
@@ -1583,14 +1617,20 @@ def cmd_fork(args):
     if args.message:
         env["capture"]["fork_note"] = args.message
     sid = snapshot_id(env)
-    if sid == args.snapshot_id:
-        # lineage (含 fork_of) 不参与内容哈希 (spec §7: 内容寻址 + lineage 指针), 无 fork_note
-        # 的 fork 必与源快照撞 id —— 曾直接 INSERT OR REPLACE 覆盖源行并抹掉其 parent 链接。
-        # fork 的身份 = 内容 + fork_of: 确定性派生, 重复 fork 同源幂等。
-        sid = "cv_" + hashlib.sha256(
-            canonical_bytes(env) + b"|fork_of:" + str(args.snapshot_id).encode()
-        ).hexdigest()[:16]
     out = vault / "snapshots" / f"{sid}.json"
+    if out.exists():
+        try:
+            existing_fork_of = (json.loads(out.read_text(encoding="utf-8")).get("lineage") or {}).get("fork_of")
+        except (ValueError, OSError):
+            existing_fork_of = None
+        if existing_fork_of != args.snapshot_id:
+            # lineage (含 fork_of) 不参与内容哈希 (spec §7): 同内容 fork 会撞祖先或其他 fork,
+            # fork 的 fork 曾被"已存在"静默吞掉 (全面测试 M4)。fork 的身份 = 内容 + fork_of,
+            # 撞到非本源实体就确定性派生; 重复 fork 同源仍幂等
+            sid = "cv_" + hashlib.sha256(
+                canonical_bytes(env) + b"|fork_of:" + str(args.snapshot_id).encode()
+            ).hexdigest()[:16]
+            out = vault / "snapshots" / f"{sid}.json"
     if out.exists():
         print(f"该分叉已存在 (幂等): {out.name}")
     else:
@@ -2208,7 +2248,12 @@ class VaultIndex:
     def _scan(self):
         """(指纹, {stem: file}, {stem: mtime}) — 一次 glob 供指纹与差分共用。"""
         files = {f.stem: f for f in sorted((self.vault / "snapshots").glob("cv_*.json"))}
-        mtimes = {sid: int(f.stat().st_mtime) for sid, f in files.items()}
+        mtimes = {}
+        for sid, f in files.items():
+            try:
+                mtimes[sid] = int(f.stat().st_mtime)
+            except OSError:
+                continue  # glob 与 stat 之间被删: 本轮按不存在处理, 存活即下轮增量追赶 (全面测试 M9)
         fp = hashlib.sha256("|".join(f"{sid}:{m}" for sid, m in sorted(mtimes.items())).encode()).hexdigest()
         return fp, files, mtimes
 
@@ -2235,7 +2280,10 @@ class VaultIndex:
         meta[sid] = meta_row
         sid_code = len(sids) << self._BLOCK_BITS
         sids.append(sid)
-        mtimes[sid] = int(f.stat().st_mtime)
+        try:
+            mtimes[sid] = int(f.stat().st_mtime)
+        except OSError:
+            mtimes[sid] = 0  # 解析期间被删: 内容已读入照常入索引, 下轮指纹自然剔除 (M9 同族)
         for i, b in enumerate(conv):
             if not isinstance(b, dict):
                 continue
@@ -2360,9 +2408,14 @@ class VaultIndex:
         for t in set(terms):  # 与冷回退 score_blocks 同语义: 每词项每块只计 1 分
             for v in index.get(t, ()):
                 sc[sids[v >> self._BLOCK_BITS]] += 1
+        # 并列得分必须与冷回退同序 (冷: created_at 倒序稳定, 同 created_at 按文件序) —
+        # most_common 的插入序受哈希种子影响, limit 截断边界曾冷热命中不同 (全面测试 M7)
+        pairs = sorted(sc.items())
+        pairs.sort(key=lambda kv: meta[kv[0]].get("created_at") or "", reverse=True)
+        pairs.sort(key=lambda kv: -kv[1])
         return {"query": query, "terms": terms,
                 "hits": [{"sid": sid, "score": n, **meta[sid]}
-                         for sid, n in sc.most_common(limit)]}
+                         for sid, n in pairs[:limit]]}
 
     def context(self, query: str, limit: int) -> dict:
         from collections import Counter
@@ -2372,8 +2425,11 @@ class VaultIndex:
         for t in set(terms):  # 与冷回退 score_blocks 同语义: 每 (词项, 块) 计 1 分
             for v in index.get(t, ()):
                 pairs[(sids[v >> self._BLOCK_BITS], v & self._BLOCK_MASK)] += 1
+        ordered = sorted(pairs.items(), key=lambda kv: kv[0])            # (sid, 块号) 升序兜底
+        ordered.sort(key=lambda kv: meta[kv[0][0]].get("created_at") or "", reverse=True)
+        ordered.sort(key=lambda kv: -kv[1])                              # 得分降序 (稳定)
         out, seen = [], set()
-        for (sid, i), n in pairs.most_common():
+        for (sid, i), n in ordered:
             if len(out) >= limit:
                 break
             if sid in seen:
@@ -2389,7 +2445,7 @@ class VaultIndex:
             out.append({"sid": sid, "block": i, "role": b.get("role") or b["type"],
                         "score": n, "excerpt": text[start:start + 400],
                         "cwd": meta[sid].get("cwd")})
-        return {"query": query, "results": out}
+        return {"query": query, "terms": terms, "results": out}
 
 
 CONSOLE_HTML = r"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
@@ -2516,7 +2572,8 @@ td.mono{font-family:var(--mono);font-size:var(--fs-sm)}
 .pill.warn{color:var(--warn);background:var(--warn-bg)}
 .empty{padding:32px 20px;text-align:center;color:var(--ink-3);font-size:13px;line-height:1.9}
 .empty code,.hint code{font-family:var(--mono);font-size:var(--fs-xs);color:var(--ink-2);
-  background:var(--bg-subtle);border:1px solid var(--line-soft);padding:1px 6px;border-radius:5px}
+  background:var(--bg-subtle);border:1px solid var(--line-soft);padding:1px 6px;border-radius:5px;
+  overflow-wrap:anywhere}  /* 空态里的长环境变量示例曾把 380px 视口撑到 681px (全面测试 console-3) */
 .empty .btn{margin-top:12px}
 .skel{height:13px;border-radius:5px;background:linear-gradient(90deg,var(--bg-inset) 25%,var(--line-soft) 50%,var(--bg-inset) 75%);
   background-size:200% 100%;animation:shimmer 1.3s linear infinite;margin:10px 0}
@@ -2543,6 +2600,7 @@ input[type=search],select{background:var(--bg-surface);border:1px solid var(--li
 input[type=search]::placeholder{color:var(--ink-3)}
 input[type=search]:focus,select:focus{border-color:var(--acc)}
 select{appearance:none;-webkit-appearance:none;padding-right:30px;cursor:pointer;
+  min-width:0;  /* option 文本不可断行, 无此限曾把 380px 视口撑爆 (全面测试 M11 复核补充) */
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236e747b' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   background-repeat:no-repeat;background-position:right 10px center}
 
@@ -2745,8 +2803,8 @@ details.card .card-b{border-top:1px solid var(--line-soft)}
   .topbar{padding:0 12px;gap:10px}
   .topbar h1{display:none}
   .gsearch{max-width:none}
-  .kpi-band,.quick-row,.mig-steps{grid-template-columns:1fr}
-  .ov-grid{grid-template-columns:1fr}
+  .kpi-band,.quick-row,.mig-steps{grid-template-columns:minmax(0,1fr)}
+  .ov-grid{grid-template-columns:minmax(0,1fr)}  /* 裸 1fr 的 min-content 曾撑爆窄视口整页 (全面测试 M10/M11) */
   .tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
   .tbl-wrap table{min-width:640px}
   .kv{grid-template-columns:120px minmax(0,1fr)}
@@ -2983,8 +3041,19 @@ function toast(m,err){const t=$("#toast");t.textContent=m;t.classList.toggle("er
   clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove("show"),5200)}
 
 class ApiError extends Error{constructor(msg,code){super(msg);this.code=code}}
+let bootRetry=null;
+function scheduleBoot(){if(bootRetry)return;bootRetry=setTimeout(()=>{bootRetry=null;boot()},4000)}
+function markSvcBad(){ /* 数据域 fetch 失败 = 服务不可达: 状态徽章不得继续撒谎"服务正常" (全面测试 M13) */
+  const s=$("#status");
+  if(!s.classList.contains("err")){s.classList.add("err");
+    s.innerHTML="<span class='pulse'></span>服务异常 · 4s 后重试";}
+  const fd=$("#foot-dot");if(fd)fd.className="dot err";
+  const fh=$("#foot-health");if(fh)fh.textContent="未连接";
+  scheduleBoot();
+}
 async function api(p,opt){
-  const r=await fetch(p,opt);
+  let r;
+  try{r=await fetch(p,opt)}catch(e){markSvcBad();throw e}
   if(!r.ok){
     const j=await r.json().catch(()=>({}));
     throw new ApiError(j.error||("HTTP "+r.status),r.status);
@@ -3104,7 +3173,7 @@ async function boot(){
       s.innerHTML="<span class='pulse'></span>服务异常 · 4s 后重试";}
     $("#foot-dot").className="dot err";
     $("#foot-health").textContent=e&&e.code===401?"需要鉴权":"未连接";
-    setTimeout(boot,4000);  /* 常驻重启/部署窗口期自动恢复 */
+    scheduleBoot();  /* 常驻重启/部署窗口期自动恢复 (scheduleBoot 去重, 不与 api 侧失败双开循环) */
   }
 }
 
@@ -3330,7 +3399,8 @@ function closeDrawer(){
   if(!drawerOpen)return;drawerOpen=false;
   const d=$("#drawer"),b=$("#backdrop");
   d.classList.remove("show");b.classList.remove("show");
-  setTimeout(()=>{d.hidden=true;b.hidden=true},220);
+  setTimeout(()=>{if(drawerOpen)return;  /* 关后 220ms 内已重开: 旧定时器不得把开着抽屉藏掉 (曾卡死 drawerOpen, 全面测试 M12) */
+    d.hidden=true;b.hidden=true},220);
   if(lastFocus&&lastFocus.focus)lastFocus.focus();
 }
 document.addEventListener("keydown",e=>{
@@ -3387,8 +3457,13 @@ const migSeq=seqGuard(null);
 let migApply=false,migLastPreview=null;
 
 async function fillMig(){
-  let d={rows:[]};
-  try{d=await api("/recent?limit=50&offset=0")}catch(e){}
+  let d=null;
+  try{d=await api("/recent?limit=50&offset=0")}
+  catch(e){ /* 网络失败不得谎报"vault 为空", 也不置 filled — 下次进分区自动重拉 (全面测试 M14) */
+    $("#mig-sid").innerHTML='<option value="">加载失败 — 服务异常</option>';
+    $("#mig-src-meta").innerHTML="<span class='hint'>加载失败: "+esc(String(e&&e.message||e))+"</span>";
+    $("#mig-preview").innerHTML='<div class="mig-idle">快照列表加载失败 — 服务恢复后重进本页重试。</div>';
+    return}
   const rows=d.rows||[];
   const sel=$("#mig-sid");
   sel.dataset.filled="1";
@@ -3760,17 +3835,27 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     return self._json(audit_summary_and_timeline(
                         vault, q.get("since", ""), "all"))
                 if u.path == "/memory":
+                    try:
+                        mlim = int(q.get("limit", 8))
+                    except ValueError:
+                        return self._json({"error": "invalid limit: 需要整数"}, 400)
                     return self._json({"query": q.get("q", ""),
-                                       "memories": memory_search_api(vault, q.get("q", ""),
-                                                                     int(q.get("limit", 8)))})
+                                       "memories": memory_search_api(vault, q.get("q", ""), mlim)})
                 if u.path == "/probe_events":
                     conn = db(vault)  # ThreadingHTTPServer 每请求短连接; 显式关闭归还 WAL 句柄
+                    try:
+                        plim = int(q.get("limit", 100))
+                    except ValueError:
+                        conn.close()
+                        return self._json({"error": "invalid limit: 需要整数"}, 400)
                     rows = conn.execute("SELECT ts,profile,status,http_code,latency_ms,models,missing_models"
                                         " FROM probe_events ORDER BY id DESC LIMIT ?",
-                                        (int(q.get("limit", 100)),)).fetchall()
+                                        (plim,)).fetchall()
+                    conn.close()
                     return self._json([dict(r) for r in rows])
                 if u.path == "/ledger":
                     conn = db(vault)
+                    conn.executescript(SCHEMA)  # 只 connect 不建表会留零表空库毒化冷路径 (全面测试 M5)
                     try:
                         mem_n = conn.execute("SELECT COUNT(*) n FROM memory_items").fetchone()["n"]
                     except sqlite3.OperationalError:
@@ -3782,8 +3867,8 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                             pj = json.loads(prices_p.read_text(encoding="utf-8"))
                             prices = {m: v for m, v in pj.items()
                                       if isinstance(v, dict) and "input" in v and "output" in v}
-                        except (ValueError, AttributeError):
-                            pass
+                        except (ValueError, AttributeError, OSError):
+                            pass  # 非法 JSON/顶层非 dict/prices 是目录: 无价目诚实显示, 不 500
                     zcode_usage = {}
                     zcode_snapshots = 0
                     try:  # 真相源: zcode 主库 model_usage (全量调用); model-io 审计文件仅零头
@@ -3806,9 +3891,14 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                         pass
                     for m, a in zcode_usage.items():
                         pr = prices.get(m)
-                        a["cost"] = (round((a["tin"] * pr["input"] + a["tout"] * pr["output"]
-                                            + a["cr"] * pr.get("cache_read", 0)) / 1e6, 2)
-                                     if pr else None)
+                        if pr is None:
+                            a["cost"] = None
+                            continue
+                        try:  # 值级坏形状 (字符串/null/list) 只损失该模型成本, 不拖垮整个 /ledger
+                            a["cost"] = round((a["tin"] * float(pr["input"]) + a["tout"] * float(pr["output"])
+                                               + a["cr"] * float(pr.get("cache_read") or 0)) / 1e6, 2)
+                        except (TypeError, ValueError):
+                            a["cost"] = None
                     lt = conn.execute("SELECT tokens_saved, cost_usd, raw FROM ledger_events"
                                       " WHERE source='headroom-lifetime'").fetchone()
                     by_model = conn.execute("SELECT model, COUNT(*) n, SUM(tokens_saved) t, SUM(cost_usd) c"
@@ -3850,16 +3940,28 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                                        "no_assistant": env2["capture"].get("completeness") == "no_assistant_text"})
                 if u.path == "/search":
                     idx.rebuild()
-                    return self._json(idx.search(q.get("q", ""), int(q.get("limit", 5))))
+                    try:
+                        lim = int(q.get("limit", 5))
+                    except ValueError:
+                        return self._json({"error": "invalid limit: 需要整数"}, 400)
+                    return self._json(idx.search(q.get("q", ""), lim))
                 if u.path == "/context":
                     idx.rebuild()
-                    return self._json(idx.context(q.get("q", ""), int(q.get("limit", 3))))
+                    try:
+                        lim = int(q.get("limit", 3))
+                    except ValueError:
+                        return self._json({"error": "invalid limit: 需要整数"}, 400)
+                    return self._json(idx.context(q.get("q", ""), lim))
                 if u.path == "/recent":
                     idx.request_rebuild(60)  # 后台单飞重建; 分页总数与徽章同源同新鲜度且秒回
-                    meta, sids = idx._state[1], idx._state[2]  # 单次读取, 换装期间不见撕裂
+                    st = idx._state  # 真正的单次读取: 曾写成两次独立下标, 换装插进中间时 KeyError 500
+                    meta, sids = st[1], st[2]
                     total = len(meta)  # 可列出库存 = 唯一对外口径: 徽章/资产卡/分页同一数字
-                    lim = max(1, min(int(q.get("limit", 5)), 200))
-                    off = max(int(q.get("offset", 0)), 0)
+                    try:
+                        lim = max(1, min(int(q.get("limit", 5)), 200))
+                        off = max(int(q.get("offset", 0)), 0)
+                    except ValueError:
+                        return self._json({"error": "invalid limit/offset: 需要整数"}, 400)
                     desc = q.get("order", "desc") != "asc"
                     # 迭代只追加的 sids 而非 dict.items(): 增量插入并发时 dict 迭代会 RuntimeError
                     pairs = [(sid, meta[sid]) for sid in sids]
@@ -3890,11 +3992,21 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
         def do_POST(self):
             import urllib.parse as _up
             u = _up.urlparse(self.path)
+            # 先按 Content-Length 读净 body 再守卫: 守卫拒绝 (401/403) 若不读 body 就应答,
+            # 残留字节会被 keep-alive 连接的下一轮当成请求行解析, 污染整条连接 (全面测试 M1)
+            try:
+                n = int(self.headers.get("Content-Length", 0) or 0)
+            except ValueError:
+                self._json({"error": "invalid Content-Length"}, 400)
+                return
+            raw = self.rfile.read(n) if n > 0 else b""
             if not self._guard(True):
                 return
             try:
-                n = int(self.headers.get("Content-Length", 0))
-                body = json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
+                try:
+                    body = json.loads(raw.decode("utf-8")) if raw else {}
+                except ValueError:
+                    return self._json({"error": "invalid JSON body"}, 400)  # 客户端错误, 不落 500 兜底
                 if u.path == "/migrate":
                     # 回归: 不存在的 sid 曾让 load_snapshot 抛 SystemExit (BaseException),
                     # 逃过 except Exception 断连无 JSON; 先校验形态与存在性, 稳定 400/404
