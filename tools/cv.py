@@ -2600,7 +2600,7 @@ input[type=search],select{background:var(--bg-surface);border:1px solid var(--li
 input[type=search]::placeholder{color:var(--ink-3)}
 input[type=search]:focus,select:focus{border-color:var(--acc)}
 select{appearance:none;-webkit-appearance:none;padding-right:30px;cursor:pointer;
-  min-width:0;  /* option 文本不可断行, 无此限曾把 380px 视口撑爆 (全面测试 M11 复核补充) */
+  min-width:0;width:100%;max-width:100%;  /* option 文本不可断行, width:auto 曾按文本撑爆窄视口 (全面测试 M11 复核补充) */
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236e747b' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   background-repeat:no-repeat;background-position:right 10px center}
 
@@ -2790,7 +2790,9 @@ details.card .card-b{border-top:1px solid var(--line-soft)}
 
 /* 响应式: 窄屏收起侧栏 → 顶部横排 */
 @media(max-width:900px){
-  body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr);height:auto;min-height:100vh;overflow:auto}
+  body{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);height:auto;min-height:100vh;overflow:auto}
+  /* 裸 1fr 的 auto 最小尺寸曾让收起后的侧栏行 (brand+nav ~456px) 撑开整页横滚;
+     minmax(0,1fr) 让 .sidebar 的 overflow-x:auto 真正在栏内滚动 */
   .sidebar{flex-direction:row;align-items:center;border-right:none;border-bottom:1px solid var(--line);
     overflow-x:auto;padding:0 8px}
   .brand{border-bottom:none;padding:0 10px 0 6px;height:48px}
