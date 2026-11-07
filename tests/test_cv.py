@@ -1406,6 +1406,282 @@ def test_owned_stats_input_effective(isolated):
     assert own["input_effective"] == 105 + 1000                 # 不是 10+1000, 也不是 +950 重计
 
 
+# ---------------- 二轮全面测试回归 (dwfrun-7597d968 发现) ----------------
+
+def test_index_malformed_typed_snapshot(isolated):
+    """二轮 serve-1/mcp-1: capture/conv 类型不对的快照, 热索引启动不崩、/search 200
+    (与冷路径一致跳过)。旧代码 AttributeError 让服务起不来 + /search 500 + 索引停更。"""
+    _, vault = isolated
+    (vault / "snapshots").mkdir(parents=True, exist_ok=True)
+    good = cv.build_envelope({"capture": {"agent": "codex", "cwd": "D:\\x"},
+                              "conversation": [{"type": "text", "role": "user", "content": "markerok"}],
+                              "stats": cv.zero_stats()})
+    sid = cv.snapshot_id(good)
+    (vault / "snapshots" / f"{sid}.json").write_text(json.dumps(good), encoding="utf-8")
+    (vault / "snapshots" / "cv_bad0000000000001.json").write_text(
+        json.dumps({"capture": "str", "conversation": [], "stats": {}}), encoding="utf-8")
+    (vault / "snapshots" / "cv_bad0000000000002.json").write_text(
+        json.dumps({"capture": {"agent": "zcode"}, "conversation": ["str"], "stats": {"blocks_total": 1}}),
+        encoding="utf-8")
+    srv, _ = cv.build_vault_server(vault, 0)                    # 旧代码此处 AttributeError 崩溃
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        code, r = _req(port, "GET", "/search?q=markerok")
+        assert code == 200 and r["total"] == 1 and r["hits"][0]["sid"] == sid
+        code, r = _req(port, "GET", "/healthz")
+        assert code == 200 and r["snapshots"] == 1              # 畸形文件被跳过, 不进索引
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_timeline_leaf_and_agent_default(isolated):
+    """二轮 serve-2/3: /timeline leaf 用 parent_snapshot 列 (曾误用 blocks_total 列,
+    真叶子恒 False); agent 缺省时按 session_ref 全 agent 匹配 (曾用 '='+'%' 恒空)。"""
+    _, vault = isolated
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    prev = None
+    ids = {}
+    for name, cat, blocks in (("p", "2026-11-05T09:00:00", 0), ("q", "2026-11-06T09:00:00", 4),
+                              ("r", "2026-11-07T09:00:00", 6)):
+        env = cv.build_envelope({"capture": {"agent": "zcode", "session_ref": "S"},
+                                 "conversation": [{"type": "text", "role": "user", "content": name}],
+                                 "stats": {**cv.zero_stats(), "blocks_total": blocks}})
+        env["created_at"] = cat
+        sid = cv.snapshot_id(env)
+        ids[name] = sid
+        p = vault / "snapshots" / f"{sid}.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(env, ensure_ascii=False), encoding="utf-8")
+        conn.execute("INSERT INTO snapshots(id,created_at,agent,session_ref,blocks_total,parent_snapshot)"
+                     " VALUES(?,?,?,?,?,?)", (sid, cat, "zcode", "S", blocks, prev))
+        prev = sid
+    conn.commit()
+    srv, _ = cv.build_vault_server(vault, 0)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        code, r = _req(port, "GET", "/timeline?session=S&agent=zcode")
+        assert code == 200
+        leaf = {v["sid"]: v["leaf"] for day in r["days"] for v in day["versions"]}
+        assert leaf == {ids["p"]: False, ids["q"]: False, ids["r"]: True}
+        code, r2 = _req(port, "GET", "/timeline?session=S")     # agent 缺省
+        assert code == 200 and r2["days"] == r["days"]
+        code, r3 = _req(port, "GET", "/timeline?session=S&agent=")  # 空 agent 同义
+        assert code == 200 and r3["days"] == r["days"]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_serve_duplicate_instance_raises(isolated):
+    """二轮 serve-4: allow_reuse_address 恒 False 后, 首选端口上已有本服务实例 → 抛 OSError
+    (单实例语义), 不再静默双绑收不到流量还写 serve.json 误导 MCP。"""
+    _, vault = isolated
+    (vault / "snapshots").mkdir(parents=True, exist_ok=True)
+    srv, _ = cv.build_vault_server(vault, 0)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(OSError):
+            cv.build_vault_server(vault, port)                  # 旧代码静默双绑
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_guard_stale_cookie_rotation(isolated):
+    """二轮 serve-5: 旧 cookie 存在时正确的 ?token=/header 仍放行, 且 cookie 被轮换刷新
+    (旧代码 cookie 先占位 → 首访自动登录永久 401, HttpOnly 前端清不掉)。"""
+    _, vault = isolated
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    conn.commit()
+    srv, _ = cv.build_vault_server(vault, 0, token="NEW")
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        c.request("GET", "/?token=NEW", headers={"Cookie": "vault_token=OLD"})
+        r = c.getresponse(); body = r.read(); setc = r.getheader("Set-Cookie")
+        assert r.status == 200 and "vault_token=NEW" in (setc or "")
+        c.request("GET", "/healthz", headers={"Cookie": "vault_token=OLD"})
+        r2 = c.getresponse(); r2.read()
+        assert r2.status == 401                                 # 旧 cookie 本身不再放行
+        c.close()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_migrate_nonobject_body_400(isolated):
+    """二轮 serve-6: 合法 JSON 但非对象 ([1,2]/null/"s"/42) → 400, 不落 500 回显异常。"""
+    _, vault = isolated
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    conn.commit()
+    srv, _ = cv.build_vault_server(vault, 0)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        for body in ("[1,2]", "null", '"cv_abc"', "42"):
+            code, r = _req(port, "POST", "/migrate", body=body,
+                           headers={"Content-Type": "application/json"})
+            assert code == 400 and "error" in r, (body, code, r)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_probe_events_and_audit_dbless(isolated):
+    """二轮 concurrency-1/serve-7: 零表空库上 /probe_events 与 /audit 返回诚实空态, 不落 500。"""
+    _, vault = isolated
+    (vault / "snapshots").mkdir(parents=True, exist_ok=True)
+    import sqlite3 as _s
+    _s.connect(vault / "vault.db").close()                      # 造零表空库 (M5 同族场景)
+    srv, _ = cv.build_vault_server(vault, 0)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        code, _ = _req(port, "GET", "/probe_events?limit=5")
+        assert code == 200
+        code, r = _req(port, "GET", "/audit")
+        assert code == 200 and r["total_events"] == 0
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_log_redaction_percent_encoded(isolated):
+    """二轮 serve-8: %74oken= (parse_qs 会解码为 token) 也是有效凭据 — 日志必须脱敏。"""
+    _, vault = isolated
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    conn.commit()
+    srv, _ = cv.build_vault_server(vault, 0, token="S3CR3T-tok-777")
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        code, _ = _req(port, "GET", "/healthz?%74oken=S3CR3T-tok-777")
+        assert code == 200                                      # 凭据有效
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    log = (vault / "serve_http.log").read_text(encoding="utf-8")
+    assert "S3CR3T-tok-777" not in log and "token=***" in log
+
+
+def test_prune_unlink_failure_keeps_row(isolated):
+    """二轮 concurrency-2: 文件删除失败 (Windows 共享冲突) 时该行保留, 盘库同进退,
+    不产生索引/账本口径分裂的孤儿文件。"""
+    from types import SimpleNamespace
+    _, vault = isolated
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA + cv.SYNC_TABLE)
+    src = vault / "src.jsonl"
+    src.write_text("{}", encoding="utf-8")
+    prev = None
+    paths = []
+    (vault / "snapshots").mkdir(parents=True, exist_ok=True)
+    for i, text in enumerate(("v1", "v2", "v3")):
+        env = cv.build_envelope({"capture": {"agent": "codex", "session_ref": "sx"},
+                                 "conversation": [{"type": "text", "role": "user", "content": text}],
+                                 "stats": cv.zero_stats()})
+        env["created_at"] = f"2026-11-07T0{i}:00:00+08:00"
+        if prev:
+            env["lineage"]["parent_snapshot"] = prev
+        sid = cv.snapshot_id(env)
+        prev = sid
+        if i == 1:  # 中间版本 v2: 把"快照文件"换成目录 → unlink 抛 IsADirectoryError
+            d = vault / "snapshots" / f"{sid}.json"
+            d.mkdir()
+            paths.append(d)
+        else:
+            p = vault / "snapshots" / f"{sid}.json"
+            p.write_text(json.dumps(env, ensure_ascii=False), encoding="utf-8")
+            paths.append(p)
+        cv.register_snapshot(conn, env, sid, p)
+    conn.execute("INSERT OR REPLACE INTO sync_sources VALUES(?,?,?,?,?)",
+                 (str(src.resolve()), 0, 0, prev, "2026-11-07T02:00:00+08:00"))
+    conn.commit()
+    cv.cmd_prune(SimpleNamespace(vault=str(vault), apply=True))
+    left = {r[0] for r in conn.execute("SELECT id FROM snapshots")}
+    assert paths[1].stem in left and paths[1].is_dir()          # 删失败 → 行保留 (下次再试)
+    assert paths[0].stem not in left                           # 正常回收
+    assert paths[1].stem in left and paths[1].is_dir()          # unlink 失败 → 行保留 (下次再试), 无孤儿
+    assert paths[2].stem in left                               # 叶子恒留
+    assert len(left) == 2
+    tl = cv.audit_summary_and_timeline(vault, "", "all")
+    assert any(e.get("status") == "prune" for day in tl["timeline"] for e in day["events"])
+
+
+def test_prices_boolean_cost_none(isolated):
+    """二轮 regression-1: prices 值为 bool 时 (float(True)=1.0 不抛错) 不编造假成本 → cost=None。"""
+    _, vault = isolated
+    import sqlite3 as _s
+    (vault / "prices.json").write_text(json.dumps(
+        {"bool-priced": {"input": True, "output": False}}), encoding="utf-8")
+    zp = vault / "zcode.sqlite"
+    z = _s.connect(zp)
+    z.execute("CREATE TABLE model_usage(model_id TEXT, input_tokens INTEGER, output_tokens INTEGER,"
+              " cache_read_input_tokens INTEGER)")
+    z.execute("INSERT INTO model_usage VALUES('bool-priced', 5000000, 1000000, 0)")
+    z.commit()
+    z.close()
+    monkey_like = vault
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    conn.commit()
+    srv, _ = cv.build_vault_server(vault, 0)
+    # /ledger 直读 cv.ZCODE_DB: 指向合成库
+    old = cv.ZCODE_DB
+    cv.ZCODE_DB = zp
+    try:
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            code, r = _req(port, "GET", "/ledger")
+            assert code == 200
+            assert r["zcode_usage"]["bool-priced"]["cost"] is None
+        finally:
+            srv.shutdown()
+            srv.server_close()
+    finally:
+        cv.ZCODE_DB = old
+
+
+def test_export_fresh_vault_and_sibling_chain(isolated):
+    """二轮 migrate-1 + ledger-1/2: 全新 vault 直接 export 不崩 (sync_sources 表已建);
+    export/sync 水位键一致 (单行); 源演进后 sync 正常挂链; 库行删除后 export 重挂兄弟链。"""
+    from types import SimpleNamespace
+    import os as _os
+    home, vault = isolated
+    src = _mk_chain_rollout(home / ".codex" / "sessions" / "2026" / "11" / "01",
+                            "55555555-5555-5555-5555-555555555555")
+    cv.cmd_export(SimpleNamespace(vault=str(vault), source=str(src), drop_developer=False))  # 全新 vault 不崩
+    conn = cv.db(vault)
+    assert conn.execute("SELECT COUNT(*) FROM sync_sources").fetchone()[0] == 1
+    own0 = cv.owned_stats(vault)
+    assert own0["sessions"] == 1 and own0["tokens_in"] == 100
+    rows = [json.loads(l) for l in src.read_text(encoding="utf-8").splitlines()]
+    rows.append({"timestamp": "2026-11-01T01:00:00.000Z", "ordinal": 3, "type": "response_item",
+                 "payload": {"type": "message", "id": "m2", "role": "user",
+                             "content": [{"type": "input_text", "text": "more"}]}})
+    w(src, rows)
+    sync = lambda: cv.cmd_sync(SimpleNamespace(vault=str(vault), root=None))  # noqa: E731
+    sync()                                                      # 水位键一致: 命中行挂链, 不再双行/双计
+    assert conn.execute("SELECT COUNT(*) FROM sync_sources").fetchone()[0] == 1
+    own1 = cv.owned_stats(vault)
+    assert own1["sessions"] == 1 and own1["tokens_in"] == 100
+    conn.execute("DELETE FROM snapshots WHERE parent_snapshot IS NOT NULL")  # 模拟库行丢失
+    conn.commit()
+    cv.cmd_export(SimpleNamespace(vault=str(vault), source=str(src), drop_developer=False))
+    own2 = cv.owned_stats(vault)
+    assert own2["sessions"] == 1 and own2["tokens_in"] == 100   # 兄弟链重挂, 不再永久双计
+
+
 def test_prune_daily_keep_relink_and_guards(isolated, monkeypatch, tmp_path, capsys):
     """GC 回归: 每会话每天留最后一版 + 叶子; fork 与源已消失会话整链保留; 保留集重链后
     账本 sessions/tokens 不变; --apply 先备份; GC 事件写入审计时间线。"""
@@ -1423,6 +1699,7 @@ def test_prune_daily_keep_relink_and_guards(isolated, monkeypatch, tmp_path, cap
     monkeypatch.setattr(cv, "ZCODE_DB", zp)
     conn = cv.db(vault)
     conn.executescript(cv.SCHEMA + cv.SYNC_TABLE)
+    (vault / "snapshots").mkdir(parents=True, exist_ok=True)
     mk = lambda ref, d, h, text, parent=None: (lambda env: (env["lineage"].update(  # noqa: E731
         {"parent_snapshot": parent} if parent else {}), env)[1])
     reg = lambda env, sid: (_write_env(vault, env), cv.register_snapshot(conn, env, sid,  # noqa: E731

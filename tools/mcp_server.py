@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import urllib.parse
@@ -52,7 +53,7 @@ def load_all_snapshots(vault: Path) -> list:
             continue  # 可解析但结构不完整: 与热索引一致地跳过, 不让单文件废掉冷路径 (全面测试 M6)
         env["_sid"] = f.stem  # 文件名即快照 id (内容寻址)
         out.append(env)
-    out.sort(key=lambda e: e.get("created_at", ""), reverse=True)
+        out.sort(key=lambda e: e.get("created_at") or "", reverse=True)
     return out
 
 
@@ -83,7 +84,7 @@ def ledger_summary(vault: Path) -> dict:
 
 def brief(env: dict) -> str:
     c, s = env["capture"], env["stats"]
-    return (f"{env.get('_sid')} | {c.get('agent')} | {env.get('created_at', '')[:19]} | "
+    return (f"{env.get('_sid')} | {c.get('agent')} | {str(env.get('created_at') or '')[:19]} | "
             f"块={s['blocks_total']} 入={s['tokens_in']} cache读={s['cache_read']} | "
             f"{c.get('completeness')} | cwd={c.get('cwd', '?')}")
 
@@ -94,6 +95,7 @@ def t_recent(args_vault, limit: int) -> str:
     snaps = load_all_snapshots(args_vault)
     if not snaps:
         return "vault 为空。先运行: python tools/cv.py export <会话文件>"
+    limit = max(1, min(int(limit or 5), 200))  # 与热路径 /recent 钳制一致 (二轮 mcp-5)
     lines = [f"vault 内 {len(snaps)} 个快照, 最近 {min(limit, len(snaps))} 个:"]
     for env in snaps[:limit]:
         lines.append("  " + brief(env))
@@ -169,6 +171,10 @@ def t_context(args_vault, query: str, limit: int) -> str:
 
 def t_snapshot(args_vault, sid: str) -> str:
     vault = args_vault
+    if not re.fullmatch(r"cv_[0-9a-f]{8,64}", str(sid or "")):
+        # HTTP 侧同端点有 _sid_ok 同款守卫: MCP 面 id 由模型决定, 直拼路径曾可越 vault
+        # 读本机任意 *.json (会话内注入可诱导外带 cwd/内容) — 二轮 mcp-4 high
+        return "无效 id: 需要 cv_ 前缀的快照 id"
     p = vault / "snapshots" / f"{sid}.json"
     if not p.exists():
         return f"快照不存在: {sid}"
@@ -254,9 +260,10 @@ def _via_service(name: str, args_dict: dict):
                          f"&limit={int(args_dict.get('limit', 5))}")
             if not r.get("terms"):
                 return "查询词太短"  # 与冷回退同口径: 参数无效不是一次真实搜索的无命中
-            if not r["hits"]:
+            # 判空用服务端 total (截断前的真实命中数): limit=0 曾把真实命中报成"未命中" (二轮 mcp-6)
+            if not r.get("total"):
                 return f"未命中: {r['query']} (via 热索引)"
-            lines = [f"搜索 '{r['query']}' 命中 {len(r['hits'])} 个快照 (via 热索引):"]
+            lines = [f"搜索 '{r['query']}' 命中 {r['total']} 个快照 (via 热索引):"]
             for h in r["hits"]:
                 lines.append(f"  [{h['sid']}] {h['agent']} 得分={h['score']} — "
                              f"{h.get('cwd', '?')} ({str(h.get('created_at', ''))[:10]})")
@@ -266,7 +273,7 @@ def _via_service(name: str, args_dict: dict):
                          f"&limit={int(args_dict.get('limit', 3))}")
             if not r.get("terms"):
                 return "查询词太短"  # 与冷回退同口径
-            if not r["results"]:
+            if not r.get("total"):  # 截断前真实命中数, 同 mcp-6 口径
                 return f"vault 中无相关上下文: {r['query']}"
             lines = [f"来自 context-vault 的相关历史上下文 (查询: '{r['query']}', via 热索引):"]
             for h in r["results"]:

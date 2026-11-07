@@ -36,6 +36,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from array import array
 from collections import OrderedDict
@@ -111,7 +112,7 @@ def cmd_init(args):
     (vault / "snapshots").mkdir(parents=True, exist_ok=True)
     (vault / "outbox").mkdir(parents=True, exist_ok=True)
     conn = db(vault)
-    conn.executescript(SCHEMA)
+    conn.executescript(SCHEMA + SYNC_TABLE)
     conn.commit()
     print(f"vault 就绪: {vault.resolve()}")
 
@@ -448,7 +449,7 @@ def cmd_export(args):
     (vault / "snapshots").mkdir(parents=True, exist_ok=True)
     out = vault / "snapshots" / f"{sid}.json"
     conn = db(vault)
-    conn.executescript(SCHEMA)
+    conn.executescript(SCHEMA + SYNC_TABLE)  # 曾只建 SCHEMA: 全新 vault 上向 sync_sources INSERT 直接崩 (二轮 migrate-1)
     if out.exists():
         print(f"已存在 (幂等跳过): {out.name}")
         if conn.execute("SELECT 1 FROM snapshots WHERE id=?", (sid,)).fetchone() is None:
@@ -466,6 +467,18 @@ def cmd_export(args):
         conn.execute("INSERT OR REPLACE INTO sync_sources(path,mtime,size,snapshot_id,synced_at)"
                      " VALUES(?,?,?,?,?)", (_norm_path(src), st.st_mtime, st.st_size, sid, now_iso()))
     except OSError:
+        pass
+    try:  # 同会话已有演进链 (手动 export 落在 sync 链之后 / vault.db 重建后重注册) → 挂为最新版本
+        c0 = envelope["capture"]
+        if c0.get("session_ref") and c0.get("agent"):
+            sib = conn.execute("SELECT id FROM snapshots WHERE agent=? AND session_ref=? AND id<>?"
+                               " ORDER BY created_at DESC LIMIT 1",
+                               (c0.get("agent"), c0.get("session_ref"), sid)).fetchone()
+            row = conn.execute("SELECT parent_snapshot FROM snapshots WHERE id=?", (sid,)).fetchone()
+            if sib and row and not row[0]:  # 只补缺失的 parent, 不动既有链 (H1)
+                conn.execute("UPDATE snapshots SET parent_snapshot=? WHERE id=?", (sib[0], sid))
+                envelope["lineage"]["parent_snapshot"] = sib[0]
+    except sqlite3.Error:
         pass
     conn.commit()
     return sid
@@ -1046,6 +1059,13 @@ def owned_stats(vault: Path) -> dict:
     parent_snapshot 引用 = 每条演进链的当前版本); fork 是独立资产副本, 计自己的叶子。
       snapshots  — 快照版本总数 (含被演进替代的历史版本)
       sessions   — 独立会话数 (叶子数; 手动 export 的无 lineage 重复会各自成链, 此口径的诚实上界)"""
+    if not (vault / "vault.db").exists():
+        # 无库: 直接返回零口径, 不在读取路径上凭空建库 — 曾让冷路径"账本为空。先运行…"的
+        # 诚实指引被空表 vault.db 永久替换 (二轮 mcp-3)
+        return {"snapshots": 0, "sessions": 0, "tokens_in": 0, "tokens_out": 0,
+                "cache_read": 0, "cache_write": 0, "total_tokens": 0, "input_effective": 0,
+                "cache_hit_rate": 0.0, "by_agent": [],
+                "source": "vault-owned (no vault.db yet)"}
     conn = db(vault)
     try:  # 只 connect 不建表的调用路径 (如 /stats 直查) 曾留下零表空库毒化冷路径 — 这里兜底建表
         conn.executescript(SCHEMA)
@@ -1350,8 +1370,9 @@ def sync_one(conn, vault: Path, path: Path, migrations=None, debounce=False) -> 
     """单文件入库: 新增/更新(带 lineage)/跳过。返回状态。
     debounce: 托盘周期同步传 True — 活跃会话限频出版本 (见 _debounced); 手动 cv sync 立即捕获。"""
     st = path.stat()
+    key = _norm_path(path)  # Windows 大小写失配曾让 export/sync 各写一行水位, 同文件双键 (二轮 ledger-1)
     row = conn.execute("SELECT mtime, size, snapshot_id, synced_at FROM sync_sources WHERE path=?",
-                       (str(path),)).fetchone()
+                       (key,)).fetchone()
     if row and abs(row["mtime"] - st.st_mtime) < 1 and row["size"] == st.st_size:
         return "skip"
     if debounce and row and row["snapshot_id"] and _debounced(row["synced_at"], st.st_mtime):
@@ -1378,7 +1399,7 @@ def sync_one(conn, vault: Path, path: Path, migrations=None, debounce=False) -> 
                 atomic_write_text(out, json.dumps(envelope, ensure_ascii=False, indent=1))
                 register_snapshot(conn, envelope, sid, out)
             conn.execute("INSERT OR REPLACE INTO sync_sources(path,mtime,size,snapshot_id,synced_at)"
-                         " VALUES(?,?,?,?,?)", (str(path), st.st_mtime, st.st_size, sid, now_iso()))
+                         " VALUES(?,?,?,?,?)", (key, st.st_mtime, st.st_size, sid, now_iso()))
             return "skip"
         envelope["lineage"]["parent_snapshot"] = row["snapshot_id"]  # 同源演进 → 会话树
     out = vault / "snapshots" / f"{sid}.json"
@@ -1386,7 +1407,7 @@ def sync_one(conn, vault: Path, path: Path, migrations=None, debounce=False) -> 
         atomic_write_text(out, json.dumps(envelope, ensure_ascii=False, indent=1))
     register_snapshot(conn, envelope, sid, out)
     conn.execute("INSERT OR REPLACE INTO sync_sources(path,mtime,size,snapshot_id,synced_at)"
-                 " VALUES(?,?,?,?,?)", (str(path), st.st_mtime, st.st_size, sid, now_iso()))
+                 " VALUES(?,?,?,?,?)", (key, st.st_mtime, st.st_size, sid, now_iso()))
     return "update" if row else "new"
 
 
@@ -1661,20 +1682,24 @@ def cmd_prune(args):
             if r["parent_snapshot"] != prev:
                 conn.execute("UPDATE snapshots SET parent_snapshot=? WHERE id=?", (prev, r["id"]))
             prev = r["id"]
+    removed = 0
     for r in drop:
         try:
             os.unlink(r["path"])  # 内容寻址文件; 索引层由下一次 rebuild 全量重建自然剔除
         except OSError:
-            pass
+            continue  # Windows 共享冲突 (并发读者持句柄): 盘库同进退 — 留行下次 prune 再试, 不产生孤儿
         conn.execute("DELETE FROM snapshots WHERE id=?", (r["id"],))
+        removed += 1
     conn.execute("INSERT INTO probe_events(ts,profile,endpoint,status,http_code,latency_ms,models,missing_models)"
                  " VALUES(?,?,?,?,?,?,?,?)",
                  (now_iso(), "vault", "gc", "prune", None, None,
-                  json.dumps({"dropped": len(drop), "reclaimed_mb": round(reclaim / 1e6, 1),
+                  json.dumps({"dropped": removed, "reclaimed_mb": round(reclaim / 1e6, 1),
                               "kept": len(rows) - len(drop),
                               "backup": "vault/backups 最新一份"}, ensure_ascii=False), None))
     conn.commit()
-    print(f"已回收 {len(drop)} 版 / {reclaim/1e6:.0f} MB (GC 事件已写入审计时间线)")
+    print(f"已回收 {removed} 版 / {reclaim/1e6:.0f} MB"
+          + (f" ({len(drop) - removed} 版因文件被占用跳过, 下次 prune 再试)" if removed != len(drop) else "")
+          + " (GC 事件已写入审计时间线)")
 
 
 def cmd_repair(args):
@@ -1992,16 +2017,23 @@ def audit_summary_and_timeline(vault: Path, since: str, kind: str, limit: int = 
     if since:
         q += " AND ts >= ?"
         params.append(since)
-    rows = conn.execute(q + " ORDER BY id DESC LIMIT ?", (*params, limit)).fetchall()
-    if kind != "all":
-        rows = [r for r in rows if kind in (r["status"],)]
-    total = conn.execute("SELECT COUNT(*) FROM probe_events").fetchone()[0]
-    model_missing = sum(1 for r in conn.execute(
-        "SELECT missing_models FROM probe_events WHERE missing_models != '[]'"
-        " AND missing_models IS NOT NULL"))
-    switches = conn.execute("SELECT COUNT(*) FROM probe_events WHERE status='switch'").fetchone()[0]
-    ok_probes = conn.execute("SELECT COUNT(*) FROM probe_events WHERE status='ok'").fetchone()[0]
-    err_probes = total - ok_probes - switches
+    rows = []
+    try:
+        rows = conn.execute(q + " ORDER BY id DESC LIMIT ?", (*params, limit)).fetchall()
+        if kind != "all":
+            rows = [r for r in rows if kind in (r["status"],)]
+        total = conn.execute("SELECT COUNT(*) FROM probe_events").fetchone()[0]
+        model_missing = sum(1 for r in conn.execute(
+            "SELECT missing_models FROM probe_events WHERE missing_models != '[]'"
+            " AND missing_models IS NOT NULL"))
+        switches = conn.execute("SELECT COUNT(*) FROM probe_events WHERE status='switch'").fetchone()[0]
+        ok_probes = conn.execute("SELECT COUNT(*) FROM probe_events WHERE status='ok'").fetchone()[0]
+        prune_n = conn.execute("SELECT COUNT(*) FROM probe_events WHERE status='prune'").fetchone()[0]
+    except sqlite3.OperationalError:
+        return {"since": since or "(全部)", "total_events": 0,
+                "summary": {"ok_probes": 0, "abnormal": 0, "switches": 0, "model_missing_events": 0},
+                "timeline": []}  # 零表空库: 诚实空态 (M5 同族, 二轮 serve-7)
+    err_probes = total - ok_probes - switches - prune_n  # prune=GC 留痕, 非探测异常
     # 按天聚合可读时间线
     by_day = {}
     for r in rows:
@@ -2165,8 +2197,8 @@ def cmd_ingest(args):
         print(f"已接入 {out.name}  源={exported['capture']['source_format']}  "
               f"块={s['blocks_total']}  入token={s['tokens_in']}")
     conn = db(vault)
-    conn.executescript(SCHEMA)
-    register_snapshot(conn, envelope, sid, out)
+    conn.executescript(SCHEMA + SYNC_TABLE)  # 曾只建 SCHEMA: 全新 vault 上 export 向 sync_sources
+    register_snapshot(conn, envelope, sid, out)  # INSERT 直接 no such table 崩 (二轮 migrate-1)
     conn.commit()
     if not args.keep_temp:
         tmp_out.unlink(missing_ok=True)
@@ -2565,17 +2597,19 @@ class VaultIndex:
         try:
             env = json.loads(f.read_text(encoding="utf-8"))
             capture, conv, stats = env["capture"], env["conversation"], env["stats"]
+            if not isinstance(capture, dict) or not isinstance(conv, list) or not isinstance(stats, dict):
+                return False  # 合法 JSON 但类型不对: 与冷路径 load_all_snapshots 一致地整体跳过
             meta_row = {"agent": capture.get("agent"),
                         "first": next(((b.get("content") or b.get("summary") or "")[:64]
-                                       for b in conv
-                                       if b.get("role") == "user"
+                                       for b in conv if isinstance(b, dict)
+                                       and b.get("role") == "user"
                                        and (b.get("content") or b.get("summary"))), ""),
                         "created_at": env.get("created_at"),
                         "cwd": capture.get("cwd"),
                         "blocks": stats["blocks_total"],
                         "tokens_in": stats["tokens_in"],
                         "completeness": capture.get("completeness")}
-        except (ValueError, OSError, KeyError, TypeError):
+        except (ValueError, OSError, KeyError, TypeError, AttributeError):
             return False
         sid = f.stem
         meta[sid] = meta_row
@@ -2714,7 +2748,7 @@ class VaultIndex:
         pairs = sorted(sc.items())
         pairs.sort(key=lambda kv: meta[kv[0]].get("created_at") or "", reverse=True)
         pairs.sort(key=lambda kv: -kv[1])
-        return {"query": query, "terms": terms,
+        return {"query": query, "terms": terms, "total": len(pairs),
                 "hits": [{"sid": sid, "score": n, **meta[sid]}
                          for sid, n in pairs[:limit]]}
 
@@ -2746,7 +2780,7 @@ class VaultIndex:
             out.append({"sid": sid, "block": i, "role": b.get("role") or b["type"],
                         "score": n, "excerpt": text[start:start + 400],
                         "cwd": meta[sid].get("cwd")})
-        return {"query": query, "terms": terms, "results": out}
+        return {"query": query, "terms": terms, "total": len(pairs), "results": out}
 
 
 CONSOLE_HTML = r"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
@@ -2813,7 +2847,7 @@ svg{flex:none}
 .topbar h1{font-size:var(--fs-lg);font-weight:650;white-space:nowrap}
 .gsearch{flex:1;max-width:520px;margin:0 auto;position:relative;display:flex}
 .gsearch input[type=search]{width:100%;height:var(--ctl-h);background:var(--bg-subtle);border:1px solid var(--line);
-  border-radius:var(--rad-m);padding:0 12px 0 32px;font-size:13.5px;outline:none;
+  border-radius:var(--rad-m);padding:0 46px 0 32px;font-size:13.5px;outline:none;  /* 右侧 46px 给 Enter kbd 让位 — 12px 时输入文字被 kbd 盖住 (二轮 console-8) */
   transition:border-color .12s ease,background .12s ease}
 .gsearch input[type=search]:focus{border-color:var(--acc);background:var(--bg-surface)}
 .gsearch .gs-ic{position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--ink-3);pointer-events:none}
@@ -2994,7 +3028,7 @@ details.card .card-b{border-top:1px solid var(--line-soft)}
 .controls input[type=search]{flex:1;min-width:240px;padding-left:32px;
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%236e747b' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E");
   background-repeat:no-repeat;background-position:10px center}
-.meta-line{display:flex;align-items:center;gap:10px;font-size:var(--fs-xs);color:var(--ink-3);margin:0 2px 10px}
+.meta-line{font-size:var(--fs-xs);color:var(--ink-3);margin:0 2px 10px}  /* 曾 display:flex: 纯文本与 <b> 被拆成多个匿名 flex 项, 380px 下句子错乱断行 (二轮 console-7) */
 .meta-line .xbtn{background:none;border:none;color:var(--acc-strong);cursor:pointer;font-size:var(--fs-xs);
   padding:2px 6px;border-radius:4px}
 .meta-line .xbtn:hover{background:var(--acc-soft)}
@@ -3475,7 +3509,7 @@ async function boot(){
   try{
     await healthSeq(async()=>checkHealth());
     stripToken();
-    loadOv();loadSnaps();
+    loadOv();refreshSnaps();  /* boot 恢复不重置用户搜索词/页码 (markSvcBad→boot 曾清空, 二轮 console-4) */
   }catch(e){
     const s=$("#status");
     if(e&&e.code===401){s.classList.remove("err");s.classList.add("auth");
@@ -3539,7 +3573,7 @@ async function loadOv(){
       '<a onclick="setTab(\'snap\')">查看全部 →</a></div>';
 
     /* 右栏: 哨兵 / 记忆 / 审计 (可展开) */
-    let pv=[];try{pv=await api("/probe_events?limit=3")}catch(e){}
+    let pv=[];try{pv=(await api("/probe_events?limit=3")).filter(e=>e.status!=="prune")}catch(e){}
     $("#ov-probe").innerHTML=Array.isArray(pv)&&pv.length?pv.map(e=>{
       const st=e.status||"?";const cls=st==="ok"?"ok":(st==="http_error"||st==="error")?"err":"warn";
       return '<div class="row"><span class="l"><span class="dot '+cls+'"></span>'+relayBadge(e.profile)+
@@ -3621,7 +3655,12 @@ function snapLeavesToggle(){ /* 同会话演进链折叠为一行 (×N 版本) �
   snapLeaves=!snapLeaves;snapPage=0;
   const b=$("#snap-leaves");b.textContent=snapLeaves?"仅最新版本":"全部版本";
   b.setAttribute("aria-pressed",snapLeaves?"true":"false");
+  if(snapMode==="search"){snapSearch();return}  /* 搜索结果与折叠无关 — 曾静默丢结果切到最近列表 (二轮 console-5) */
   renderSnaps();
+}
+async function refreshSnaps(){ /* boot 恢复用: 按当前状态重渲染, 不重置搜索词/页码 */
+  if(snapMode==="search"){try{await snapSearch()}catch(e){}return}
+  await renderSnaps();
 }
 const LIM=30;
 
@@ -3743,12 +3782,22 @@ document.addEventListener("keydown",e=>{
   }});
 $("#backdrop").addEventListener("click",closeDrawer);
 
+let dwSeq=0;  /* 抽屉竞态守卫: 慢响应不得覆盖用户已切换到的快照 (二轮 console-2) */
+function toMig(sid){ /* "迁移此快照 →": 曾引用未定义的 toMig, 点击直接报错 */
+  closeDrawer();setTab("mig");
+  const sel=$("#mig-sid");
+  const pick=()=>{const o=[...sel.options].find(x=>x.value===sid);if(o){sel.value=sid;onMigSource();return true}return false};
+  if(sel.dataset.filled==="1"&&pick())return;
+  delete sel.dataset.filled;fillMig().then(()=>{if(!pick())toast("该快照不在最近 50 条里 — 请在迁移页搜索选择")}).catch(()=>{});
+}
 async function snapDetail(sid,ts){
+  const my=++dwSeq;
   openDrawer();
   $("#dw-sub").textContent=sid;
   $("#dw-body").innerHTML='<div class="skel" style="width:55%"></div><div class="skel" style="width:82%"></div><div class="skel" style="width:64%"></div>';
   try{
     const [d,p]=await Promise.all([api("/snapshot?id="+sid),api("/preview?id="+sid).catch(()=>null)]);
+    if(my!==dwSeq)return;
     const c=d.capture||{},s=d.stats||{};
     const imm=[];
     if(p){
@@ -3781,16 +3830,17 @@ async function snapDetail(sid,ts){
     (async()=>{ /* 会话时间线: 该会话全部版本按天分组 (leaf=当前版本) */
       try{
         const tl=await api("/timeline?session="+encodeURIComponent(c.session_ref||"")+"&agent="+encodeURIComponent(c.agent||""));
+        if(my!==dwSeq)return;
         const rows=(tl.days||[]).map(day=>"<div class='tl-day'><span class='tl-d'>"+esc(day.day)+"</span>"+
           day.versions.map(v=>"<div class='tl-row"+(v.sid===sid?" cur":"")+"'>"+
             "<span class='mono'>"+v.time+"</span> · "+num(v.blocks)+" 块 · 入 "+num(v.tokens_in)+
             (v.leaf?" <span class='chip ok'>最新</span>":"")+
-            " <button class='linklike' onclick=\"snapDetail('"+v.sid+"','"+(v.sid===sid?(ts||""):"")+"')\">"+esc(shortSid(v.sid))+"</button></div>").join("")+
+            " <button class='linklike' onclick=\"snapDetail('"+v.sid+"','"+esc(day.day+"T"+v.time)+"')\">"+esc(shortSid(v.sid))+"</button></div>").join("")+
           "</div>").join("");
         $("#dw-tl").innerHTML=rows||"<span class='hint'>—</span>";
-      }catch(e){$("#dw-tl").innerHTML="<span class='hint'>时间线加载失败: "+esc(String(e&&e.message||e))+"</span>"}
+      }catch(e){if(my!==dwSeq)return;$("#dw-tl").innerHTML="<span class='hint'>时间线加载失败: "+esc(String(e&&e.message||e))+"</span>"}
     })();
-  }catch(e){$("#dw-body").innerHTML=errEmpty("详情加载失败："+e.message,"snapDetail('"+sid+"')")}
+  }catch(e){if(my!==dwSeq)return;$("#dw-body").innerHTML=errEmpty("详情加载失败："+e.message,"snapDetail('"+sid+"')")}
 }
 const kv=(k,v)=>"<b>"+k+"</b><span>"+(v==null?"—":v)+"</span>";
 
@@ -3971,7 +4021,7 @@ async function loadProbe(){
   const el=$("#probe-list");
   el.innerHTML='<div class="skel" style="width:60%"></div><div class="skel" style="width:45%"></div>';
   try{
-    const rows=await probeSeq(()=>api("/probe_events?limit=200"));
+    const rows=(await probeSeq(()=>api("/probe_events?limit=200"))).filter(r=>r.status!=="prune");  /* GC 留痕不是探测样本 — 曾污染 ok 率/节点数/状态 (二轮 console-3) */
     const st=probeStateOf(rows);
     $("#probe-state").className="probe-state "+st.cls;
     $("#probe-state").innerHTML='<span class="dot '+st.cls+'"></span>'+esc(st.txt);
@@ -4074,6 +4124,9 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
     token: 商业化/局域网档的可选鉴权 — 设置后所有请求需凭据 (X-Vault-Token 头 /
     Cookie vault_token / 首访 ?token= 自动 Set-Cookie), 未授权一律 401。"""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    # Windows 下默认 allow_reuse_address=1 允许对活动监听端口静默双绑: 第二个 cv serve 收不到
+    # 任何流量却写自己的 serve.json 误导 MCP 读到别的 vault — 恒置 False, 绑定冲突走显式回退
+    ThreadingHTTPServer.allow_reuse_address = False
     from urllib.parse import urlparse, parse_qs
     sys.path.insert(0, str(Path(__file__).parent))
     from mcp_server import ledger_summary  # ledger_summary: /stats 端点 (曾漏导入致 500)
@@ -4090,7 +4143,14 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
         def log_request(self, code="-", size="-"):
             # 请求落盘: 诊断"浏览器 fetch 挂起"类问题的关键证据 (请求到没到服务)。
             # token 脱敏 (B03): ?token= 会随 requestline 落盘, 不能明文进日志。
-            line = re.sub(r"([?&])token=[^& ]*", r"\1token=***", self.requestline)
+            # parse_qs 会解码百分号编码键名 (%74oken= 也是有效凭据) — 先解码再匹配,
+            # 且大小写不敏感, 否则编码形态的 token 明文绕过脱敏 (二轮 serve-8)
+            line = self.requestline
+            try:
+                line = urllib.parse.unquote(line)
+            except Exception:
+                pass
+            line = re.sub(r"([?&])token=[^& ]*", r"\1token=***", line, flags=re.IGNORECASE)
             try:
                 with (vault / "serve_http.log").open("a", encoding="utf-8") as fh:
                     fh.write(f"{dt.datetime.now().isoformat(timespec='seconds')} "
@@ -4157,20 +4217,26 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     self._json({"error": "forbidden: POST 需要 Content-Type: application/json"}, 403)
                     return False
             if token:  # 鉴权档: 头 / Cookie / 首访 query(种 cookie) 三种凭据形态
-                given = self.headers.get("X-Vault-Token")
-                if not given:
-                    for part in (self.headers.get("Cookie") or "").split(";"):
-                        if part.strip().startswith("vault_token="):
-                            given = part.split("=", 1)[1].strip()
-                            break
-                if not given and not post:
-                    given = parse_qs(urlparse(self.path).query).get("token", [""])[0]
-                if hmac.compare_digest(str(given), str(token)):
-                    if "vault_token=" not in (self.headers.get("Cookie") or ""):
-                        self._new_cookie = f"vault_token={token}; Path=/; HttpOnly; SameSite=Strict"
-                    return True
-                self._json({"error": "unauthorized: 需要 token (?token= 首访, 或 X-Vault-Token 头)"}, 401)
-                return False
+                header = self.headers.get("X-Vault-Token")
+                cookie = ""
+                for part in (self.headers.get("Cookie") or "").split(";"):
+                    if part.strip().startswith("vault_token="):
+                        cookie = part.split("=", 1)[1].strip()
+                        break
+                qtok = "" if post else parse_qs(urlparse(self.path).query).get("token", [""])[0]
+                # 候选顺序 header > ?token= > cookie: 旧 cookie (token 轮换前/他实例所种, cookie 不按
+                # 端口隔离) 曾先占位导致 ?token= 首访永久 401 且 HttpOnly 前端清不掉 (二轮 serve-5)
+                ok = False
+                for cand in (header, qtok, cookie):
+                    if cand and hmac.compare_digest(str(cand), str(token)):
+                        ok = True
+                        break
+                if not ok:
+                    self._json({"error": "unauthorized: 需要 token (?token= 首访, 或 X-Vault-Token 头)"}, 401)
+                    return False
+                if "vault_token=" not in (self.headers.get("Cookie") or "") or (cookie and cookie != token):
+                    self._new_cookie = f"vault_token={token}; Path=/; HttpOnly; SameSite=Strict"  # 失效 cookie 轮换刷新
+                return True
             return True
 
         def do_GET(self):
@@ -4204,9 +4270,12 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     except ValueError:
                         conn.close()
                         return self._json({"error": "invalid limit: 需要整数"}, 400)
-                    rows = conn.execute("SELECT ts,profile,status,http_code,latency_ms,models,missing_models"
-                                        " FROM probe_events ORDER BY id DESC LIMIT ?",
-                                        (plim,)).fetchall()
+                    try:
+                        rows = conn.execute("SELECT ts,profile,status,http_code,latency_ms,models,missing_models"
+                                            " FROM probe_events ORDER BY id DESC LIMIT ?",
+                                            (plim,)).fetchall()
+                    except sqlite3.OperationalError:
+                        rows = []  # 零表空库: 诚实空态, 不落 500 (二轮 concurrency-1)
                     conn.close()
                     return self._json([dict(r) for r in rows])
                 if u.path == "/ledger":
@@ -4219,10 +4288,12 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     prices = {}
                     prices_p = vault / "prices.json"  # {"模型": {"input":x,"output":y,"cache_read":z}} $/Mtok
                     if prices_p.exists():
+                        num_ok = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool)
                         try:
                             pj = json.loads(prices_p.read_text(encoding="utf-8"))
+                            # bool 是 int 子类, float(True)=1.0 会编造假成本 (二轮 regression-1)
                             prices = {m: v for m, v in pj.items()
-                                      if isinstance(v, dict) and "input" in v and "output" in v}
+                                      if isinstance(v, dict) and num_ok(v.get("input")) and num_ok(v.get("output"))}
                         except (ValueError, AttributeError, OSError):
                             pass  # 非法 JSON/顶层非 dict/prices 是目录: 无价目诚实显示, 不 500
                     zcode_usage = {}
@@ -4251,8 +4322,9 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                             a["cost"] = None
                             continue
                         try:  # 值级坏形状 (字符串/null/list) 只损失该模型成本, 不拖垮整个 /ledger
+                            crp = pr.get("cache_read")
                             a["cost"] = round((a["tin"] * float(pr["input"]) + a["tout"] * float(pr["output"])
-                                               + a["cr"] * float(pr.get("cache_read") or 0)) / 1e6, 2)
+                                               + a["cr"] * (float(crp) if num_ok(crp) else 0)) / 1e6, 2)
                         except (TypeError, ValueError):
                             a["cost"] = None
                     lt = conn.execute("SELECT tokens_saved, cost_usd, raw FROM ledger_events"
@@ -4353,19 +4425,25 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                         return self._json({"error": "invalid session: 需要 session_ref"}, 400)
                     try:
                         c = db(vault)
-                        rows = c.execute("SELECT id, created_at, tokens_in, total_tokens, blocks_total,"
-                                         " parent_snapshot FROM snapshots WHERE session_ref=? AND agent=?"
-                                         " ORDER BY created_at", (ref, agent or "%")).fetchall()
+                        if agent:
+                            rows = c.execute("SELECT id, created_at, tokens_in, total_tokens, blocks_total,"
+                                             " parent_snapshot FROM snapshots WHERE session_ref=? AND agent=?"
+                                             " ORDER BY created_at", (ref, agent)).fetchall()
+                        else:
+                            rows = c.execute("SELECT id, created_at, tokens_in, total_tokens, blocks_total,"
+                                             " parent_snapshot FROM snapshots WHERE session_ref=?"
+                                             " ORDER BY created_at", (ref,)).fetchall()
                         c.close()
                     except sqlite3.Error:
                         rows = []
+                    child = {r[5] for r in rows if r[5]}  # parent_snapshot 列 (index 5); 曾误用 x[4] 块数
                     days = {}
                     for r in rows:
                         days.setdefault(str(r["created_at"] or "")[:10], []).append(
                             {"sid": r["id"], "time": str(r["created_at"] or "")[11:19],
                              "tokens_in": r["tokens_in"] or 0, "total_tokens": r["total_tokens"] or 0,
                              "blocks": r["blocks_total"] or 0,
-                             "leaf": r["id"] not in {x[0] for x in rows if x[4]}})
+                             "leaf": r["id"] not in child})
                     return self._json({"session": ref, "agent": agent,
                                        "days": [{"day": d, "versions": days[d]}
                                                 for d in sorted(days)]})
@@ -4406,7 +4484,9 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                 try:
                     body = json.loads(raw.decode("utf-8")) if raw else {}
                 except ValueError:
-                    return self._json({"error": "invalid JSON body"}, 400)  # 客户端错误, 不落 500 兜底
+                    return self._json({"error": "invalid JSON body: 需要对象"}, 400)
+                if not isinstance(body, dict):  # [1,2]/null/"str"/42 曾落 500 兜底回显异常 (二轮 serve-6)
+                    return self._json({"error": "invalid JSON body: 需要对象"}, 400)
                 if u.path == "/migrate":
                     # 回归: 不存在的 sid 曾让 load_snapshot 抛 SystemExit (BaseException),
                     # 逃过 except Exception 断连无 JSON; 先校验形态与存在性, 稳定 400/404
