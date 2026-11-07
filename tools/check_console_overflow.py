@@ -15,6 +15,11 @@ import tempfile
 import threading
 from pathlib import Path
 
+if hasattr(sys.stdout, "reconfigure"):
+    # Windows CI 控制台默认 cp1252, 打印中文进度会 UnicodeEncodeError (同 doctor GBK 教训)
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cv  # noqa: E402
 
