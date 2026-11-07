@@ -9,7 +9,9 @@ check_console_js.py 的 node 检查只管语法与逻辑, 管不了 CSS 级联 �
       python tools/check_console_overflow.py
 退出码: 0 = 全部视口 × 分区无页面级溢出; 1 = 有溢出 (打印元凶元素); 2 = 环境缺 playwright/chromium
 """
+import gc
 import json
+import shutil
 import sys
 import tempfile
 import threading
@@ -82,8 +84,9 @@ def main() -> int:
         print("缺 playwright: pip install playwright && python -m playwright install chromium")
         return 2
     failures = []
-    with tempfile.TemporaryDirectory() as td:
-        vault = make_vault(Path(td))
+    root = Path(tempfile.mkdtemp(prefix="cv_layout_probe_"))
+    try:
+        vault = make_vault(root)
         srv, _ = cv.build_vault_server(vault, 0)
         port = srv.server_address[1]
         threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -112,6 +115,11 @@ def main() -> int:
         finally:
             srv.shutdown()
             srv.server_close()
+            gc.collect()  # /ledger 的 sqlite 连接由守护线程回收, 时机晚于 rmtree → 忽略清理错误
+            shutil.rmtree(root, ignore_errors=True)
+    except Exception as e:
+        print(f"探针环境异常: {str(e)[:200]}")
+        return 2
     if failures:
         print(f"\n{len(failures)} 处页面级溢出 — 控制台布局回归: {failures}")
         return 1
