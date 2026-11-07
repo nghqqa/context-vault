@@ -1403,9 +1403,13 @@ def sync_one(conn, vault: Path, path: Path, migrations=None, debounce=False) -> 
             return "skip"
         envelope["lineage"]["parent_snapshot"] = row["snapshot_id"]  # 同源演进 → 会话树
     out = vault / "snapshots" / f"{sid}.json"
+    registered = conn.execute("SELECT 1 FROM snapshots WHERE id=?", (sid,)).fetchone()
     if not out.exists():
         atomic_write_text(out, json.dumps(envelope, ensure_ascii=False, indent=1))
-    register_snapshot(conn, envelope, sid, out)
+    if not registered:
+        # H1 同款守卫: 内容寻址 sid 已在库 (历史版本) 时不得用 parent=None 的 envelope
+        # 重注册 — 会抹掉链上 parent (托盘升级换键首轮曾把全库演进链抹断)
+        register_snapshot(conn, envelope, sid, out)
     conn.execute("INSERT OR REPLACE INTO sync_sources(path,mtime,size,snapshot_id,synced_at)"
                  " VALUES(?,?,?,?,?)", (key, st.st_mtime, st.st_size, sid, now_iso()))
     return "update" if row else "new"
@@ -1577,6 +1581,22 @@ def cmd_sync(args):
     conn.executescript(SCHEMA + SYNC_TABLE)
     n_lin = backfill_lineage(conn)       # 每 vault 一次: 历史演进链索引回填
     n_zu = backfill_zcode_usage(conn)    # 每 vault 一次: zcode 历史快照用量回填
+    if not conn.execute("SELECT 1 FROM vault_meta WHERE key='sync_keys_norm_v1'").fetchone():
+        # 水位键规范化迁移: _norm_path 引入前 sync_sources 存在原始大小写键, 与新键失配曾让
+        # 升级首轮把全部源当新会话重导出 (链被 parent=None envelope 抹断, 2026-11-08 实发)
+        rows = conn.execute("SELECT path, mtime, size, snapshot_id, synced_at FROM sync_sources").fetchall()
+        seen = {}
+        for r in rows:
+            k = _norm_path(r["path"])
+            old = seen.get(k)
+            if old is None or (r["mtime"] or 0) > (old["mtime"] or 0):
+                seen[k] = r
+        conn.execute("DELETE FROM sync_sources")
+        for r in seen.values():
+            conn.execute("INSERT OR REPLACE INTO sync_sources VALUES(?,?,?,?,?)",
+                         (_norm_path(r["path"]), r["mtime"], r["size"], r["snapshot_id"], r["synced_at"]))
+        conn.execute("INSERT OR REPLACE INTO vault_meta(key, value) VALUES('sync_keys_norm_v1', ?)", (now_iso(),))
+        conn.commit()
     if n_lin or n_zu:
         print(f"  一次性修复: lineage 回填 {n_lin} 行 · zcode 用量回填 {n_zu} 行")
     migrations = load_migrations(vault)
@@ -1702,6 +1722,37 @@ def cmd_prune(args):
           + " (GC 事件已写入审计时间线)")
 
 
+def storm_relink(conn) -> int:
+    """断链重链 (2026-11-08 风暴修复): 同会话出现 ≥2 个 parent=NULL 的根 = 演进链被抹断
+    (水位键失配首轮 sync 曾把全库源当新会话重注册)。按快照文件 mtime (= 版本被捕获的
+    真实时序) 恢复每会话链条。fork 子树按 fork_of 分组独立成链; 无 session_ref 的行不参与。"""
+    rows = conn.execute("SELECT id, agent, session_ref, parent_snapshot, fork_of, path"
+                        " FROM snapshots").fetchall()
+    groups = {}
+    for r in rows:
+        if not r["session_ref"]:
+            continue
+        try:
+            mt = os.path.getmtime(r["path"]) if r["path"] else 0
+        except OSError:
+            mt = 0
+        groups.setdefault((r["agent"], r["session_ref"], r["fork_of"] or ""), []).append((mt, r))
+    n = 0
+    for lst in groups.values():
+        roots = [x for x in lst if not x[1]["parent_snapshot"]]
+        if len(roots) < 2:
+            continue  # 一链一叶是健康态
+        lst = sorted(lst, key=lambda x: x[0])
+        prev = None
+        for mt, r in lst:
+            if r["parent_snapshot"] != prev:
+                conn.execute("UPDATE snapshots SET parent_snapshot=? WHERE id=?", (prev, r["id"]))
+                n += 1
+            prev = r["id"]
+    conn.commit()
+    return n
+
+
 def cmd_repair(args):
     """一次性数据修复的显式入口 (cv sync 首次运行也会自动做): 从快照文件回填 lineage 索引列,
     zcode 历史快照按版本时间回填用量。幂等, 可重复执行。"""
@@ -1709,8 +1760,9 @@ def cmd_repair(args):
     conn = db(vault)
     n_lin = backfill_lineage(conn, force=True)
     n_zu = backfill_zcode_usage(conn, force=True)
+    n_st = storm_relink(conn)
     own = owned_stats(vault)
-    print(f"lineage 回填: {n_lin} 行 · zcode 用量回填: {n_zu} 行")
+    print(f"lineage 回填: {n_lin} 行 · zcode 用量回填: {n_zu} 行 · 断链重链: {n_st} 行")
     print(f"账本口径: {own['sessions']} 独立会话 / {own['snapshots']} 快照版本 · "
           f"规范化总输入 {own['input_effective']:,} tok · 命中率 {own['cache_hit_rate']*100:.1f}%")
 
