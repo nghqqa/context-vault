@@ -1210,3 +1210,197 @@ def test_zcode_subsecond_update_syncs(isolated, monkeypatch, tmp_path):
     sync()                                             # 旧代码: 0.5s < 1s 容差 → "秒回"永久丢失
     snaps = sorted((vault / "snapshots").glob("cv_*.json"))
     assert any("秒回" in p.read_text(encoding="utf-8") for p in snaps)
+
+
+# ---------------- 存量修复回归 (2026-11-07) ----------------
+
+def _write_env(vault: Path, env: dict) -> str:
+    sid = cv.snapshot_id(env)
+    p = vault / "snapshots" / f"{sid}.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(env, ensure_ascii=False), encoding="utf-8")
+    return sid
+
+
+def test_backfill_lineage_restores_chain(isolated):
+    """T0 回归: parent_snapshot 列后加且 ALTER 未回填 → 历史版本在库里全是孤立叶子 (真库 921
+    个幻影叶子)。backfill_lineage 从文件尾 lineage 回填后, 演进链恢复为一个会话; 自环防御。"""
+    _, vault = isolated
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    mk = lambda text: cv.build_envelope({"capture": {"agent": "codex", "session_ref": "s1"},  # noqa: E731
+                                         "conversation": [{"type": "text", "role": "user", "content": text}],
+                                         "stats": {**cv.zero_stats(), "tokens_in": 100, "usage_events": 1}})
+    v1 = mk("hello")
+    s1 = _write_env(vault, v1)
+    v2 = mk("hello again")
+    v2["lineage"]["parent_snapshot"] = s1
+    s2 = _write_env(vault, v2)
+    cv.register_snapshot(conn, v1, s1, vault / "snapshots" / f"{s1}.json")
+    cv.register_snapshot(conn, v2, s2, vault / "snapshots" / f"{s2}.json")
+    conn.execute("UPDATE snapshots SET parent_snapshot=NULL")    # 模拟 11-02 前登记的行
+    conn.commit()
+    assert cv.owned_stats(vault)["sessions"] == 2                # 断链: 两个"会话", 用量双计
+    assert cv.read_lineage_tail(vault / "snapshots" / f"{s2}.json").get("parent_snapshot") == s1
+    assert cv.backfill_lineage(conn) == 1
+    own = cv.owned_stats(vault)
+    assert own["sessions"] == 1 and own["tokens_in"] == 100
+    assert cv.backfill_lineage(conn) == 0                        # 标记后不重复扫描
+
+
+def test_export_zcode_session_usage():
+    """T1 回归: zcode 适配器从 model_usage 按 session_id 聚合用量 (OpenAI 语义, 输入含缓存)。"""
+    import sqlite3 as _s
+    db = _s.connect(":memory:")
+    db.row_factory = _s.Row
+    db.executescript("""CREATE TABLE session(id TEXT, directory TEXT, title TEXT, time_updated INTEGER,
+        time_deleted INTEGER, time_created INTEGER);
+        CREATE TABLE message(id TEXT, session_id TEXT, data TEXT, time_created INTEGER, sequence INTEGER);
+        CREATE TABLE part(id TEXT, message_id TEXT, session_id TEXT, data TEXT, sequence INTEGER);
+        CREATE TABLE model_usage(session_id TEXT, input_tokens INTEGER, output_tokens INTEGER,
+        reasoning_tokens INTEGER, cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER,
+        started_at INTEGER, completed_at INTEGER);""")
+    db.execute("INSERT INTO session VALUES('s1','D:\\\\p','t',1000,NULL,1000)")
+    db.execute("INSERT INTO message VALUES('m1','s1',?,900,1)", (json.dumps({"role": "user"}),))
+    db.execute("INSERT INTO part VALUES('p1','m1','s1',?,1)", (json.dumps({"type": "text", "text": "hi"}),))
+    db.execute("INSERT INTO model_usage VALUES('s1',100,10,2,80,5,1,2)")
+    db.execute("INSERT INTO model_usage VALUES('s1',200,20,0,150,0,3,4)")
+    db.execute("INSERT INTO model_usage VALUES('other',999,9,0,0,0,1,2)")
+    srow = db.execute("SELECT * FROM session WHERE id='s1'").fetchone()
+    s = cv.export_zcode_session(db, srow)["stats"]
+    assert (s["tokens_in"], s["tokens_out"], s["cache_read"], s["usage_events"]) == (300, 30, 230, 2)
+    assert s["total_tokens"] == 330                              # 输入已含缓存, 不再加 cache_read
+
+
+def test_backfill_zcode_usage_as_of_version(isolated, monkeypatch, tmp_path):
+    """T1 回归: 历史 zcode 版本按各自 created_at 回填"截至当时"的累计用量 (索引层, 不重写文件)。"""
+    import sqlite3 as _s
+    import datetime as _dt
+    _, vault = isolated
+    ms = lambda iso: int(_dt.datetime.fromisoformat(iso).timestamp() * 1000)  # noqa: E731
+    zp = tmp_path / "z.sqlite"
+    z = _s.connect(zp)
+    z.execute("CREATE TABLE model_usage(session_id TEXT, input_tokens INTEGER, output_tokens INTEGER,"
+              " reasoning_tokens INTEGER, cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER,"
+              " started_at INTEGER, completed_at INTEGER)")
+    z.execute("INSERT INTO model_usage VALUES('s1',100,10,0,80,0,?,?)",
+              (ms("2026-11-01T00:00:00+08:00"), ms("2026-11-01T00:00:01+08:00")))
+    z.execute("INSERT INTO model_usage VALUES('s1',200,20,0,150,0,?,?)",
+              (ms("2026-11-03T00:00:00+08:00"), ms("2026-11-03T00:00:01+08:00")))
+    z.commit()
+    z.close()
+    monkeypatch.setattr(cv, "ZCODE_DB", zp)
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    ids = []
+    for text, cat in (("v1", "2026-11-02T00:00:00+08:00"), ("v2", "2026-11-04T00:00:00+08:00")):
+        env = cv.build_envelope({"capture": {"agent": "zcode", "source_format": "zcode-sqlite",
+                                             "session_ref": "s1"},
+                                 "conversation": [{"type": "text", "role": "user", "content": text}],
+                                 "stats": cv.zero_stats()})
+        env["created_at"] = cat
+        sid = _write_env(vault, env)
+        cv.register_snapshot(conn, env, sid, vault / "snapshots" / f"{sid}.json")
+        ids.append(sid)
+    conn.commit()
+    assert cv.backfill_zcode_usage(conn) == 2
+    got = {r["id"]: r["tokens_in"] for r in conn.execute("SELECT id, tokens_in FROM snapshots")}
+    assert got[ids[0]] == 100 and got[ids[1]] == 300             # 各自截至当时, 不是统一的终值
+
+
+def test_migration_copy_baseline_not_double_counted(isolated):
+    """T2 回归: --apply 迁移副本经 sync 入库时打上 migrated_from + 首版用量基线, owned_stats
+    扣基线 — 源会话用量不再被副本重复计一次 (评审遗留项, fork_of 落库后收敛)。"""
+    from types import SimpleNamespace
+    home, vault = isolated
+    src = _mk_chain_rollout(home / ".codex" / "sessions" / "2026" / "11" / "01",
+                            "33333333-3333-3333-3333-333333333333")
+    sync = lambda: cv.cmd_sync(SimpleNamespace(vault=str(vault), root=None))  # noqa: E731
+    sync()
+    conn = cv.db(vault)
+    src_sid = conn.execute("SELECT id FROM snapshots").fetchone()[0]
+    r = cv.do_import(vault, src_sid, "codex", apply=True)      # 副本写进 ~/.codex/sessions (隔离 HOME)
+    assert Path(r["dest"]).exists()
+    sync()                                                      # 副本被扫入: 首版 usage = 源用量
+    row = conn.execute("SELECT migrated_from, migration_baseline FROM snapshots WHERE id != ?",
+                       (src_sid,)).fetchone()
+    assert row["migrated_from"] == src_sid and json.loads(row["migration_baseline"])["tokens_in"] == 100
+    own = cv.owned_stats(vault)
+    assert own["sessions"] == 2 and own["tokens_in"] == 100     # 旧口径 200
+
+
+def test_sync_debounce_active_vs_idle(isolated):
+    """T7 回归: 周期同步 (debounce) 对活跃会话限频, 空闲后立即捕获; 手动 sync 不受影响。"""
+    from types import SimpleNamespace
+    import os as _os
+    import time as _t
+    home, vault = isolated
+    src = _mk_chain_rollout(home / ".codex" / "sessions" / "2026" / "11" / "01",
+                            "44444444-4444-4444-4444-444444444444")
+    sync = lambda deb: cv.cmd_sync(SimpleNamespace(vault=str(vault), root=None, debounce=deb))  # noqa: E731
+    count = lambda: cv.db(vault).execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]  # noqa: E731
+    sync(True)
+    assert count() == 1                                         # 首次入库不去抖
+    rows = [json.loads(l) for l in src.read_text(encoding="utf-8").splitlines()]
+    rows.append({"timestamp": "2026-11-01T01:00:00.000Z", "ordinal": 9, "type": "response_item",
+                 "payload": {"type": "message", "id": "m9", "role": "user",
+                             "content": [{"type": "input_text", "text": "more"}]}})
+    w(src, rows)                                                # 源刚更新 = 活跃
+    sync(True)
+    assert count() == 1                                         # 活跃且距上版 <30 分钟: 不出版本
+    old = _t.time() - 700
+    _os.utime(src, (old, old))                                  # 源已空闲 >10 分钟
+    sync(True)
+    assert count() == 2                                         # 空闲: 立即捕获最终态
+    rows.append({"timestamp": "2026-11-01T02:00:00.000Z", "ordinal": 10, "type": "response_item",
+                 "payload": {"type": "message", "id": "m10", "role": "user",
+                             "content": [{"type": "input_text", "text": "even more"}]}})
+    w(src, rows)
+    sync(False)
+    assert count() == 3                                         # 手动 sync 立即捕获
+
+
+def test_recent_leaves_collapses_versions(isolated):
+    """T3 回归: /recent?leaves=1 每会话只列演进链最新版本并附 ×N 版本数; 默认仍列全部版本。"""
+    _, vault = isolated
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    mk = lambda ref, text: cv.build_envelope({"capture": {"agent": "codex", "session_ref": ref},  # noqa: E731
+                                              "conversation": [{"type": "text", "role": "user",
+                                                                "content": text}],
+                                              "stats": cv.zero_stats()})
+    a1 = mk("sa", "alpha one")
+    sa1 = _write_env(vault, a1)
+    a2 = mk("sa", "alpha two")
+    a2["lineage"]["parent_snapshot"] = sa1
+    sa2 = _write_env(vault, a2)
+    b1 = mk("sb", "beta")
+    sb1 = _write_env(vault, b1)
+    for env, sid in ((a1, sa1), (a2, sa2), (b1, sb1)):
+        cv.register_snapshot(conn, env, sid, vault / "snapshots" / f"{sid}.json")
+    conn.commit()
+    srv, _ = cv.build_vault_server(vault, 0)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        code, all_ = _req(port, "GET", "/recent?limit=50")
+        assert code == 200 and all_["total"] == 3
+        code, lv = _req(port, "GET", "/recent?limit=50&leaves=1")
+        assert code == 200 and lv["total"] == 2 and lv["versions_total"] == 3
+        by = {r["sid"]: r for r in lv["rows"]}
+        assert sa1 not in by and by[sa2]["versions"] == 2 and by[sb1]["versions"] == 1
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_owned_stats_input_effective(isolated):
+    """KPI 口径: input_effective = 各来源语义归一后的总输入 (Claude 补回 cache 读/写, OpenAI 原值)。"""
+    _, vault = isolated
+    _register_env(vault, {"agent": "claude-code", "source_format": "claude-projects"},
+                  {"tokens_in": 10, "cache_read": 90, "cache_write": 5, "usage_events": 1},
+                  "2026-11-01T00:00:00")
+    _register_env(vault, {"agent": "zcode", "source_format": "zcode-sqlite"},
+                  {"tokens_in": 1000, "cache_read": 950, "usage_events": 1}, "2026-11-01T01:00:00")
+    own = cv.owned_stats(vault)
+    assert own["input_effective"] == 105 + 1000                 # 不是 10+1000, 也不是 +950 重计

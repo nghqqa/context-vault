@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS snapshots(
   completeness TEXT, tokens_in INTEGER, tokens_out INTEGER, reasoning_tokens INTEGER,
   cache_read INTEGER, cache_write INTEGER, total_tokens INTEGER, cost_usd REAL,
   usage_events INTEGER, blocks_total INTEGER, blocks_dropped INTEGER, path TEXT,
-  parent_snapshot TEXT);
+  parent_snapshot TEXT, fork_of TEXT, migrated_from TEXT, migration_baseline TEXT);
 CREATE TABLE IF NOT EXISTS ledger_events(
   id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, occurred_at TEXT, kind TEXT,
   model TEXT, provider TEXT, client TEXT, tokens_saved INTEGER, cost_usd REAL,
@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS probe_events(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, profile TEXT, endpoint TEXT,
   status TEXT, http_code INTEGER, latency_ms INTEGER, models TEXT, missing_models TEXT);
 CREATE INDEX IF NOT EXISTS idx_ledger_ts ON ledger_events(occurred_at);
+CREATE TABLE IF NOT EXISTS vault_meta(key TEXT PRIMARY KEY, value TEXT);
 """
 
 
@@ -85,13 +86,16 @@ def db(vault: Path) -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode=WAL")
     except sqlite3.OperationalError:
         pass  # 其他连接持锁时切不上就下次再切, 不阻塞本次
-    try:
-        # 索引层派生数据 (快照文件本身不变): sync 增量演进把新版本挂到 parent 上,
-        # owned_stats 据此只数每条演进链的叶子, 累计快照的用量不再逐版本重复累计
-        conn.execute("ALTER TABLE snapshots ADD COLUMN parent_snapshot TEXT")
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass  # 列已存在 = 老库迁移完成
+    # 索引层派生数据 (快照文件本身不变), 老库逐列迁移:
+    #   parent_snapshot — sync 增量演进的上一版, owned_stats 据此只数每条演进链的叶子
+    #   fork_of         — cv fork 的源节点 (原只活在 JSON 里, 树查询/统计要读全文件)
+    #   migrated_from / migration_baseline — --apply 迁移副本的源快照与首版复制来的用量基线
+    for col in ("parent_snapshot", "fork_of", "migrated_from", "migration_baseline"):
+        try:
+            conn.execute(f"ALTER TABLE snapshots ADD COLUMN {col} TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # 列已存在 = 老库迁移完成; 表尚未建由调用方 executescript(SCHEMA)
     return conn
 
 
@@ -358,18 +362,74 @@ def build_envelope(exported: dict) -> dict:
 
 SNAP_COLS = ("id,created_at,agent,source_format,provider,model,session_ref,originator,"
              "completeness,tokens_in,tokens_out,reasoning_tokens,cache_read,cache_write,"
-             "total_tokens,cost_usd,usage_events,blocks_total,blocks_dropped,path,parent_snapshot")
+             "total_tokens,cost_usd,usage_events,blocks_total,blocks_dropped,path,parent_snapshot,"
+             "fork_of,migrated_from,migration_baseline")
 
 
 def register_snapshot(conn, envelope: dict, sid: str, path: Path):
     c, s = envelope["capture"], envelope["stats"]
+    lin = envelope.get("lineage") or {}
+    base = lin.get("migration_baseline")
     conn.execute(
-        f"INSERT OR REPLACE INTO snapshots({SNAP_COLS}) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        f"INSERT OR REPLACE INTO snapshots({SNAP_COLS}) VALUES({','.join('?' * 24)})",
         (sid, envelope["created_at"], c.get("agent"), c.get("source_format"), c.get("provider"),
          c.get("model"), c.get("session_ref"), c.get("originator"), c.get("completeness"),
          s["tokens_in"], s["tokens_out"], s["reasoning_tokens"], s["cache_read"], s["cache_write"],
          s["total_tokens"], s["cost_usd"], s["usage_events"], s["blocks_total"], s["blocks_dropped"],
-         str(path), (envelope.get("lineage") or {}).get("parent_snapshot")))
+         str(path), lin.get("parent_snapshot"), lin.get("fork_of"), lin.get("migrated_from"),
+         json.dumps(base) if base else None))
+
+
+LINEAGE_TAIL = 4096  # envelope 的 lineage 是 JSON 最后一个键 (json.dumps 保序): 读尾部即可, 免解析数 MB 全文
+
+
+def read_lineage_tail(path) -> dict:
+    """从快照文件尾部解析 lineage 对象。读失败/无 lineage 返回 {}。"""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            n = fh.tell()
+            fh.seek(max(0, n - LINEAGE_TAIL))
+            tail = fh.read().decode("utf-8", "ignore")
+    except OSError:
+        return {}
+    i = tail.rfind('"lineage"')
+    j = tail.find("{", i) if i >= 0 else -1
+    if j < 0:
+        return {}
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(tail, j)
+    except ValueError:
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def backfill_lineage(conn, force: bool = False) -> int:
+    """用快照文件的 lineage 回填索引列 (文件为权威, 文件无值时保留库值)。返回改动行数。
+    parent_snapshot 列在 09f90a6 才加入且 ALTER 未回填: 此前登记的版本在库里全是孤立叶子
+    (实测 915 行 / 921 个幻影叶子), owned_stats 的叶子去重对历史数据失效。每个 vault 执行
+    一次 (vault_meta 标记), force=True 无视标记 (cv repair)。"""
+    conn.executescript(SCHEMA)
+    if not force and conn.execute("SELECT 1 FROM vault_meta WHERE key='lineage_backfill_v1'").fetchone():
+        return 0
+    changed = 0
+    rows = conn.execute("SELECT id, path, parent_snapshot, fork_of, migrated_from, migration_baseline"
+                        " FROM snapshots").fetchall()
+    for r in rows:
+        lin = read_lineage_tail(r["path"]) if r["path"] else {}
+        par = lin.get("parent_snapshot") or r["parent_snapshot"]
+        if par == r["id"]:
+            par = None  # 自环防御 (M2 历史遗留: parent==id 会被叶子过滤整条清零)
+        fk = lin.get("fork_of") or r["fork_of"]
+        mf = lin.get("migrated_from") or r["migrated_from"]
+        base = json.dumps(lin["migration_baseline"]) if lin.get("migration_baseline") else r["migration_baseline"]
+        if (par, fk, mf, base) != (r["parent_snapshot"], r["fork_of"], r["migrated_from"], r["migration_baseline"]):
+            conn.execute("UPDATE snapshots SET parent_snapshot=?, fork_of=?, migrated_from=?,"
+                         " migration_baseline=? WHERE id=?", (par, fk, mf, base, r["id"]))
+            changed += 1
+    conn.execute("INSERT OR REPLACE INTO vault_meta(key, value) VALUES('lineage_backfill_v1', ?)", (now_iso(),))
+    conn.commit()
+    return changed
 
 
 def cmd_export(args):
@@ -751,6 +811,17 @@ def do_import(vault: Path, sid: str, target: str, apply: bool, strip_thinking=Fa
             dest = claude_project_dir(cwd) / name
             dest.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(dest, "\n".join(json.dumps(l, ensure_ascii=False) for l in lines) + "\n")
+    if apply:
+        # 迁移副本登记 (见 load_migrations): 之后 sync 扫到该文件时打上 migrated_from + 首版用量
+        # 基线, owned_stats 扣基线只计迁入后真实新增。codex 目标回填了源 token_usage_record →
+        # 基线 = 源用量; claude 目标不回填 usage → 无基线 (只标来源)
+        s = env["stats"]
+        base = ({k: s.get(k, 0) for k in ("tokens_in", "tokens_out", "cache_read", "cache_write",
+                                          "total_tokens")}
+                if target == "codex" and s.get("usage_events") else None)
+        with (vault / "migrations.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"dest": _norm_path(dest), "source": sid, "baseline": base,
+                                 "at": now_iso()}, ensure_ascii=False) + "\n")
     return {"lines": len(lines), "dropped": dropped, "dest": str(dest),
             "new_sid": new_sid if target == "codex" else None, "applied": apply}
 
@@ -973,28 +1044,42 @@ def owned_stats(vault: Path) -> dict:
         pass
     leaf = ("id NOT IN (SELECT parent_snapshot FROM snapshots"
             " WHERE parent_snapshot IS NOT NULL)")
-    r = conn.execute(f"SELECT COUNT(*) n, COALESCE(SUM(tokens_in),0) i, COALESCE(SUM(tokens_out),0) o,"
-                     f" COALESCE(SUM(cache_read),0) cr, COALESCE(SUM(cache_write),0) cw,"
-                     f" COALESCE(SUM(total_tokens),0) t FROM snapshots WHERE {leaf}").fetchone()
-    by_agent = conn.execute(f"SELECT agent, COUNT(*) n, SUM(tokens_in) i FROM snapshots"
-                            f" WHERE {leaf} GROUP BY agent ORDER BY i DESC").fetchall()
     versions = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
-    # 命中率分母按来源字段语义归一 (2026-11-02 审查 #2): Claude 的 tokens_in 只是未缓存输入,
-    # 缓存读/写单独计数, 命中率 = cache读 / (未缓存+读+写); OpenAI 系 (codex) 的 input_tokens
-    # 已含缓存部分 (缓存读是子集), 分母 = input。混源 vault 按各自分母加权, 不再出现 >100%。
-    per_fmt = conn.execute(f"SELECT source_format, COALESCE(SUM(tokens_in),0) i,"
-                           f" COALESCE(SUM(cache_read),0) cr, COALESCE(SUM(cache_write),0) cw"
-                           f" FROM snapshots WHERE {leaf} GROUP BY source_format").fetchall()
-    denom = sum((r["i"] + r["cr"] + r["cw"]) if (r["source_format"] == "claude-projects"
-                 or (r["source_format"] or "").startswith("via-smigrate")) else r["i"]
-                for r in per_fmt)
-    hit = (r["cr"] / denom) if denom else 0.0
-    return {"snapshots": versions, "sessions": r["n"], "tokens_in": r["i"], "tokens_out": r["o"],
-            "cache_read": r["cr"], "cache_write": r["cw"], "total_tokens": r["t"],
+    rows = conn.execute(f"SELECT agent, source_format, tokens_in, tokens_out, cache_read, cache_write,"
+                        f" total_tokens, migration_baseline FROM snapshots WHERE {leaf}").fetchall()
+    ti = to = cr = cw = tt = denom = 0
+    agg = {}
+    for r in rows:
+        i, o, c, w, t = (int(r[k] or 0) for k in ("tokens_in", "tokens_out", "cache_read", "cache_write",
+                                                   "total_tokens"))
+        if r["migration_baseline"]:
+            # --apply 迁移副本的首版复制了源会话用量 (codex 目标回填 token_usage_record):
+            # 扣掉登记的基线, 只计迁入后真实新增, 源会话用量不再被副本重复计一次
+            try:
+                b = json.loads(r["migration_baseline"]) or {}
+            except ValueError:
+                b = {}
+            i = max(0, i - int(b.get("tokens_in", 0) or 0))
+            o = max(0, o - int(b.get("tokens_out", 0) or 0))
+            c = max(0, c - int(b.get("cache_read", 0) or 0))
+            w = max(0, w - int(b.get("cache_write", 0) or 0))
+            t = max(0, t - int(b.get("total_tokens", 0) or 0))
+        ti += i; to += o; cr += c; cw += w; tt += t
+        # 命中率分母 = 规范化总输入 (2026-11-02 审查 #2): Claude 语义 (claude-projects 与 ingest
+        # 产物) 的 tokens_in 只是未缓存输入, 总输入 = 未缓存+读+写; OpenAI 语义 (codex/zcode)
+        # 的 input 已含缓存 (实证 zcode model_usage 0 行 cache_read>input), 总输入 = input
+        sf = r["source_format"] or ""
+        denom += (i + c + w) if (sf == "claude-projects" or sf.startswith("via-smigrate")) else i
+        a = agg.setdefault(r["agent"], [0, 0])
+        a[0] += 1
+        a[1] += i
+    hit = (cr / denom) if denom else 0.0
+    return {"snapshots": versions, "sessions": len(rows), "tokens_in": ti, "tokens_out": to,
+            "cache_read": cr, "cache_write": cw, "total_tokens": tt,
+            "input_effective": denom,  # 规范化总输入 (各来源语义归一后可相加), 概览累计输入用它
             "cache_hit_rate": round(hit, 3),
-            "by_agent": [{"agent": a["agent"], "snapshots": a["n"], "sessions": a["n"],
-                          "tokens_in": a["i"]}
-                         for a in by_agent],
+            "by_agent": [{"agent": k, "snapshots": v[0], "sessions": v[0], "tokens_in": v[1]}
+                         for k, v in sorted(agg.items(), key=lambda kv: -kv[1][1])],
             "source": "vault-owned (from agent session usage records)"}
 
 
@@ -1194,6 +1279,43 @@ CREATE TABLE IF NOT EXISTS sync_sources(
   path TEXT PRIMARY KEY, mtime REAL, size INTEGER, snapshot_id TEXT, synced_at TEXT);
 """
 
+SNAPSHOT_MIN_INTERVAL = int(os.environ.get("CV_SNAPSHOT_INTERVAL_MIN", "30")) * 60
+SNAPSHOT_IDLE_SEC = 600
+
+
+def _debounced(prev_synced_at, src_mtime: float) -> bool:
+    """托盘周期同步的版本限频: 源 10 分钟内仍有更新 (活跃) 且距上次入库不足 30 分钟 → 本轮不出
+    版本, 水位不推, 下轮再判; 源空闲后立即捕获最终态。托盘 2 分钟一轮, 长会话每条消息全量复制
+    一版曾致 4 天 +1603 版本 / 2.98GB。CV_SNAPSHOT_INTERVAL_MIN=0 关闭。"""
+    if not prev_synced_at or SNAPSHOT_MIN_INTERVAL <= 0:
+        return False
+    now = time.time()
+    if now - src_mtime >= SNAPSHOT_IDLE_SEC:
+        return False
+    try:
+        last = dt.datetime.fromisoformat(prev_synced_at).timestamp()
+    except (TypeError, ValueError):
+        return False
+    return now - last < SNAPSHOT_MIN_INTERVAL
+
+
+def _norm_path(p) -> str:
+    return os.path.normcase(os.path.abspath(str(p)))
+
+
+def load_migrations(vault: Path) -> dict:
+    """vault/migrations.jsonl: do_import --apply 登记的迁移副本 {规范化 dest → {source, baseline}}。"""
+    out = {}
+    p = vault / "migrations.jsonl"
+    if p.exists():
+        for line in p.read_text(encoding="utf-8").splitlines():
+            try:
+                e = json.loads(line)
+                out[e["dest"]] = e
+            except (ValueError, KeyError, TypeError):
+                continue
+    return out
+
 
 def scan_sources(extra_roots: list | None = None) -> list:
     """扫描本机全部会话源 (只读)。返回 [Path, ...]。"""
@@ -1214,12 +1336,15 @@ def scan_sources(extra_roots: list | None = None) -> list:
     return files
 
 
-def sync_one(conn, vault: Path, path: Path) -> str:
-    """单文件入库: 新增/更新(带 lineage)/跳过。返回状态。"""
+def sync_one(conn, vault: Path, path: Path, migrations=None, debounce=False) -> str:
+    """单文件入库: 新增/更新(带 lineage)/跳过。返回状态。
+    debounce: 托盘周期同步传 True — 活跃会话限频出版本 (见 _debounced); 手动 cv sync 立即捕获。"""
     st = path.stat()
-    row = conn.execute("SELECT mtime, size, snapshot_id FROM sync_sources WHERE path=?",
+    row = conn.execute("SELECT mtime, size, snapshot_id, synced_at FROM sync_sources WHERE path=?",
                        (str(path),)).fetchone()
     if row and abs(row["mtime"] - st.st_mtime) < 1 and row["size"] == st.st_size:
+        return "skip"
+    if debounce and row and row["snapshot_id"] and _debounced(row["synced_at"], st.st_mtime):
         return "skip"
     fmt = detect_format(first_jsonl(path), path)
     exporters = {"codex-rollout": export_codex, "claude-transcript": export_claude,
@@ -1228,6 +1353,11 @@ def sync_one(conn, vault: Path, path: Path) -> str:
     envelope = build_envelope(exported)
     if exported["stats"]["blocks_total"] == 0:
         return "empty"  # 辅助文件/空会话不入库
+    m = (migrations or {}).get(_norm_path(path))
+    if m:  # --apply 迁移副本: 标注来源与首版用量基线 (lineage 不进内容哈希, 链上每版都带)
+        envelope["lineage"]["migrated_from"] = m.get("source")
+        if m.get("baseline"):
+            envelope["lineage"]["migration_baseline"] = m["baseline"]
     sid = snapshot_id(envelope)
     if row and row["snapshot_id"]:
         if row["snapshot_id"] == sid:
@@ -1251,6 +1381,16 @@ def sync_one(conn, vault: Path, path: Path) -> str:
 
 
 ZCODE_DB = HOME / ".zcode" / "cli" / "db" / "db.sqlite"
+# model_usage 逐请求记录 (带 session_id); OpenAI 语义: input 已含 cache 读 (实证 0 行 cache_read>input)
+ZCODE_USAGE_SQL = ("SELECT COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),"
+                   " COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cache_read_input_tokens),0),"
+                   " COALESCE(SUM(cache_creation_input_tokens),0) FROM model_usage WHERE session_id=?")
+
+
+def _zcode_usage_stats(u) -> dict:
+    """ZCODE_USAGE_SQL 一行 → stats 字段 (total = 输入 + 输出; 输入已含缓存)。"""
+    return {"tokens_in": u[1], "tokens_out": u[2], "reasoning_tokens": u[3], "cache_read": u[4],
+            "cache_write": u[5], "total_tokens": u[1] + u[2], "usage_events": u[0]}
 
 
 def export_zcode_session(db_conn, srow) -> dict:
@@ -1309,10 +1449,52 @@ def export_zcode_session(db_conn, srow) -> dict:
                     blocks.append({"type": "tool_result", "call_id": call_id,
                                    "content": content, "is_error": False, "ts": ts})
     stats["blocks_total"] = len(blocks)
+    try:  # 用量: 旧适配器从不读 model_usage, zcode 快照 stats 曾全 0 (账本低估 + 详情/预览显示 0)
+        u = db_conn.execute(ZCODE_USAGE_SQL, (sid,)).fetchone()
+    except sqlite3.Error:
+        u = None  # 老版 zcode 无 model_usage 表: 源无用量数据, 诚实留 0
+    if u and u[0]:
+        stats.update(_zcode_usage_stats(u))
     return {"capture": capture, "conversation": blocks, "stats": stats}
 
 
-def _sync_zcode_db(conn, vault: Path) -> tuple:
+def backfill_zcode_usage(conn, force: bool = False) -> int:
+    """zcode 历史快照的用量回填 (索引层, 零磁盘代价)。旧适配器未读 model_usage, 历史版本
+    stats 全 0; 快照文件不可变不重写 — model_usage 逐请求带 session_id 与完成时间, 按每个版本
+    的 created_at 精确算出"截至当时"的累计用量写入索引列。每 vault 一次 (vault_meta 标记)。"""
+    conn.executescript(SCHEMA)
+    if not force and conn.execute("SELECT 1 FROM vault_meta WHERE key='zcode_usage_backfill_v1'").fetchone():
+        return 0
+    n = 0
+    if ZCODE_DB.exists():
+        zdb = sqlite3.connect(f"file:{ZCODE_DB}?mode=ro", uri=True)
+        try:
+            rows = conn.execute("SELECT id, session_ref, created_at FROM snapshots"
+                                " WHERE source_format='zcode-sqlite' AND COALESCE(usage_events,0)=0").fetchall()
+            for r in rows:
+                try:
+                    cutoff = int(dt.datetime.fromisoformat(r["created_at"]).timestamp() * 1000)
+                    u = zdb.execute(ZCODE_USAGE_SQL + " AND COALESCE(completed_at, started_at) <= ?",
+                                    (r["session_ref"], cutoff)).fetchone()
+                except (TypeError, ValueError, sqlite3.Error):
+                    continue
+                if u and u[0]:
+                    st = _zcode_usage_stats(u)
+                    conn.execute("UPDATE snapshots SET tokens_in=?, tokens_out=?, reasoning_tokens=?,"
+                                 " cache_read=?, cache_write=?, total_tokens=?, usage_events=? WHERE id=?",
+                                 (st["tokens_in"], st["tokens_out"], st["reasoning_tokens"], st["cache_read"],
+                                  st["cache_write"], st["total_tokens"], st["usage_events"], r["id"]))
+                    n += 1
+        except sqlite3.Error:
+            pass  # 无 model_usage 表: 源无数据, 照常打标记
+        finally:
+            zdb.close()
+    conn.execute("INSERT OR REPLACE INTO vault_meta(key, value) VALUES('zcode_usage_backfill_v1', ?)", (now_iso(),))
+    conn.commit()
+    return n
+
+
+def _sync_zcode_db(conn, vault: Path, debounce=False) -> tuple:
     """zcode 主库增量同步: session.time_updated 水位, 键 zcode:<session_id>。"""
     if not ZCODE_DB.exists():
         return (0, 0, 0)
@@ -1324,10 +1506,12 @@ def _sync_zcode_db(conn, vault: Path) -> tuple:
                                 " ORDER BY time_updated"):
         key = f"zcode:{srow['id']}"
         mtime = (srow["time_updated"] or 0) / 1000
-        prev = conn.execute("SELECT mtime, snapshot_id FROM sync_sources WHERE path=?",
+        prev = conn.execute("SELECT mtime, snapshot_id, synced_at FROM sync_sources WHERE path=?",
                             (key,)).fetchone()
         if prev and mtime <= prev["mtime"]:
             continue  # 水位必须严格前进 (旧的 <1s 容差会吞掉秒内新消息的增量)
+        if debounce and prev and prev["snapshot_id"] and _debounced(prev["synced_at"], mtime):
+            continue  # 活跃会话限频: 30 分钟最多一版, 空闲后捕获最终态
         try:
             exported = export_zcode_session(db_conn, srow)
         except Exception:
@@ -1360,12 +1544,18 @@ def cmd_sync(args):
     (vault / "snapshots").mkdir(parents=True, exist_ok=True)
     conn = db(vault)
     conn.executescript(SCHEMA + SYNC_TABLE)
+    n_lin = backfill_lineage(conn)       # 每 vault 一次: 历史演进链索引回填
+    n_zu = backfill_zcode_usage(conn)    # 每 vault 一次: zcode 历史快照用量回填
+    if n_lin or n_zu:
+        print(f"  一次性修复: lineage 回填 {n_lin} 行 · zcode 用量回填 {n_zu} 行")
+    migrations = load_migrations(vault)
+    debounce = bool(getattr(args, "debounce", False))
     files = scan_sources(args.root)
     n_new = n_upd = n_skip = n_empty = 0
     t0 = time.time()
     for f in sorted(files):
         try:
-            r = sync_one(conn, vault, f)
+            r = sync_one(conn, vault, f, migrations, debounce)
         except (SystemExit, Exception) as e:
             print(f"  ! 跳过 {f.name}: {str(e)[:80]}")
             n_skip += 1
@@ -1379,7 +1569,7 @@ def cmd_sync(args):
         else:
             n_skip += 1
     try:
-        z_new, z_upd, _ = _sync_zcode_db(conn, vault)
+        z_new, z_upd, _ = _sync_zcode_db(conn, vault, debounce)
         n_new += z_new; n_upd += z_upd
     except Exception as e:
         print(f"  ! zcode 库同步跳过: {str(e)[:80]}")
@@ -1387,6 +1577,19 @@ def cmd_sync(args):
     total = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
     print(f"sync 完成: 新增 {n_new} · 更新 {n_upd} · 跳过 {n_skip}(未变/异常)"
           f" · 空会话 {n_empty} | vault 总快照 {total} | 耗时 {time.time()-t0:.1f}s")
+
+
+def cmd_repair(args):
+    """一次性数据修复的显式入口 (cv sync 首次运行也会自动做): 从快照文件回填 lineage 索引列,
+    zcode 历史快照按版本时间回填用量。幂等, 可重复执行。"""
+    vault = vault_dir(args)
+    conn = db(vault)
+    n_lin = backfill_lineage(conn, force=True)
+    n_zu = backfill_zcode_usage(conn, force=True)
+    own = owned_stats(vault)
+    print(f"lineage 回填: {n_lin} 行 · zcode 用量回填: {n_zu} 行")
+    print(f"账本口径: {own['sessions']} 独立会话 / {own['snapshots']} 快照版本 · "
+          f"规范化总输入 {own['input_effective']:,} tok · 命中率 {own['cache_hit_rate']*100:.1f}%")
 
 
 # ------------------------------------------------- memory: M3 记忆层 (零依赖规则引擎 v0)
@@ -2919,6 +3122,8 @@ details.card .card-b{border-top:1px solid var(--line-soft)}
       <button class="btn" onclick="snapSearch()">搜索</button>
       <button class="btn" onclick="loadSnaps()">最近</button>
       <button class="btn" id="snap-sort" onclick="snapSort()">时间 ↓</button>
+      <button class="btn" id="snap-leaves" onclick="snapLeavesToggle()" aria-pressed="true"
+        title="每个会话只列演进链的最新版本; 再点显示全部历史版本">仅最新版本</button>
     </div>
     <div class="meta-line" id="snap-meta"></div>
     <div id="snap-list" aria-live="polite"><div class="skel" style="width:50%"></div><div class="skel" style="width:72%"></div><div class="skel" style="width:60%"></div></div>
@@ -3194,21 +3399,26 @@ async function loadOv(){
     const hit=(ow.cache_hit_rate!=null)?ow.cache_hit_rate:null;
     const hitSem=ow.semantics||"cache 读 / 全部输入 (按来源口径规范化的分母)";
     const inEff=(ow.input_effective!=null)?ow.input_effective:((ow.tokens_in||0));
-    const ztIn=Object.values(zu).reduce((s,a)=>s+((a.tin||0)+(a.cr||0)),0);
-    const totalIn=(inEff||0)+ztIn;
+    /* zcode model_usage 是 OpenAI 语义: input 已含 cache 读 (实证 0 行 cache_read>input) —
+       曾把 tin+cr 相加, zcode 输入被计两次 (KPI 虚高约一倍) */
+    const ztIn=Object.values(zu).reduce((s,a)=>s+(a.tin||0),0);
+    /* 快照账本已含 zcode 叶子用量 (索引层回填); 有 model_usage 全量时用它替换快照里的 zcode 部分,
+       不重复相加 (model_usage 还覆盖未入库/已删会话, 是 zcode 的真相源) */
+    const zOwned=(((ow.by_agent||[]).find(a=>a.agent==="zcode"))||{}).tokens_in||0;
+    const totalIn=(inEff||0)-(ztIn>0?zOwned:0)+ztIn;
     const band=
       kpi(num(ow.snapshots||0),"快照版本","vault/snapshots 内容寻址快照 · 含被演进替代的历史版本")+
       kpi(sessions==null?"—":num(sessions),"独立会话",sessions==null?"后端未提供独立会话口径":"按 lineage 演进链去重后的会话数")+
       kpi('<span title="'+num(totalIn)+'">'+bn(totalIn)+'</span><small>tokens</small>',
         '累计输入 tokens<div class="exact">精确 '+num(totalIn)+'</div>',
-        "口径: 快照内嵌 usage (按来源规范化, "+num(ow.tokens_in||0)+") + zcode model_usage 全量调用 ("+num(ztIn)+") · 含 cache 读")+
+        "口径: 快照内嵌 usage 规范化总输入 ("+num(inEff||0)+", Claude 语义补回 cache 读/写) · zcode 以 model_usage 全量调用 ("+num(ztIn)+") 替换快照内的 zcode 部分 · 均含 cache 读")+
       kpi(hit==null?"—":'<span class="'+(hit>1?"kpi-bad":"")+'">'+(hit*100).toFixed(1)+"%</span>",
         "缓存命中率",
         "口径: "+hitSem+" · 数据源: vault 快照内嵌 usage");
     $("#ov-band").innerHTML=band;
 
-    /* 最近入库会话 */
-    let rc=null;try{rc=await api("/recent?limit=10")}catch(e){}
+    /* 最近入库会话: 每会话只列演进链最新版本 (同一会话的历史版本不再刷屏) */
+    let rc=null;try{rc=await api("/recent?limit=10&leaves=1")}catch(e){}
     const total=(rc&&rc.total)||0;
     const arr=(rc&&rc.rows)||[];
     $("#ov-latest").innerHTML=(arr.length?table(["来源","会话摘要","位置","入库时间"],
@@ -3220,7 +3430,8 @@ async function loadOv(){
         return tr}),"tbl-44")
       :'<div class="empty">还没有会话入库<br>先运行 <code>python tools/cv.py sync</code> 或单文件 <code>cv export &lt;会话文件&gt;</code>'+
        '<br><button class="btn sm" onclick="loadOv()">重试</button></div>')+
-      '<div class="foot"><span>显示最近 '+arr.length+" 条 · 库存共 "+num(total)+" 个快照版本</span>"+
+      '<div class="foot"><span>显示最近 '+arr.length+" 个会话 · 共 "+num(total)+" 个会话 / "+
+        num((rc&&rc.versions_total)||total)+" 个快照版本</span>"+
       '<a onclick="setTab(\'snap\')">查看全部 →</a></div>';
 
     /* 右栏: 哨兵 / 记忆 / 审计 (可展开) */
@@ -3301,7 +3512,13 @@ function renderUsage(d){
 
 /* ================= 快照资产 ================= */
 const snapsSeq=seqGuard(null);
-let snapPage=0,snapAsc=false,snapMode="recent",snapQuery="";
+let snapPage=0,snapAsc=false,snapMode="recent",snapQuery="",snapLeaves=true;
+function snapLeavesToggle(){ /* 同会话演进链折叠为一行 (×N 版本) ↔ 全部历史版本 */
+  snapLeaves=!snapLeaves;snapPage=0;
+  const b=$("#snap-leaves");b.textContent=snapLeaves?"仅最新版本":"全部版本";
+  b.setAttribute("aria-pressed",snapLeaves?"true":"false");
+  renderSnaps();
+}
 const LIM=30;
 
 async function loadSnaps(page){
@@ -3333,9 +3550,10 @@ async function snapSearch(keepPage){
 async function renderSnaps(){
   $("#snap-list").innerHTML='<div class="skel" style="width:45%"></div><div class="skel" style="width:66%"></div>';
   try{
-    const d=await snapsSeq(()=>api("/recent?limit="+LIM+"&offset="+(snapPage*LIM)+"&order="+(snapAsc?"asc":"desc")));
+    const d=await snapsSeq(()=>api("/recent?limit="+LIM+"&offset="+(snapPage*LIM)+"&order="+(snapAsc?"asc":"desc")+
+      "&leaves="+(snapLeaves?1:0)));
     const rows=d.rows||[],total=d.total||0;
-    renderSnapTable(rows,{recent:true,total,rows:rows.length});
+    renderSnapTable(rows,{recent:true,total,rows:rows.length,versionsTotal:d.versions_total});
   }catch(e){
     if(e&&e.stale)return;
     $("#snap-list").innerHTML=errEmpty("快照列表加载失败："+e.message,"renderSnaps()");
@@ -3352,6 +3570,9 @@ function renderSnapTable(rows,opt){
   if(opt.search){
     meta='搜索「'+esc(opt.search)+'」— <b class="num">'+num(opt.hits||0)+"</b> 条命中"+
       ' <button class="xbtn" onclick="loadSnaps()">清空搜索 ×</button>';
+  }else if(snapLeaves){
+    meta="最近入库 · 共 <b class='num'>"+num(opt.total||0)+"</b> 个会话 (每会话显示最新版本 · 库存 <b class='num'>"+
+      num(opt.versionsTotal||opt.total||0)+"</b> 个快照版本)";
   }else{
     meta="最近入库 · 共 <b class='num'>"+num(opt.total||0)+"</b> 个快照版本 (含演进历史版本)";
   }
@@ -3374,7 +3595,9 @@ function renderSnapTable(rows,opt){
       table(opt.search
         ?["快照","会话摘要","来源","得分","完整性","时间","目录",""]
         :["快照","会话摘要","来源","块数","完整性","时间","目录",""],
-        rows.map(r=>{const tr=[sidBtn(r.sid),sumCell(r.first),agentCell(r.agent),
+        rows.map(r=>{const tr=[sidBtn(r.sid)+(r.versions>1?' <span class="chip" title="该会话共 '+
+            num(r.versions)+' 个演进版本 (此行为最新版本)">×'+num(r.versions)+"</span>":""),
+          sumCell(r.first),agentCell(r.agent),
           {t:opt.search?num(Math.round(r.score)):num(r.blocks),num:1},
           compCell(r.completeness),
           '<span class="mono nowr" title="'+esc(r.created_at||"")+'">'+ftime(r.created_at)+"</span>",
@@ -3776,6 +3999,20 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
             self._send(json.dumps(obj, ensure_ascii=False).encode("utf-8"),
                        "application/json; charset=utf-8", code)
 
+        def _stats_overlay(self, sid: str, s: dict) -> dict:
+            """快照文件不可变: zcode 历史版本的用量在索引层回填 (backfill_zcode_usage), 文件里
+            仍是 0 — 详情/迁移预览优先展示索引里的回填值, 不再对有用量的会话显示"0 tokens"。"""
+            if s.get("usage_events"):
+                return s
+            try:
+                c = db(vault)
+                r = c.execute("SELECT tokens_in, tokens_out, reasoning_tokens, cache_read, cache_write,"
+                              " total_tokens, usage_events FROM snapshots WHERE id=?", (sid,)).fetchone()
+                c.close()
+            except sqlite3.Error:
+                return s
+            return {**s, **dict(r)} if r and r["usage_events"] else s
+
         @staticmethod
         def _sid_ok(sid: str) -> bool:
             # 快照 id 形态校验 (cv_ + hex): 挡路径穿越与任意文件读; 同时给迁移一个
@@ -3928,7 +4165,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     dist = dict(Counter(b["type"] for b in blocks))
                     live, comp = live_context(blocks)
                     live_dist = dict(Counter(b["type"] for b in live))
-                    s = env2["stats"]
+                    s = self._stats_overlay(qid, env2["stats"])
                     return self._json({"id": q.get("id"), "agent": env2["capture"].get("agent"),
                                        "completeness": env2["capture"].get("completeness"),
                                        "cwd": env2["capture"].get("cwd"),
@@ -3967,10 +4204,30 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     desc = q.get("order", "desc") != "asc"
                     # 迭代只追加的 sids 而非 dict.items(): 增量插入并发时 dict 迭代会 RuntimeError
                     pairs = [(sid, meta[sid]) for sid in sids]
+                    versions = {}
+                    if q.get("leaves") == "1":
+                        # 每个会话只列演进链的当前版本 (叶子), 附该会话的版本数 (×N 徽章);
+                        # 口径与 owned_stats 一致 (库内 parent_snapshot), 库不可读时退化为全量
+                        try:
+                            c = db(vault)
+                            parents = {r[0] for r in c.execute(
+                                "SELECT parent_snapshot FROM snapshots WHERE parent_snapshot IS NOT NULL")}
+                            per_sess = {(r[0], r[1]): r[2] for r in c.execute(
+                                "SELECT agent, session_ref, COUNT(*) FROM snapshots GROUP BY agent, session_ref")}
+                            sess_of = {r[0]: (r[1], r[2]) for r in c.execute(
+                                "SELECT id, agent, session_ref FROM snapshots")}
+                            c.close()
+                            pairs = [kv for kv in pairs if kv[0] not in parents]
+                            versions = {sid: per_sess.get(sess_of.get(sid), 1) for sid, _ in pairs}
+                        except sqlite3.Error:
+                            pass
+                        total = len(pairs)  # leaves 模式分页按会话数
                     rows = sorted(pairs, key=lambda kv: kv[1]["created_at"] or "",
                                   reverse=desc)[off:off + lim]
-                    return self._json({"total": total,
-                                       "rows": [{"sid": k, **v} for k, v in rows]})
+                    return self._json({"total": total, "versions_total": len(meta),
+                                       "rows": [{"sid": k, **v, **({"versions": versions[k]}
+                                                                   if k in versions else {})}
+                                                for k, v in rows]})
                 if u.path == "/stats":
                     return self._json({"stats": ledger_summary(vault), "owned": owned_stats(vault)})
                 if u.path == "/snapshot":
@@ -3983,7 +4240,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     from collections import Counter
                     dist = dict(Counter(b["type"] for b in env["conversation"]))
                     return self._json({"id": q.get("id"), "capture": env["capture"],
-                                       "stats": env["stats"], "block_dist": dist})
+                                       "stats": self._stats_overlay(qid, env["stats"]), "block_dist": dist})
                 self._json({"error": "unknown route",
                             "routes": ["/", "/healthz", "/search?q=", "/context?q=", "/preview?id=",
                                        "/recent", "/stats", "/snapshot?id=", "/ledger", "/probe_events",
@@ -4170,6 +4427,8 @@ def main(argv=None):
 
     sy = sub.add_parser("sync", help="自动入库: 扫描全部本地会话源, 增量导出 (mtime 水位 + lineage)")
     sy.add_argument("--root", action="append", help="额外扫描目录 (可多次)")
+    sy.add_argument("--debounce", action="store_true",
+                    help="周期同步用: 活跃会话 30 分钟最多存一版 (CV_SNAPSHOT_INTERVAL_MIN 可调), 空闲后捕获最终态")
     sy.set_defaults(func=cmd_sync)
 
     eh = sub.add_parser("export-harness", help="快照 → 任意 harness 会话文件 (18 目标, 经 smigrate)")
@@ -4272,6 +4531,8 @@ def main(argv=None):
     b.set_defaults(func=cmd_backup)
 
     sub.add_parser("doctor").set_defaults(func=cmd_doctor)
+    sub.add_parser("repair", help="一次性数据修复: lineage 索引回填 + zcode 历史用量回填 (幂等)"
+                   ).set_defaults(func=cmd_repair)
 
 
     args = ap.parse_args(argv)

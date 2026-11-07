@@ -28,5 +28,12 @@ jobs:
           node console_run.js  # mock 已替全部定时器, 正常执行即退出 0; 崩溃(非 0)即失败 (Windows pwsh 下禁用 bash 语法, 见 f96c91c 教训)
           python tools/check_console_js.py unit
           node console_unit.js  # 带数据的函数级回归: B03 token 清理 / B04 loadOv / B06 搜索空态
+      - name: console layout probe (真实 Chromium 多视口溢出探测, 管 node 检查管不到的 CSS 级联)
+        if: matrix.python == '3.12'
+        shell: bash
+        run: |
+          pip install playwright
+          if [ "$RUNNER_OS" = "Linux" ]; then python -m playwright install --with-deps chromium; else python -m playwright install chromium; fi
+          python tools/check_console_overflow.py
       - name: stdlib-only check (引擎零第三方依赖)
         run: python -c "import sys; sys.path.insert(0, 'tools'); import cv, mcp_server; print('engine imports OK, zero third-party deps')"
