@@ -415,11 +415,15 @@ def backfill_lineage(conn, force: bool = False) -> int:
     changed = 0
     rows = conn.execute("SELECT id, path, parent_snapshot, fork_of, migrated_from, migration_baseline"
                         " FROM snapshots").fetchall()
+    ids = {r["id"] for r in rows}
     for r in rows:
         lin = read_lineage_tail(r["path"]) if r["path"] else {}
-        par = lin.get("parent_snapshot") or r["parent_snapshot"]
-        if par == r["id"]:
-            par = None  # 自环防御 (M2 历史遗留: parent==id 会被叶子过滤整条清零)
+        # 库值有效 (存在且非自环) 则优先 — prune 重链后文件 lineage 仍指向已删版本, 不得复活悬空指针;
+        # 库值缺失/悬空时才用文件值, 文件值也无效则置空 (防幻影叶子)
+        par = r["parent_snapshot"]
+        if par == r["id"] or par not in ids:
+            fpar = lin.get("parent_snapshot")
+            par = fpar if fpar in ids and fpar != r["id"] else None
         fk = lin.get("fork_of") or r["fork_of"]
         mf = lin.get("migrated_from") or r["migrated_from"]
         base = json.dumps(lin["migration_baseline"]) if lin.get("migration_baseline") else r["migration_baseline"]
@@ -457,6 +461,12 @@ def cmd_export(args):
         s = exported["stats"]
         print(f"已导出 {out.name}  格式={fmt}  块={s['blocks_total']}  入token={s['tokens_in']}  cache读={s['cache_read']}")
         register_snapshot(conn, envelope, sid, out)
+    try:  # 登记 sync_sources: 手动 export 的会话也有源路径可查 (prune 源存活判定/后续 sync 增量)
+        st = src.stat()
+        conn.execute("INSERT OR REPLACE INTO sync_sources(path,mtime,size,snapshot_id,synced_at)"
+                     " VALUES(?,?,?,?,?)", (_norm_path(src), st.st_mtime, st.st_size, sid, now_iso()))
+    except OSError:
+        pass
     conn.commit()
     return sid
 
@@ -1577,6 +1587,94 @@ def cmd_sync(args):
     total = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
     print(f"sync 完成: 新增 {n_new} · 更新 {n_upd} · 跳过 {n_skip}(未变/异常)"
           f" · 空会话 {n_empty} | vault 总快照 {total} | 耗时 {time.time()-t0:.1f}s")
+
+
+def cmd_prune(args):
+    """中间版本 GC: 每会话每天保留最后一版 + 每会话最新版本 (叶子), 保留集按时间重链。
+    默认 dry-run 只报告; --apply 先做一次 vault 备份再执行。
+    恒保留: 叶子 (账本/详情口径)、fork 实体 (用户资产)、源已消失会话的整链 (vault 是唯一副本)。"""
+    from types import SimpleNamespace
+    vault = vault_dir(args)
+    conn = db(vault)
+    conn.executescript(SCHEMA + SYNC_TABLE)  # sync_sources: 源存活判定要用
+    rows = conn.execute("SELECT id, agent, session_ref, created_at, path, parent_snapshot, fork_of"
+                        " FROM snapshots").fetchall()
+    parents = {r["parent_snapshot"] for r in rows if r["parent_snapshot"]}
+    # 源存活判定 (会话级): 文件类看 sync_sources 里登记的源路径; zcode 看 session 是否还在主库
+    zalive = None
+    if ZCODE_DB.exists():
+        z = sqlite3.connect(f"file:{ZCODE_DB}?mode=ro", uri=True)
+        zalive = {x[0] for x in z.execute("SELECT id FROM session WHERE time_deleted IS NULL")}
+        z.close()
+    srcmap = {r[0]: r[1] for r in conn.execute("SELECT snapshot_id, path FROM sync_sources")}
+    sess_rows = {}
+    for r in rows:
+        sess_rows.setdefault((r["agent"], r["session_ref"]), []).append(r)
+    sess_alive = {}
+    for key, lst in sess_rows.items():
+        alive = False
+        for r in lst:
+            if key[0] == "zcode":
+                alive = zalive is not None and r["session_ref"] in zalive
+            else:
+                sp = srcmap.get(r["id"])
+                alive = bool(sp) and Path(sp).exists()
+            if alive:
+                break
+        sess_alive[key] = alive
+    dead_sessions = {k[1] for k, alive in sess_alive.items() if not alive}
+    keep = set()
+    for r in rows:
+        if r["id"] not in parents:
+            keep.add(r["id"])                                    # 叶子恒留 (账本口径)
+        if r["fork_of"] or r["session_ref"] in dead_sessions:
+            keep.add(r["id"])                                    # fork / 唯一副本: 整链保留
+    day_last = {}
+    for r in rows:
+        k = (r["agent"], r["session_ref"], (r["created_at"] or "")[:10])
+        if k not in day_last or (r["created_at"] or "") > (day_last[k]["created_at"] or ""):
+            day_last[k] = r
+    for r in day_last.values():
+        keep.add(r["id"])                                        # 每会话每天最后一版 (按天记录)
+    drop = [r for r in rows if r["id"] not in keep]
+    reclaim = sum((os.path.getsize(r["path"]) if r["path"] and os.path.exists(r["path"]) else 0)
+                  for r in drop)
+    print(f"保留 {len(rows) - len(drop)} / {len(rows)} 版 (叶子 {sum(1 for r in rows if r['id'] in keep and r['id'] not in parents)} · "
+          f"每日记录 {len(day_last)} · fork/孤本整链 {sum(1 for r in rows if r['fork_of'] or r['session_ref'] in dead_sessions)}) · "
+          f"回收 {len(drop)} 版 / {reclaim/1e6:.0f} MB")
+    if not drop:
+        return
+    if not args.apply:
+        print("dry-run — 加 --apply 执行 (执行前自动做一次 vault 备份)")
+        return
+    bargs = SimpleNamespace(vault=str(vault), out=None, keep=10)
+    cmd_backup(bargs)                                            # 删前完整备份 (快照+账本 zip)
+    # 保留集按会话重链: 每链一个叶子 (账本 sessions 口径不因 prune 膨胀); 索引层操作, 文件不动
+    kept = {}
+    for r in rows:
+        if r["id"] in keep:
+            kept.setdefault((r["agent"], r["session_ref"]), []).append(r)
+    for lst in kept.values():
+        lst.sort(key=lambda r: (r["created_at"] or "", r["id"]))
+        prev = None
+        for r in lst:
+            if r["parent_snapshot"] != prev:
+                conn.execute("UPDATE snapshots SET parent_snapshot=? WHERE id=?", (prev, r["id"]))
+            prev = r["id"]
+    for r in drop:
+        try:
+            os.unlink(r["path"])  # 内容寻址文件; 索引层由下一次 rebuild 全量重建自然剔除
+        except OSError:
+            pass
+        conn.execute("DELETE FROM snapshots WHERE id=?", (r["id"],))
+    conn.execute("INSERT INTO probe_events(ts,profile,endpoint,status,http_code,latency_ms,models,missing_models)"
+                 " VALUES(?,?,?,?,?,?,?,?)",
+                 (now_iso(), "vault", "gc", "prune", None, None,
+                  json.dumps({"dropped": len(drop), "reclaimed_mb": round(reclaim / 1e6, 1),
+                              "kept": len(rows) - len(drop),
+                              "backup": "vault/backups 最新一份"}, ensure_ascii=False), None))
+    conn.commit()
+    print(f"已回收 {len(drop)} 版 / {reclaim/1e6:.0f} MB (GC 事件已写入审计时间线)")
 
 
 def cmd_repair(args):
@@ -2933,6 +3031,12 @@ details.card .card-b{border-top:1px solid var(--line-soft)}
 .immlist li{display:flex;gap:8px;font-size:var(--fs-sm);color:var(--ink-2);padding:4px 0;line-height:1.55}
 .immlist li svg{flex:none;margin-top:3px}
 .immlist li.good{color:var(--acc-strong)}
+/* 会话时间线 (抽屉): 按天分组的版本链 */
+.tl-day{padding:4px 0;border-bottom:1px solid var(--line-soft)}
+.tl-day:last-child{border-bottom:none}
+.tl-d{font-family:var(--mono);font-size:var(--fs-xs);color:var(--ink-3)}
+.tl-row{display:flex;align-items:center;gap:8px;font-size:var(--fs-sm);padding:3px 0;color:var(--ink-2)}
+.tl-row.cur{color:var(--ink);font-weight:600}
 .term{background:#101418;color:#dfe5ea;border-radius:var(--rad-s);padding:10px 14px;
   font-family:var(--mono);font-size:var(--fs-sm);margin-top:12px;line-height:1.7;overflow-x:auto;white-space:nowrap}
 .term .tp{display:block;color:#8b93a3;font-size:11.5px;letter-spacing:.06em;margin-bottom:3px;
@@ -3669,10 +3773,23 @@ async function snapDetail(sid,ts){
       "<h3 class='sec'>块构成</h3><div class='dw-chips'>"+(dist||"<span class='hint'>—</span>")+"</div>"+
       (p?"<h3 class='sec'>可迁移性限制</h3><ul class='immlist'>"+
         (imm.length?imm.map(i=>"<li>"+WARN+"<span>"+i+"</span></li>").join(""):"<li class='good'>"+GOOD+"无可迁移性损失</li>")+"</ul>":"")+
+      "<h3 class='sec'>会话时间线</h3><div id='dw-tl'><div class='skel' style='width:70%'></div></div>"+
       "<div class='section-note'>详情来自元数据接口（/snapshot + /preview），不含全文；全文查看：<code>cv show "+esc(shortSid(sid))+"</code></div>"+
       "<div class='dw-actions'>"+
       "<button class='btn primary' onclick=\"toMig('"+sid+"')\">迁移此快照 →</button>"+
       "<button class='btn' onclick=\"copySid('"+sid+"')\">复制 SID</button></div>";
+    (async()=>{ /* 会话时间线: 该会话全部版本按天分组 (leaf=当前版本) */
+      try{
+        const tl=await api("/timeline?session="+encodeURIComponent(c.session_ref||"")+"&agent="+encodeURIComponent(c.agent||""));
+        const rows=(tl.days||[]).map(day=>"<div class='tl-day'><span class='tl-d'>"+esc(day.day)+"</span>"+
+          day.versions.map(v=>"<div class='tl-row"+(v.sid===sid?" cur":"")+"'>"+
+            "<span class='mono'>"+v.time+"</span> · "+num(v.blocks)+" 块 · 入 "+num(v.tokens_in)+
+            (v.leaf?" <span class='chip ok'>最新</span>":"")+
+            " <button class='linklike' onclick=\"snapDetail('"+v.sid+"','"+(v.sid===sid?(ts||""):"")+"')\">"+esc(shortSid(v.sid))+"</button></div>").join("")+
+          "</div>").join("");
+        $("#dw-tl").innerHTML=rows||"<span class='hint'>—</span>";
+      }catch(e){$("#dw-tl").innerHTML="<span class='hint'>时间线加载失败: "+esc(String(e&&e.message||e))+"</span>"}
+    })();
   }catch(e){$("#dw-body").innerHTML=errEmpty("详情加载失败："+e.message,"snapDetail('"+sid+"')")}
 }
 const kv=(k,v)=>"<b>"+k+"</b><span>"+(v==null?"—":v)+"</span>";
@@ -4228,6 +4345,30 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                                        "rows": [{"sid": k, **v, **({"versions": versions[k]}
                                                                    if k in versions else {})}
                                                 for k, v in rows]})
+                if u.path == "/timeline":
+                    # 会话时间线: 该 session 的全部版本按天分组 (T3 leaves 的下钻视图)
+                    ref = q.get("session", "")
+                    agent = q.get("agent", "")
+                    if not ref:
+                        return self._json({"error": "invalid session: 需要 session_ref"}, 400)
+                    try:
+                        c = db(vault)
+                        rows = c.execute("SELECT id, created_at, tokens_in, total_tokens, blocks_total,"
+                                         " parent_snapshot FROM snapshots WHERE session_ref=? AND agent=?"
+                                         " ORDER BY created_at", (ref, agent or "%")).fetchall()
+                        c.close()
+                    except sqlite3.Error:
+                        rows = []
+                    days = {}
+                    for r in rows:
+                        days.setdefault(str(r["created_at"] or "")[:10], []).append(
+                            {"sid": r["id"], "time": str(r["created_at"] or "")[11:19],
+                             "tokens_in": r["tokens_in"] or 0, "total_tokens": r["total_tokens"] or 0,
+                             "blocks": r["blocks_total"] or 0,
+                             "leaf": r["id"] not in {x[0] for x in rows if x[4]}})
+                    return self._json({"session": ref, "agent": agent,
+                                       "days": [{"day": d, "versions": days[d]}
+                                                for d in sorted(days)]})
                 if u.path == "/stats":
                     return self._json({"stats": ledger_summary(vault), "owned": owned_stats(vault)})
                 if u.path == "/snapshot":
@@ -4243,7 +4384,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                                        "stats": self._stats_overlay(qid, env["stats"]), "block_dist": dist})
                 self._json({"error": "unknown route",
                             "routes": ["/", "/healthz", "/search?q=", "/context?q=", "/preview?id=",
-                                       "/recent", "/stats", "/snapshot?id=", "/ledger", "/probe_events",
+                                       "/recent", "/timeline?session=", "/stats", "/snapshot?id=", "/ledger", "/probe_events",
                                        "POST /migrate", "POST /probe"]}, 404)
             except Exception as e:
                 self._json({"error": str(e)}, 500)
@@ -4573,6 +4714,9 @@ def main(argv=None):
     sub.add_parser("doctor").set_defaults(func=cmd_doctor)
     sub.add_parser("repair", help="一次性数据修复: lineage 索引回填 + zcode 历史用量回填 (幂等)"
                    ).set_defaults(func=cmd_repair)
+    pr = sub.add_parser("prune", help="中间版本 GC: 每会话每天保留最后一版 + 叶子; fork/孤本整链保留")
+    pr.add_argument("--apply", action="store_true", help="执行 (默认 dry-run; 执行前自动做一次 vault 备份)")
+    pr.set_defaults(func=cmd_prune)
 
 
     args = ap.parse_args(argv)

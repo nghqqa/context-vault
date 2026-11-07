@@ -1406,6 +1406,96 @@ def test_owned_stats_input_effective(isolated):
     assert own["input_effective"] == 105 + 1000                 # 不是 10+1000, 也不是 +950 重计
 
 
+def test_prune_daily_keep_relink_and_guards(isolated, monkeypatch, tmp_path, capsys):
+    """GC 回归: 每会话每天留最后一版 + 叶子; fork 与源已消失会话整链保留; 保留集重链后
+    账本 sessions/tokens 不变; --apply 先备份; GC 事件写入审计时间线。"""
+    from types import SimpleNamespace
+    import datetime as _dt
+    _, vault = isolated
+    ms = lambda d, h: int(_dt.datetime.fromisoformat(f"2026-11-0{d}T{h}:00:00+08:00").timestamp())  # noqa: E731
+    # 造 zcode 库: s1 存活, sdead 不存在 (源已删 → vault 是唯一副本)
+    zp = tmp_path / "z.sqlite"
+    z = __import__("sqlite3").connect(zp)
+    z.execute("CREATE TABLE session(id TEXT, time_deleted INTEGER)")
+    z.execute("INSERT INTO session VALUES('s1', NULL)")
+    z.commit()
+    z.close()
+    monkeypatch.setattr(cv, "ZCODE_DB", zp)
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA + cv.SYNC_TABLE)
+    mk = lambda ref, d, h, text, parent=None: (lambda env: (env["lineage"].update(  # noqa: E731
+        {"parent_snapshot": parent} if parent else {}), env)[1])
+    reg = lambda env, sid: (_write_env(vault, env), cv.register_snapshot(conn, env, sid,  # noqa: E731
+        vault / "snapshots" / f"{sid}.json"))[0]
+    # 会话 A (codex 文件源不存在 → 视为死源? path 造出来才活; 这里不建源文件 → 整链保留)
+    a1 = cv.build_envelope({"capture": {"agent": "codex", "session_ref": "sa"},
+                            "conversation": [{"type": "text", "role": "user", "content": "a1"}],
+                            "stats": {**cv.zero_stats(), "tokens_in": 100, "usage_events": 1}})
+    a1["created_at"] = "2026-11-05T10:00:00+08:00"
+    sa1 = _write_env(vault, a1)
+    a2 = cv.build_envelope({"capture": {"agent": "codex", "session_ref": "sa"},
+                            "conversation": [{"type": "text", "role": "user", "content": "a2"}],
+                            "stats": {**cv.zero_stats(), "tokens_in": 100, "usage_events": 1}})
+    a2["created_at"] = "2026-11-06T10:00:00+08:00"
+    a2["lineage"]["parent_snapshot"] = sa1
+    sa2 = _write_env(vault, a2)
+    cv.register_snapshot(conn, a1, sa1, vault / "snapshots" / f"{sa1}.json")
+    cv.register_snapshot(conn, a2, sa2, vault / "snapshots" / f"{sa2}.json")
+    # 会话 B (codex, 两天的演进链 + 中间版本)
+    envs = []
+    prev = None
+    for d, h, text in ((5, "09", "b-day5"), (5, "18", "b-day5-late"), (6, "09", "b-day6"), (6, "20", "b-day6-late")):
+        e = cv.build_envelope({"capture": {"agent": "codex", "session_ref": "sb"},
+                               "conversation": [{"type": "text", "role": "user", "content": text}],
+                               "stats": {**cv.zero_stats(), "tokens_in": 100, "usage_events": 1}})
+        e["created_at"] = f"2026-11-0{d}T{h}:00:00+08:00"
+        if prev:
+            e["lineage"]["parent_snapshot"] = prev
+        prev = cv.snapshot_id(e)
+        envs.append((e, prev))
+    sb_ids = [reg(e, cv.snapshot_id(e)) for e, _ in envs]
+    src_b = vault / "src-b.jsonl"                                # B 的源文件存在 → 活会话, 按天规则生效
+    src_b.write_text("{}", encoding="utf-8")
+    conn.execute("INSERT OR REPLACE INTO sync_sources VALUES(?,?,?,?,?)",
+                 (str(src_b), 0, 0, sb_ids[3], "2026-11-06T20:00:00+08:00"))
+    # 会话 C (zcode, 源已删): 整链应保留
+    c1 = cv.build_envelope({"capture": {"agent": "zcode", "source_format": "zcode-sqlite",
+                                        "session_ref": "sdead"},
+                            "conversation": [{"type": "text", "role": "user", "content": "c1"}],
+                            "stats": cv.zero_stats()})
+    c1["created_at"] = "2026-11-05T08:00:00+08:00"
+    sc1 = _write_env(vault, c1)
+    cv.register_snapshot(conn, c1, sc1, vault / "snapshots" / f"{sc1}.json")
+    conn.commit()
+    own0 = cv.owned_stats(vault)
+    assert own0["sessions"] == 3 and own0["tokens_in"] == 200    # A/B/C 各一叶; a1⊂a2 只计 a2
+    # dry-run: 不动数据
+    cv.cmd_prune(SimpleNamespace(vault=str(vault), apply=False))
+    assert cv.db(vault).execute("SELECT COUNT(*) FROM snapshots").fetchone()[0] == 7
+    # apply: 删前备份; A 是死源整链保留 (2 版都留); B 留 day5-late/day6-late/leaf=b-day6-late
+    cv.cmd_prune(SimpleNamespace(vault=str(vault), apply=True))
+    left = {r[0] for r in conn.execute("SELECT id FROM snapshots")}
+    # A 死源整链保留; B 留 day5-late (每日记录) + day6-late (叶子); b-day5-09/b-day6-09 回收
+    assert left == {sa1, sa2, sb_ids[1], sb_ids[3], sc1}
+    # 重链: leaf (b-day6-late) 的 parent = day5-late (中间被删的 b-day5-09/b-day6-09 已绕开)
+    assert conn.execute("SELECT parent_snapshot FROM snapshots WHERE id=?",
+                        (sb_ids[3],)).fetchone()[0] == sb_ids[1]
+    assert conn.execute("SELECT parent_snapshot FROM snapshots WHERE id=?",
+                        (sb_ids[1],)).fetchone()[0] is None      # 链头
+    # 账本口径: sessions 不因 prune 膨胀 (每链一个叶子), tokens 不变
+    own1 = cv.owned_stats(vault)
+    assert own1["sessions"] == 3 and own1["tokens_in"] == 200
+    # GC 事件进了审计时间线
+    tl = cv.audit_summary_and_timeline(vault, "", "all")
+    assert any(e.get("status") == "prune" for day in tl["timeline"] for e in day["events"])
+    # backfill 不得让悬空 parent 复活 (b-day6-09 已删), 也不得覆盖重链结果
+    cv.backfill_lineage(conn, force=True)
+    assert conn.execute("SELECT parent_snapshot FROM snapshots WHERE id=?",
+                        (sb_ids[3],)).fetchone()[0] == sb_ids[1]
+    assert conn.execute("SELECT COUNT(*) FROM snapshots WHERE parent_snapshot=?",
+                        (sb_ids[2],)).fetchone()[0] == 0
+
+
 def test_serve_port_fallback_and_duplicate_instance(isolated, monkeypatch):
     """回归 (2026-11-07 托盘停摆): 首选端口落进 Windows 保留区段 (绑定 WinError 10013) 时
     服务退到备用端口并写 serve.json; 首选端口上真有 Context Vault 实例时仍按单实例语义抛出。"""
