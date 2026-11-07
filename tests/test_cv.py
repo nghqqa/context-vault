@@ -1404,3 +1404,61 @@ def test_owned_stats_input_effective(isolated):
                   {"tokens_in": 1000, "cache_read": 950, "usage_events": 1}, "2026-11-01T01:00:00")
     own = cv.owned_stats(vault)
     assert own["input_effective"] == 105 + 1000                 # 不是 10+1000, 也不是 +950 重计
+
+
+def test_serve_port_fallback_and_duplicate_instance(isolated, monkeypatch):
+    """回归 (2026-11-07 托盘停摆): 首选端口落进 Windows 保留区段 (绑定 WinError 10013) 时
+    服务退到备用端口并写 serve.json; 首选端口上真有 Context Vault 实例时仍按单实例语义抛出。"""
+    import socket
+    from http.server import ThreadingHTTPServer
+    # 托盘生产路径先置 False (True 时 Windows 允许对活动监听端口静默双绑, 单实例检测失效)
+    monkeypatch.setattr(ThreadingHTTPServer, "allow_reuse_address", False)
+    _, vault = isolated
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    conn.commit()
+    # 1) 首选端口被非本服务占用 (模拟系统保留/他用): 退到备用端口
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker.bind(("127.0.0.1", 0))
+    blocker.listen(1)
+    busy = blocker.getsockname()[1]
+    monkeypatch.setattr(cv, "SERVE_FALLBACK_PORTS", [])          # 只剩 0 = 随机空闲端口
+    try:
+        srv, _ = cv.build_vault_server(vault, busy)
+        try:
+            actual = srv.server_address[1]
+            assert actual != busy
+            sj = json.loads((vault / "serve.json").read_text(encoding="utf-8"))
+            assert sj["port"] == actual and sj["url"] == f"http://127.0.0.1:{actual}"
+            # 2) 首选端口上已有 Context Vault 实例: 不回退, 抛 OSError (托盘单实例退出)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            with pytest.raises(OSError):
+                cv.build_vault_server(vault, actual)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+    finally:
+        blocker.close()
+
+
+def test_mcp_discovers_service_via_serve_json(isolated, monkeypatch):
+    """MCP 热路径经 vault/serve.json 找到退到备用端口的服务 (默认 8791 不可用时不再静默冷回退)。"""
+    import mcp_server  # noqa: E402
+    _, vault = isolated
+    (vault / "snapshots").mkdir(parents=True, exist_ok=True)
+    env = cv.build_envelope({"capture": {"agent": "codex", "cwd": "D:\\x"},
+                             "conversation": [{"type": "text", "role": "user", "content": "hello vault"}],
+                             "stats": cv.zero_stats()})
+    sid = _write_env(vault, env)
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    conn.commit()
+    srv, _ = cv.build_vault_server(vault, 0)                     # 随机端口 + 写 serve.json
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setattr(mcp_server, "SVC_BASE", mcp_server._DEFAULT_SVC)  # 未显式指定地址
+        out = mcp_server.dispatch("vault_search", {"query": "hello vault"}, vault)
+        assert sid in out and "via 热索引" in out
+    finally:
+        srv.shutdown()
+        srv.server_close()

@@ -214,7 +214,25 @@ def t_stats(args_vault) -> str:
 
 # ---------------- 常驻服务联动 (cv serve) ----------------
 
-SVC_BASE = os.environ.get("CV_VAULT_SVC", "http://127.0.0.1:8791")
+_DEFAULT_SVC = "http://127.0.0.1:8791"
+SVC_BASE = os.environ.get("CV_VAULT_SVC", _DEFAULT_SVC)
+_VAULT = None  # dispatch 时设置: 用于读 vault/serve.json 发现服务实际地址
+
+
+def _resolve_base() -> str:
+    """服务地址: 显式 (CV_VAULT_SVC / 注入) > vault/serve.json 发现 > 默认 8791。
+    首选端口可能落进 Windows 动态保留区段 (Hyper-V/WinNAT 重启后漂移, 绑定报 10013),
+    服务会退到别的端口并把实际地址写进 serve.json; 只接受回环地址。"""
+    if SVC_BASE != _DEFAULT_SVC:
+        return SVC_BASE
+    if _VAULT is not None:
+        try:
+            url = json.loads((Path(_VAULT) / "serve.json").read_text(encoding="utf-8")).get("url")
+            if isinstance(url, str) and url.startswith("http://127.0.0.1:"):
+                return url
+        except (OSError, ValueError, AttributeError):
+            pass
+    return _DEFAULT_SVC
 
 
 def _svc_get(path: str, timeout: float = 2.0):
@@ -223,7 +241,7 @@ def _svc_get(path: str, timeout: float = 2.0):
     tok = os.environ.get("CV_SERVE_TOKEN")  # 与 cv serve --token 配对: 鉴权档热索引联动
     if tok:
         headers["X-Vault-Token"] = tok
-    req = urllib.request.Request(SVC_BASE + path, headers=headers)
+    req = urllib.request.Request(_resolve_base() + path, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -329,6 +347,8 @@ def _local_memory(vault: Path, query: str, limit: int) -> list:
 
 def dispatch(name: str, args_dict: dict, vault: Path) -> str:
     # 优先走常驻服务热索引 (cv serve); 失活自动回退本地文件扫描 — 常驻只是加速, 不是依赖
+    global _VAULT
+    _VAULT = vault  # 供 _resolve_base 读 vault/serve.json 发现服务实际地址
     svc = _via_service(name, args_dict)
     if svc is not None:
         return svc

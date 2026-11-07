@@ -4293,20 +4293,60 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
             except Exception as e:
                 self._json({"error": str(e)}, 500)
 
-    srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+    # 首选端口可能落进 Windows 动态保留区段 (Hyper-V/WinNAT 重启后漂移, 绑定报 WinError 10013) —
+    # 托盘曾把任何绑定失败都当成"已有实例"直接退出, 11-06 起整整停摆。现在: 首选端口失败时先探活,
+    # 真有 Context Vault 实例在跑才按单实例语义抛出; 否则依次退到备用端口, 实际地址写 serve.json
+    srv, last_err = None, None
+    for cand in ([port] if port == 0 else [port, *SERVE_FALLBACK_PORTS, 0]):
+        try:
+            srv = ThreadingHTTPServer(("127.0.0.1", cand), H)
+            break
+        except OSError as e:
+            if cand == port and _cv_service_alive(port):
+                raise  # 另一个 Context Vault 实例已占用: 交调用方处理 (托盘单实例退出)
+            last_err = e
+    if srv is None:
+        raise last_err
+    actual = srv.server_address[1]
+    if port and actual != port:
+        print(f"  ⚠ 端口 {port} 不可用 ({last_err}) — 改用 {actual}, 实际地址见 vault/serve.json",
+              file=sys.stderr)
+    try:  # 服务发现: MCP 热路径/托盘按此找到实际地址 (显式 CV_VAULT_SVC 仍优先)
+        atomic_write_text(vault / "serve.json", json.dumps(
+            {"url": f"http://127.0.0.1:{actual}", "port": actual, "pid": os.getpid(),
+             "started": now_iso()}))
+    except OSError:
+        pass
     return srv, idx
+
+
+SERVE_FALLBACK_PORTS = [18791, 28791]
+
+
+def _cv_service_alive(port: int) -> bool:
+    """该端口上是否已有 Context Vault 服务在应答 (区分"重复实例"与"端口被系统保留/他用")。"""
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/healthz",
+                                     headers={"User-Agent": "ContextVault/0.1"})
+        with urllib.request.urlopen(req, timeout=2) as r:
+            return json.loads(r.read().decode("utf-8")).get("service") == "context-vault"
+    except urllib.error.HTTPError as e:
+        return e.code == 401  # 鉴权档实例拒绝无凭据探活: 也说明是我们的服务
+    except Exception:
+        return False
 
 
 def cmd_serve(args):
     token = args.token or os.environ.get("CV_SERVE_TOKEN")
     srv, idx = build_vault_server(vault_dir(args), args.port, token=token)
+    port = srv.server_address[1]  # 首选端口被保留时会退到备用端口: 打印实际地址
     st = idx._state
     print(f"vault 热索引就绪: {len(st[1])} 快照, {len(st[0])} 词项")
-    print(f"Context Vault 服务已启动: http://127.0.0.1:{args.port} (Ctrl+C 退出)")
+    print(f"Context Vault 服务已启动: http://127.0.0.1:{port} (Ctrl+C 退出)")
     if token:
         print("  鉴权已启用: 首访 http://127.0.0.1:{}/?token=*** 自动登录; "
-              "MCP/脚本侧设 CV_SERVE_TOKEN 同值".format(args.port))
-    print("  MCP server 检测到本服务时自动走热索引 (CV_VAULT_SVC 可覆盖地址)")
+              "MCP/脚本侧设 CV_SERVE_TOKEN 同值".format(port))
+    print("  MCP server 自动发现本服务走热索引 (vault/serve.json; CV_VAULT_SVC 可显式覆盖)")
     print("  本地访问防护已启用: Host/Origin 回环校验 + POST 强制 application/json"
           " (浏览器跨站与 DNS rebinding 会被 403 拦截, 本地进程不受影响)")
     try:
