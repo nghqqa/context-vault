@@ -3090,7 +3090,7 @@ details.card .card-b{border-top:1px solid var(--line-soft)}
 
 /* 迁移工作台 */
 .mig-wrap{display:flex;flex-direction:column;gap:12px}
-.mig-steps{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start}
+.mig-steps{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:12px;align-items:start}
 .mig-step{background:var(--bg-surface);border:1px solid var(--line);border-radius:var(--rad-m);box-shadow:var(--shadow-1)}
 .mig-step>.card-h .stepno{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;
   border-radius:50%;background:var(--acc);color:var(--acc-ink);font-size:11.5px;font-weight:700;font-family:var(--mono)}
@@ -3133,6 +3133,12 @@ details.card .card-b{border-top:1px solid var(--line-soft)}
   color:var(--ink-3);font-size:13px;line-height:1.9;background:var(--bg-surface)}
 .mig-idle code{font-family:var(--mono);font-size:var(--fs-xs);color:var(--ink-2);
   background:var(--bg-subtle);padding:2px 7px;border-radius:5px}
+/* 迁移预览两栏: 左=量化画像, 右=风险与恢复 — 全宽单列曾让右半整片空白 (用户 11-08 反馈) */
+.pv-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px 32px;align-items:start}
+.pv-grid .sec{margin:0 0 4px}
+.pv-grid .term{margin-top:12px}
+.mig-profile{margin-top:12px;padding-top:12px;border-top:1px solid var(--line-soft)}
+.mig-profile .chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
 .result-card{border:1px solid var(--acc-line);background:var(--acc-soft);border-radius:var(--rad-m);padding:14px 16px}
 .result-card.err{border-color:var(--err-line);background:var(--err-bg)}
 .result-card .rt{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13.5px;margin-bottom:6px}
@@ -3200,6 +3206,7 @@ details.card .card-b{border-top:1px solid var(--line-soft)}
   .gsearch{max-width:none}
   .kpi-band,.quick-row,.mig-steps{grid-template-columns:minmax(0,1fr)}
   .ov-grid{grid-template-columns:minmax(0,1fr)}  /* 裸 1fr 的 min-content 曾撑爆窄视口整页 (全面测试 M10/M11) */
+  .pv-grid{grid-template-columns:minmax(0,1fr)}
   .tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
   .tbl-wrap table{min-width:640px}
   .kv{grid-template-columns:120px minmax(0,1fr)}
@@ -3207,6 +3214,7 @@ details.card .card-b{border-top:1px solid var(--line-soft)}
 @media(max-width:1280px) and (min-width:901px){
   .kpi-band{grid-template-columns:repeat(2,1fr)}
   .quick-row{grid-template-columns:repeat(3,1fr)}
+  .pv-grid{grid-template-columns:minmax(0,1fr)}
 }
 </style></head><body>
 
@@ -3329,6 +3337,7 @@ details.card .card-b{border-top:1px solid var(--line-soft)}
             <label for="mig-sid" class="hint" style="display:block;margin-bottom:6px">最近 50 个快照；也可从快照资产搜索或详情抽屉带入</label>
             <select id="mig-sid" onchange="onMigSource()"><option value="">加载中…</option></select>
             <div class="sel-meta" id="mig-src-meta"></div>
+            <div class="mig-profile" id="mig-src-profile"></div>
           </div>
         </div>
         <div class="mig-step">
@@ -3982,20 +3991,32 @@ function renderMigPreview(){
   if(!p)return;
   const t=migTarget();
   const imm=immList(p);
+  /* 源画像: 填充步骤①并给迁移前决策所需信息 (agent/完整性/目录/历史累计输入) */
+  const prof=document.getElementById("mig-src-profile");
+  if(prof)prof.innerHTML=
+    "<div class='chips'>"+
+    (p.agent?"<span class='chip'>"+esc(p.agent)+"</span>":"")+
+    (p.completeness&&p.completeness!=="full"?"<span class='chip warn'>"+esc(p.completeness)+"</span>":"<span class='chip ok'>完整</span>")+
+    "</div>"+
+    "<div class='kv'>"+kv("项目目录",esc(p.cwd||"—"))+
+    kv("历史累计输入",num(p.history_tokens_in)+" tokens（源口径）")+"</div>";
+  /* 预览两栏: 左=量化画像, 右=风险与恢复 — 全宽单列时右半空白 (二轮 console 布局反馈) */
   $("#mig-preview").innerHTML=
+    '<div class="pv-grid">'+
     '<div class="kv">'+
     kv("活上下文（保留）",num(p.live_blocks)+" 块 · ~"+num(p.live_tokens_est)+" tokens"+
       (p.compactions?"（"+p.compactions+" 次压缩边界之后；压缩摘要将注入为新会话首条消息）":""))+
     kv("活上下文构成",Object.entries(p.live_dist||{}).map(([k,v])=>esc(k)+" ×"+num(v)).join("　")||"—")+
-    kv("历史累计输入",num(p.history_tokens_in)+" tokens（源口径）")+
     "</div>"+
-    "<h3 class='sec' style='margin:14px 0 4px;font-size:12px;font-weight:600;color:var(--ink-3);letter-spacing:.04em'>丢失 / 降级</h3>"+
+    '<div class="pv-risk">'+
+    "<h3 class='sec' style='font-size:12px;font-weight:600;color:var(--ink-3);letter-spacing:.04em'>丢失 / 降级</h3>"+
     '<ul class="immlist">'+(imm.length?imm.map(i=>"<li>"+WARN+"<span>"+i+"</span></li>").join("")
       :"<li class='good'>"+GOOD+"源端无已知损失项</li>")+"</ul>"+
     '<div class="section-note">'+esc(targetLossNote(t))+
     "（现有 /preview 接口未提供逐目标的处理明细 — 以执行后迁移报告的逐条计数为准）</div>"+
     '<div class="term"><span class="tp">恢复命令 · 按执行结果里的真实 session id / 文件生成</span><code id="mig-cmd">$ '+
-    esc(previewCmd(t))+"</code></div>";
+    esc(previewCmd(t))+"</code></div>"+
+    "</div></div>";
   migExecEnabled(true);
 }
 function previewCmd(t){
