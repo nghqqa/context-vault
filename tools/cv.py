@@ -3133,10 +3133,12 @@ details.card .card-b{border-top:1px solid var(--line-soft)}
   color:var(--ink-3);font-size:13px;line-height:1.9;background:var(--bg-surface)}
 .mig-idle code{font-family:var(--mono);font-size:var(--fs-xs);color:var(--ink-2);
   background:var(--bg-subtle);padding:2px 7px;border-radius:5px}
-/* 迁移预览两栏: 左=量化画像, 右=风险与恢复 — 全宽单列曾让右半整片空白 (用户 11-08 反馈) */
-.pv-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px 32px;align-items:start}
-.pv-grid .sec{margin:0 0 4px}
-.pv-grid .term{margin-top:12px}
+/* 迁移预览: 顶部摘要条铺满宽度, 下两栏 (丢失/降级 | 恢复命令) — 左右等分放两行 kv 曾把空洞挪到左边 */
+.pv-stats{display:flex;flex-wrap:wrap;gap:8px 26px;padding:12px 16px;border:1px solid var(--line-soft);
+  border-radius:var(--rad-s);background:var(--bg-subtle);margin-bottom:16px}
+.pv-cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px 36px;align-items:start}
+.pv-cols .sec{margin:0 0 4px}
+.pv-cols .term{margin-top:10px}
 .mig-profile{margin-top:12px;padding-top:12px;border-top:1px solid var(--line-soft)}
 .mig-profile .chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
 .result-card{border:1px solid var(--acc-line);background:var(--acc-soft);border-radius:var(--rad-m);padding:14px 16px}
@@ -3206,7 +3208,7 @@ details.card .card-b{border-top:1px solid var(--line-soft)}
   .gsearch{max-width:none}
   .kpi-band,.quick-row,.mig-steps{grid-template-columns:minmax(0,1fr)}
   .ov-grid{grid-template-columns:minmax(0,1fr)}  /* 裸 1fr 的 min-content 曾撑爆窄视口整页 (全面测试 M10/M11) */
-  .pv-grid{grid-template-columns:minmax(0,1fr)}
+  .pv-cols{grid-template-columns:minmax(0,1fr)}
   .tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
   .tbl-wrap table{min-width:640px}
   .kv{grid-template-columns:120px minmax(0,1fr)}
@@ -3214,7 +3216,7 @@ details.card .card-b{border-top:1px solid var(--line-soft)}
 @media(max-width:1280px) and (min-width:901px){
   .kpi-band{grid-template-columns:repeat(2,1fr)}
   .quick-row{grid-template-columns:repeat(3,1fr)}
-  .pv-grid{grid-template-columns:minmax(0,1fr)}
+  .pv-cols{grid-template-columns:minmax(0,1fr)}
 }
 </style></head><body>
 
@@ -4000,23 +4002,25 @@ function renderMigPreview(){
     "</div>"+
     "<div class='kv'>"+kv("项目目录",esc(p.cwd||"—"))+
     kv("历史累计输入",num(p.history_tokens_in)+" tokens（源口径）")+"</div>";
-  /* 预览两栏: 左=量化画像, 右=风险与恢复 — 全宽单列时右半空白 (二轮 console 布局反馈) */
+  /* 预览结构: 顶部横向摘要条 (按宽度自然铺满) + 下两栏 (左=丢失/降级, 右=恢复命令) —
+     曾用左右等分放两行 kv, 空洞只是从右边挪到左边 (用户 11-08 二次反馈) */
   $("#mig-preview").innerHTML=
-    '<div class="pv-grid">'+
-    '<div class="kv">'+
-    kv("活上下文（保留）",num(p.live_blocks)+" 块 · ~"+num(p.live_tokens_est)+" tokens"+
-      (p.compactions?"（"+p.compactions+" 次压缩边界之后；压缩摘要将注入为新会话首条消息）":""))+
-    kv("活上下文构成",Object.entries(p.live_dist||{}).map(([k,v])=>esc(k)+" ×"+num(v)).join("　")||"—")+
+    '<div class="pv-stats">'+
+    '<span class="stat-inline">活上下文 <b>'+num(p.live_blocks)+"</b> 块 · ~"+num(p.live_tokens_est)+" tokens</span>"+
+    (p.compactions?'<span class="stat-inline">压缩边界 '+num(p.compactions)+" 次</span>":"")+
+    '<span class="stat-inline">构成 <b>'+(Object.entries(p.live_dist||{}).map(([k,v])=>esc(k)+"×"+num(v)).join(" · ")||"—")+"</b></span>"+
+    '<span class="stat-inline">历史累计输入 <b>'+num(p.history_tokens_in)+"</b> tokens（源口径）</span>"+
     "</div>"+
-    '<div class="pv-risk">'+
-    "<h3 class='sec' style='font-size:12px;font-weight:600;color:var(--ink-3);letter-spacing:.04em'>丢失 / 降级</h3>"+
+    '<div class="pv-cols">'+
+    '<div><h3 class="sec">丢失 / 降级</h3>'+
     '<ul class="immlist">'+(imm.length?imm.map(i=>"<li>"+WARN+"<span>"+i+"</span></li>").join("")
       :"<li class='good'>"+GOOD+"源端无已知损失项</li>")+"</ul>"+
     '<div class="section-note">'+esc(targetLossNote(t))+
-    "（现有 /preview 接口未提供逐目标的处理明细 — 以执行后迁移报告的逐条计数为准）</div>"+
-    '<div class="term"><span class="tp">恢复命令 · 按执行结果里的真实 session id / 文件生成</span><code id="mig-cmd">$ '+
-    esc(previewCmd(t))+"</code></div>"+
-    "</div></div>";
+    "（现有 /preview 接口未提供逐目标的处理明细 — 以执行后迁移报告的逐条计数为准）</div></div>"+
+    '<div><h3 class="sec">恢复命令</h3><div class="term"><span class="tp">按执行结果里的真实 session id / 文件生成</span>'+
+    '<code id="mig-cmd">$ '+esc(previewCmd(t))+"</code></div>"+
+    '<div class="hint" style="margin-top:10px">执行后此处会替换为带真实 session id / 文件名的可复制命令。</div></div>'+
+    "</div>";
   migExecEnabled(true);
 }
 function previewCmd(t){
