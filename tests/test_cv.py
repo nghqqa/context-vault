@@ -2591,3 +2591,25 @@ def test_sync_antigravity_guard_paths(isolated, tmp_path, monkeypatch):
     conn = cv.db(vault)
     conn.executescript(cv.SCHEMA + cv.SYNC_TABLE)
     assert cv._sync_antigravity_dbs(conn, vault) == (0, 0, 0)    # 坏文件被跳过不炸
+
+
+def test_antigravity_proto_upsert(isolated, tmp_path, monkeypatch):
+    """proto.pb 是 app 真源 (启动按它重建索引表): register 必须同步 upsert 条目
+    {f12: cascade, f22: raw_summary}; 幂等 (重注册不产生重复条目)。"""
+    agy_home = tmp_path / "agyhome2"
+    (agy_home / ".gemini" / "antigravity").mkdir(parents=True)
+    monkeypatch.setattr(cv, "HOME", agy_home)
+    pb = agy_home / ".gemini" / "antigravity" / "agyhub_summaries_proto.pb"
+    # app 原生条目格式: f1=cid, f2=raw_summary (字段1/字段2, 非线型号)
+    pb.write_bytes(cv._pb_len(1, cv._pb_len(1, b"native-1") + cv._pb_len(2, b"raw-native")))
+    assert cv._antigravity_proto_upsert("cas-9", b"raw-9")
+    top, _ = cv._pb_decode(pb.read_bytes())
+    entries = [cv._pb_decode(e)[0] for e in top.get((1, 2), [])]
+    assert len(entries) == 2                                       # 原生保留 + 新增
+    assert entries[0].get((1, 2))[0] == b"native-1"
+    assert entries[1].get((1, 2))[0] == b"cas-9"
+    assert entries[1].get((2, 2))[0] == b"raw-9"
+    cv._antigravity_proto_upsert("cas-9", b"raw-9-v2")             # 同 cid 重写 = 替换
+    top, _ = cv._pb_decode(pb.read_bytes())
+    entries = [cv._pb_decode(e)[0] for e in top.get((1, 2), [])]
+    assert len(entries) == 2 and entries[1].get((2, 2))[0] == b"raw-9-v2"

@@ -3333,6 +3333,33 @@ def _antigravity_register_summaries(target_db: Path, env: dict, cascade: str) ->
         sconn.commit()
     finally:
         sconn.close()
+    _antigravity_proto_upsert(cascade, raw)
+    return True
+
+
+def _antigravity_proto_upsert(cascade: str, raw: bytes) -> bool:
+    """agyhub_summaries_proto.pb 是 app 的真源缓存: 启动时按它重建 conversation_summaries 表,
+    表里有而 proto 里没有的行一律清除 (2026-11-16 实证: 重启后 158→51)。条目结构
+    (原生样本逆向): top f1 repeated = {f1: cascade, f2: raw_summary 字节 (与表同源)}。
+    幂等 upsert: 同 cid 先摘除再追加。app 运行中写入有被关停时回写覆盖的风险 —
+    批量恢复请在完全退出 Antigravity 后执行。"""
+    pb = HOME / ".gemini" / "antigravity" / "agyhub_summaries_proto.pb"
+    if not pb.parent.exists():
+        return False
+    top_fields: dict = {}
+    if pb.exists() and pb.stat().st_size:
+        try:
+            top_fields, _ = _pb_decode(pb.read_bytes())
+        except Exception:
+            top_fields = {}  # 坏文件从空重建 (app 侧会重新吸收 .db)
+    entries = [e for e in top_fields.get((1, 2), [])
+               if _pb_decode(e)[0].get((1, 2), [b""])[0]
+               .decode("ascii", "ignore").lower() != cascade.lower()]
+    entries.append(_pb_len(1, cascade.encode("ascii")) + _pb_len(2, raw))
+    out = b"".join(_pb_len(1, e) for e in entries)
+    tmp = pb.with_suffix(f".tmp-{os.getpid()}")
+    tmp.write_bytes(out)
+    os.replace(tmp, pb)
     return True
 
 

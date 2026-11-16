@@ -170,6 +170,9 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--recover", action="store_true",
+                    help="以 migrations.jsonl 为准恢复: 曾导入过但目标端缺失的会话, "
+                         "用其会话当前叶子版本重导 (含 proto upsert; 需先完全退出 Antigravity)")
     args = ap.parse_args()
     vault = Path(args.vault).expanduser().resolve()
 
@@ -230,6 +233,48 @@ def main() -> None:
             skipped["dup"] += 1
             continue
         plan.append((it, cascade))
+
+    if args.recover:
+        # 恢复: 曾导入过 (migrations 有痕) 但目标端 (db+行) 已缺失的会话 — 原 sid 可能已不是
+        # 叶子 (源工具继续演进, 托盘同步出新版), 用其会话当前叶子重导; cascade 统一用
+        # cv 会话级确定性派生, 与 do_import 链路同位不产生副本。
+        conn_v = cv.db(vault)
+        srows = conn_v.execute(
+            "SELECT id, agent, session_ref, created_at FROM snapshots").fetchall()
+        parents = {r["parent_snapshot"] for r in conn_v.execute(
+            "SELECT parent_snapshot FROM snapshots WHERE parent_snapshot IS NOT NULL")}
+        conn_v.close()
+        by_ref: dict[tuple, list] = {}
+        for r in srows:
+            if r["id"] in parents:
+                continue
+            by_ref.setdefault((r["agent"] or "", r["session_ref"] or ""), []).append(r)
+        seen_cascades = {c for _, c in plan}
+        for sid in done_cascades:
+            try:
+                env0 = cv.load_snapshot(vault, sid)
+            except (ValueError, OSError):
+                continue
+            cap = env0.get("capture") or {}
+            cands = by_ref.get((cap.get("agent") or "", cap.get("session_ref") or ""), [])
+            leaf = max(cands, key=lambda r: r["created_at"] or "")["id"] if cands else sid
+            cwd = cap.get("cwd") or ""
+            if not eligible_cwd(cwd):
+                continue
+            env = cv.load_snapshot(vault, leaf)
+            cascade = cv._deterministic_session_id(env)
+            if (CONV_DIR / f"{cascade}.db").exists() and cascade in have_rows:
+                skipped["done"] += 1
+                continue
+            fp = first_user_text(env)
+            if fp and fp in existing_fps:
+                skipped["dup"] += 1
+                continue
+            if cascade in seen_cascades:
+                continue
+            seen_cascades.add(cascade)
+            plan.append(({"id": leaf, "cwd": cwd, "title": cap.get("originator") or ""},
+                         cascade))
 
     by_proj: dict[str, list] = {}
     for it, cascade in plan:
@@ -318,6 +363,7 @@ def main() -> None:
                 (cascade, title, preview, step_count, iso_utc(epoch_mod),
                  json.dumps([enc]), "CASCADE_RUN_STATUS_IDLE", "", project_id, "", "", 0,
                  "", "", 0, 0, iso_utc(epoch_in), input_idx, "antigravity", raw, ""))
+            cv._antigravity_proto_upsert(cascade, raw)  # proto 是 app 真源, 不写=重启被清
             cv._record_migration(vault, target, sid, baseline=None)
             installed += 1
             if installed % 20 == 0:
