@@ -138,3 +138,26 @@ def test_short_query_hot_cold_same(tmp_path, monkeypatch):
     cold_ctx = mcp_server.dispatch("vault_context", {"query": "a"}, vault)
     assert hot == cold == "查询词太短"
     assert hot_ctx == cold_ctx == "查询词太短"
+
+
+def test_install_mcp_antigravity(tmp_path, monkeypatch):
+    """验证 cv mcp install --client antigravity 对缺失目录、空文件及幂等重复安装的行为。"""
+    monkeypatch.setattr(cv, "HOME", tmp_path)
+    vault = tmp_path / "vault"
+
+    assert cv._install_mcp_antigravity(vault) == "未找到 ~/.gemini (antigravity 未安装)"
+
+    cfg = tmp_path / ".gemini" / "config" / "mcp_config.json"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("", encoding="utf-8")  # 复现 0 字节文件
+
+    res1 = cv._install_mcp_antigravity(vault)
+    assert res1 == "已写入 ~/.gemini/config/mcp_config.json"
+    data = json.loads(cfg.read_text(encoding="utf-8"))
+    assert "context-vault" in data["mcpServers"]
+    entry = data["mcpServers"]["context-vault"]
+    assert entry["command"] == "python"
+    assert entry["args"][0].endswith("mcp_server.py")
+    assert entry["args"][1:] == ["--vault", str(vault.resolve())]
+
+    assert cv._install_mcp_antigravity(vault) == "已安装 (跳过)"
