@@ -47,7 +47,7 @@ from pathlib import Path
 
 FORMAT_VERSION = "0.1"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # noconsole 进程 spawn 控制台程序不弹窗   # context-snapshot 格式版本
-VERSION = "0.5.0"          # 工具版本 (发布节奏独立于格式)
+VERSION = "0.6.0"          # 工具版本 (发布节奏独立于格式)
 TOOL_RESULT_LIMIT = 256 * 1024  # spec §8.2 裁决: 单块截断阈值 256KB
 HOME = Path.home()
 HEADROOM_DIR = HOME / ".headroom"
@@ -548,6 +548,57 @@ def _zcode_refs_matching(db_path: Path, table: str, id_col: str,
         return set()
 
 
+def _norm_win_path(p: str) -> str:
+    return (p or "").replace("\\", "/").rstrip("/").lower()
+
+
+def _zcode_deleted_project_task_refs(db_path: Path) -> set[str]:
+    """从 ZCode v2 tasks-index.sqlite 查找属于已删除项目（projects.deleted != 0）的 task_id。"""
+    if not db_path.exists():
+        return set()
+    try:
+        zdb = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            tables = {r[0] for r in zdb.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "tasks" not in tables or "projects" not in tables:
+                return set()
+            tcols = {r[1] for r in zdb.execute("PRAGMA table_info(tasks)")}
+            pcols = {r[1] for r in zdb.execute("PRAGMA table_info(projects)")}
+            if not {"task_id", "project_id"} <= tcols or not {"project_id", "deleted"} <= pcols:
+                return set()
+            refs = {r[0] for r in zdb.execute(
+                "SELECT t.task_id FROM tasks t JOIN projects p ON t.project_id = p.project_id "
+                "WHERE COALESCE(p.deleted, 0) != 0 AND t.task_id IS NOT NULL"
+            ) if r[0]}
+            # 兼容未回填 project_id 的历史任务：仅当工作区根属于已删项目且不属于任何活跃项目时视作已删
+            if "project_roots" in tables and "workspace_path" in tcols:
+                rcols = {r[1] for r in zdb.execute("PRAGMA table_info(project_roots)")}
+                if {"project_id", "root_path"} <= rcols:
+                    act_roots = {_norm_win_path(r[0]) for r in zdb.execute(
+                        "SELECT pr.root_path FROM projects p JOIN project_roots pr "
+                        "ON p.project_id = pr.project_id "
+                        "WHERE COALESCE(p.deleted, 0) = 0 AND pr.root_path IS NOT NULL"
+                    ) if r[0]}
+                    del_roots = {_norm_win_path(r[0]) for r in zdb.execute(
+                        "SELECT pr.root_path FROM projects p JOIN project_roots pr "
+                        "ON p.project_id = pr.project_id "
+                        "WHERE COALESCE(p.deleted, 0) != 0 AND pr.root_path IS NOT NULL"
+                    ) if r[0]} - act_roots
+                    if del_roots:
+                        for tid, wp in zdb.execute(
+                            "SELECT task_id, workspace_path FROM tasks "
+                            "WHERE (project_id IS NULL OR project_id = '') "
+                            "AND task_id IS NOT NULL AND workspace_path IS NOT NULL"
+                        ):
+                            if _norm_win_path(wp) in del_roots:
+                                refs.add(tid)
+            return refs
+        finally:
+            zdb.close()
+    except sqlite3.Error:
+        return set()
+
+
 def _zcode_subagent_refs() -> set[str]:
     return _zcode_refs_matching(ZCODE_DB, "session", "id", [
         ("parent_id", "parent_id IS NOT NULL"),
@@ -555,7 +606,7 @@ def _zcode_subagent_refs() -> set[str]:
 
 
 def _zcode_archived_refs() -> set[str]:
-    """ZCode 已归档/已删除主会话 id：兼容 CLI session 表与桌面端 v2 tasks-index.sqlite。"""
+    """ZCode 已归档/已删除主会话 id：兼容 CLI session 表、桌面端 v2 tasks 及已删项目。"""
     return (
         _zcode_refs_matching(ZCODE_DB, "session", "id", [
             ("time_deleted", "time_deleted IS NOT NULL"),
@@ -566,6 +617,7 @@ def _zcode_archived_refs() -> set[str]:
             ("deleted", "COALESCE(deleted, 0) != 0"),
             ("cli_deleted", "COALESCE(cli_deleted, 0) != 0"),
         ])
+        | _zcode_deleted_project_task_refs(ZCODE_TASKS_DB)
     )
 
 
@@ -2205,65 +2257,99 @@ def _sync_antigravity_dbs(conn, vault: Path, debounce=False) -> tuple:
     return (n_new, n_upd, 0)
 
 
-def cmd_sync(args):
-    vault = vault_dir(args)
+def sync_vault(vault: Path, root: Path | None = None, debounce: bool = False, quiet: bool = False) -> dict:
+    """增量扫描本地多工具会话源并写入 vault（CLI 与 HTTP /sync 共用）。"""
     (vault / "snapshots").mkdir(parents=True, exist_ok=True)
     conn = db(vault)
-    conn.executescript(SCHEMA + SYNC_TABLE)
-    n_lin = backfill_lineage(conn)       # 每 vault 一次: 历史演进链索引回填
-    n_zu = backfill_zcode_usage(conn)    # 每 vault 一次: zcode 历史快照用量回填
-    if not conn.execute("SELECT 1 FROM vault_meta WHERE key='sync_keys_norm_v1'").fetchone():
-        # 水位键规范化迁移: _norm_path 引入前 sync_sources 存在原始大小写键, 与新键失配曾让
-        # 升级首轮把全部源当新会话重导出 (链被 parent=None envelope 抹断, 2026-11-08 实发)
-        rows = conn.execute("SELECT path, mtime, size, snapshot_id, synced_at FROM sync_sources").fetchall()
-        seen = {}
-        for r in rows:
-            k = _norm_path(r["path"])
-            old = seen.get(k)
-            if old is None or (r["mtime"] or 0) > (old["mtime"] or 0):
-                seen[k] = r
-        conn.execute("DELETE FROM sync_sources")
-        for r in seen.values():
-            conn.execute("INSERT OR REPLACE INTO sync_sources VALUES(?,?,?,?,?)",
-                         (_norm_path(r["path"]), r["mtime"], r["size"], r["snapshot_id"], r["synced_at"]))
-        conn.execute("INSERT OR REPLACE INTO vault_meta(key, value) VALUES('sync_keys_norm_v1', ?)", (now_iso(),))
-        conn.commit()
-    if n_lin or n_zu:
-        print(f"  一次性修复: lineage 回填 {n_lin} 行 · zcode 用量回填 {n_zu} 行")
-    migrations = load_migrations(vault)
-    debounce = bool(getattr(args, "debounce", False))
-    files = scan_sources(args.root)
-    n_new = n_upd = n_skip = n_empty = 0
+    warnings: list[str] = []
     t0 = time.time()
-    for f in sorted(files):
+    try:
+        conn.executescript(SCHEMA + SYNC_TABLE)
+        n_lin = backfill_lineage(conn)       # 每 vault 一次: 历史演进链索引回填
+        n_zu = backfill_zcode_usage(conn)    # 每 vault 一次: zcode 历史快照用量回填
+        if not conn.execute("SELECT 1 FROM vault_meta WHERE key='sync_keys_norm_v1'").fetchone():
+            # 水位键规范化迁移: _norm_path 引入前 sync_sources 存在原始大小写键, 与新键失配曾让
+            # 升级首轮把全部源当新会话重导出 (链被 parent=None envelope 抹断, 2026-11-08 实发)
+            rows = conn.execute("SELECT path, mtime, size, snapshot_id, synced_at FROM sync_sources").fetchall()
+            seen = {}
+            for r in rows:
+                k = _norm_path(r["path"])
+                old = seen.get(k)
+                if old is None or (r["mtime"] or 0) > (old["mtime"] or 0):
+                    seen[k] = r
+            conn.execute("DELETE FROM sync_sources")
+            for r in seen.values():
+                conn.execute("INSERT OR REPLACE INTO sync_sources VALUES(?,?,?,?,?)",
+                             (_norm_path(r["path"]), r["mtime"], r["size"], r["snapshot_id"], r["synced_at"]))
+            conn.execute("INSERT OR REPLACE INTO vault_meta(key, value) VALUES('sync_keys_norm_v1', ?)", (now_iso(),))
+            conn.commit()
+        if (n_lin or n_zu) and not quiet:
+            print(f"  一次性修复: lineage 回填 {n_lin} 行 · zcode 用量回填 {n_zu} 行")
+        migrations = load_migrations(vault)
+        files = scan_sources(root)
+        n_new = n_upd = n_skip = n_empty = 0
+        for f in sorted(files):
+            try:
+                r = sync_one(conn, vault, f, migrations, debounce)
+            except (SystemExit, Exception) as e:
+                msg = f"跳过 {f.name}: {str(e)[:80]}"
+                warnings.append(msg)
+                if not quiet:
+                    print(f"  ! {msg}")
+                n_skip += 1
+                continue
+            if r == "new":
+                n_new += 1
+            elif r == "update":
+                n_upd += 1
+            elif r == "empty":
+                n_empty += 1
+            else:
+                n_skip += 1
         try:
-            r = sync_one(conn, vault, f, migrations, debounce)
-        except (SystemExit, Exception) as e:
-            print(f"  ! 跳过 {f.name}: {str(e)[:80]}")
-            n_skip += 1
-            continue
-        if r == "new":
-            n_new += 1
-        elif r == "update":
-            n_upd += 1
-        elif r == "empty":
-            n_empty += 1
-        else:
-            n_skip += 1
-    try:
-        z_new, z_upd, _ = _sync_zcode_db(conn, vault, debounce)
-        n_new += z_new; n_upd += z_upd
-    except Exception as e:
-        print(f"  ! zcode 库同步跳过: {str(e)[:80]}")
-    try:
-        a_new, a_upd, _ = _sync_antigravity_dbs(conn, vault, debounce)
-        n_new += a_new; n_upd += a_upd
-    except Exception as e:
-        print(f"  ! antigravity 会话回灌跳过: {str(e)[:80]}")
-    conn.commit()
-    total = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
-    print(f"sync 完成: 新增 {n_new} · 更新 {n_upd} · 跳过 {n_skip}(未变/异常)"
-          f" · 空会话 {n_empty} | vault 总快照 {total} | 耗时 {time.time()-t0:.1f}s")
+            z_new, z_upd, _ = _sync_zcode_db(conn, vault, debounce)
+            n_new += z_new
+            n_upd += z_upd
+        except Exception as e:
+            msg = f"zcode 库同步跳过: {str(e)[:80]}"
+            warnings.append(msg)
+            if not quiet:
+                print(f"  ! {msg}")
+        try:
+            a_new, a_upd, _ = _sync_antigravity_dbs(conn, vault, debounce)
+            n_new += a_new
+            n_upd += a_upd
+        except Exception as e:
+            msg = f"antigravity 会话回灌跳过: {str(e)[:80]}"
+            warnings.append(msg)
+            if not quiet:
+                print(f"  ! {msg}")
+        conn.commit()
+        total = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+    finally:
+        conn.close()
+    return {
+        "new": n_new,
+        "updated": n_upd,
+        "skipped": n_skip,
+        "empty": n_empty,
+        "total": total,
+        "elapsed": round(time.time() - t0, 2),
+        "lineage_backfill": n_lin,
+        "zcode_usage_backfill": n_zu,
+        "warnings": warnings,
+    }
+
+
+def cmd_sync(args):
+    res = sync_vault(
+        vault_dir(args),
+        root=args.root,
+        debounce=bool(getattr(args, "debounce", False)),
+        quiet=False,
+    )
+    print(f"sync 完成: 新增 {res['new']} · 更新 {res['updated']} · 跳过 {res['skipped']}(未变/异常)"
+          f" · 空会话 {res['empty']} | vault 总快照 {res['total']} | 耗时 {res['elapsed']:.1f}s")
 
 
 def cmd_prune(args):
@@ -2623,6 +2709,7 @@ def _export_one_harness(vault: Path, exe: str, sid: str, to: str, quiet: bool = 
         _antigravity_set_workspace(out, ws_folder, rng[1] if rng else int(time.time()),
                                    create_project=create_project)
         n = _antigravity_fill_step_timestamps(out, env_snap)
+        _antigravity_normalize_steps(out)  # planner 文本 f1→f3 等原生形状对齐 (否则会话打不开)
         if n and not quiet:
             print(f"  已补 {n} 步原生格式 metadata 与 step_payload 时间戳")
     if not quiet:
@@ -3118,6 +3205,67 @@ def _antigravity_fill_step_timestamps(db_path: Path, env: dict) -> int:
         return 0
 
 
+def _antigravity_normalize_steps(db_path: Path) -> int:
+    """smigrate 的 planner 文本写在 wrapper f1, 而 app 原生形状是 f3 (纯文本字符串) + f12 状态
+    + f11; 形状不符时 Antigravity 会话窗口渲染崩溃 (Cannot read properties of undefined
+    (reading 'end'), 2026-11-16 用户实测; 参照被 app 自己重写过的导入库 a1933337 逆得)。
+    - type15 wrapper: f1 文本 → f3; 补 f12=2 (状态) 与 f11 {0,0}
+    - type15 metadata: f6 同值补 f7/f8 (完成时间戳); 全部 Timestamp 子消息补 nanos=0
+    返回改写行数。"""
+    import sqlite3
+    conn = sqlite3.connect(db_path, timeout=15)
+    n = 0
+    try:
+        rows = conn.execute("SELECT idx, metadata, step_payload FROM steps"
+                            " WHERE step_type = 15 ORDER BY idx").fetchall()
+        for idx, md, sp in rows:
+            if not sp:
+                continue
+            outer, tail = _pb_decode(bytes(sp))
+            changed = False
+            if (20, 2) in outer:
+                wfields, wtail = _pb_decode(bytes(outer[(20, 2)][0]))
+                if (1, 2) in wfields and (3, 2) not in wfields:
+                    wfields[(3, 2)] = [bytes(wfields[(1, 2)][0])]
+                    del wfields[(1, 2)]
+                    wfields[(11, 2)] = [_pb_var(1, 0) + _pb_var(2, 0)]
+                    wfields[(12, 0)] = [2]
+                    outer[(20, 2)] = [_pb_encode(wfields, wtail)]
+                    changed = True
+            new_md = md
+            if md:
+                mfields, mtail = _pb_decode(bytes(md))
+                mchanged = False
+                for key in ((1, 2), (6, 2)):
+                    if key in mfields:
+                        sub, st = _pb_decode(bytes(mfields[key][0]))
+                        if (1, 0) in sub and (2, 0) not in sub:
+                            sub[(2, 0)] = [0]
+                            mfields[key] = [_pb_encode(sub, st)]
+                            mchanged = True
+                if (6, 2) in mfields:
+                    ts = bytes(mfields[(6, 2)][0])
+                    if (7, 2) not in mfields:
+                        mfields[(7, 2)] = [ts]
+                        mchanged = True
+                    if (8, 2) not in mfields:
+                        mfields[(8, 2)] = [ts]
+                        mchanged = True
+                if mchanged:
+                    new_md = _pb_encode(mfields, mtail)
+                if new_md and ((5, 2) not in outer or outer[(5, 2)][0] != new_md):
+                    outer[(5, 2)] = [new_md]
+                    changed = True
+            if changed or new_md != md:
+                conn.execute("UPDATE steps SET metadata=?, step_payload=? WHERE idx=?",
+                             (new_md, _pb_encode(outer, tail), idx))
+                n += 1
+        conn.commit()
+    finally:
+        conn.close()
+    return n
+
+
 def _antigravity_read_cascade_id(db_path: Path) -> str:
     """从导出库读取 cascade_id (优先 trajectory_meta, 回退 blob field 6)。"""
     import sqlite3
@@ -3525,7 +3673,7 @@ def _antigravity_summary_ops(summary_db: Path, cids: list[str],
         conn = sqlite3.connect(
             f"file:{summary_db}?mode=ro" if not delete else str(summary_db),
             uri=not delete,
-            timeout=5,
+            timeout=1.5,
         )
     except sqlite3.Error as e:
         return set(), str(e)
@@ -3558,11 +3706,137 @@ def _antigravity_summary_ops(summary_db: Path, cids: list[str],
         conn.close()
 
 
+def _uri_to_norm_path(uri: str) -> str:
+    """将 Antigravity file:// URI 转成与 cwd 一致的小写正斜杠路径。"""
+    from urllib.parse import unquote as _unq
+    u = (uri or "").strip()
+    if u.lower().startswith("file://"):
+        p = _unq(u[7:])
+        if len(p) >= 3 and p[0] == "/" and p[2] == ":":
+            p = p[1:]
+        return _norm_win_path(p)
+    return _norm_win_path(u)
+
+
+def _antigravity_find_empty_projects(
+    vault: Path,
+    conv_dir: Path,
+    summary_db: Path,
+    mapped: dict,
+    cwd_cache: dict[str, str],
+    removed_cids: set[str],
+    project: str | None = None,
+) -> tuple[list[dict], str | None]:
+    """识别已无任何剩余会话引用、且曾有迁移来源的空壳 Antigravity 项目注册文件（~/.gemini/config/projects/*.json）。"""
+    proj_dir = HOME / ".gemini" / "config" / "projects"
+    if not proj_dir.exists():
+        return [], None
+
+    migrated_cwds = {
+        _norm_win_path(
+            e["cwd"] or _load_snap_cwd_cached(vault, e["sid"], cwd_cache, e.get("path_hint"))
+        )
+        for e in mapped.values()
+    }
+    migrated_cwds.discard("")
+    if not migrated_cwds:
+        return [], None
+
+    used_pids: set[str] = set()
+    used_paths: set[str] = set()
+    if conv_dir.exists():
+        for dbp in conv_dir.glob("*.db"):
+            if dbp.stem.lower() in removed_cids:
+                continue
+            try:
+                dc = sqlite3.connect(f"file:{dbp}?mode=ro", uri=True, timeout=2)
+                try:
+                    row = dc.execute("SELECT data FROM trajectory_metadata_blob WHERE id='main'").fetchone()
+                    if row and row[0]:
+                        fields, _ = _pb_decode(bytes(row[0]))
+                        for raw_pid in fields.get((18, 2), []):
+                            pid = raw_pid.decode("utf-8", "ignore").strip().lower()
+                            if pid and pid != "outside-of-project":
+                                used_pids.add(pid)
+                        for raw_ws in fields.get((3, 2), []):
+                            wf, _ = _pb_decode(raw_ws)
+                            for raw_u in wf.get((1, 2), []):
+                                np = _uri_to_norm_path(raw_u.decode("utf-8", "ignore"))
+                                if np:
+                                    used_paths.add(np)
+                        for raw_u in fields.get((7, 2), []):
+                            np = _uri_to_norm_path(raw_u.decode("utf-8", "ignore"))
+                            if np:
+                                used_paths.add(np)
+                finally:
+                    dc.close()
+            except sqlite3.Error:
+                pass
+
+    if summary_db.exists():
+        try:
+            sc = sqlite3.connect(f"file:{summary_db}?mode=ro", uri=True, timeout=2)
+            try:
+                cols = {r[1] for r in sc.execute("PRAGMA table_info(conversation_summaries)")}
+                if "conversation_id" in cols:
+                    sel = [c for c in ("conversation_id", "project_id", "workspace_uris") if c in cols]
+                    for r in sc.execute(f"SELECT {', '.join(sel)} FROM conversation_summaries"):
+                        rd = dict(zip(sel, r))
+                        if str(rd.get("conversation_id") or "").lower() in removed_cids:
+                            continue
+                        pid = str(rd.get("project_id") or "").strip().lower()
+                        if pid:
+                            used_pids.add(pid)
+                        raw_uris = rd.get("workspace_uris") or ""
+                        if raw_uris:
+                            try:
+                                uri_list = json.loads(raw_uris) if isinstance(raw_uris, str) else raw_uris
+                            except ValueError:
+                                uri_list = []
+                            for u in uri_list if isinstance(uri_list, list) else []:
+                                np = _uri_to_norm_path(str(u))
+                                if np:
+                                    used_paths.add(np)
+            finally:
+                sc.close()
+        except sqlite3.Error as e:
+            return [], str(e)
+
+    empty: list[dict] = []
+    for jf in sorted(proj_dir.glob("*.json")):
+        try:
+            obj = json.loads(jf.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            continue
+        if not isinstance(obj, dict) or not obj.get("id") or obj.get("sidecar"):
+            continue
+        pid = str(obj["id"])
+        pname = str(obj.get("name") or "")
+        uris = [
+            str(res.get("folderUri") or (res.get("gitFolder") or {}).get("folderUri") or "")
+            for res in (obj.get("projectResources") or {}).get("resources") or []
+            if isinstance(res, dict)
+        ]
+        proj_paths = [np for u in uris if (np := _uri_to_norm_path(u))]
+        if pid.lower() in used_pids or any(pp in used_paths for pp in proj_paths):
+            continue
+        # 只清曾有 Vault 迁移记录覆盖的项目，避免误删用户在 Antigravity 里单独打开的空工作区
+        if not any(pp in migrated_cwds for pp in proj_paths):
+            continue
+        cwd_repr = proj_paths[0] if proj_paths else pname
+        if project and not _norm_project_match(cwd_repr, project):
+            continue
+        empty.append({"id": pid, "name": pname, "path": str(jf), "cwd": cwd_repr})
+    if project and empty:
+        empty = _prefer_exact_project(empty, project)
+    return empty, None
+
+
 def sync_antigravity_archived(vault: Path, project: str | None = None,
                               apply: bool = False, dedup: bool = False,
                               only_agent: str | None = None) -> dict:
-    """移除已导入 Antigravity 的 ZCode 已归档/已删除会话（含 .db、摘要索引与 agyhub_summaries_proto.pb）；
-    可选 --dedup 清理同快照重复副本、--only-agent 移除非指定来源（如 codex/claude-code）的历史导入。"""
+    """移除已导入 Antigravity 的 ZCode 已归档/已删除会话（含 .db、摘要索引与 agyhub_summaries_proto.pb），
+    并清理已无任何剩余会话的迁移空项目配置；可选 --dedup 去重、--only-agent 清理非目标来源。"""
     arch_refs = _zcode_archived_refs()
     mapped = _collect_antigravity_migrated_dbs(vault)
     keep_agents = set(_parse_agent_filter(only_agent))
@@ -3573,21 +3847,32 @@ def sync_antigravity_archived(vault: Path, project: str | None = None,
 
     cwd_cache: dict[str, str] = {}
     candidates = []
-    by_sid: dict[str, list[dict]] = {}
+    by_conv: dict[tuple[str, str], list[dict]] = {}
     for entry in mapped.values():
         if entry["agent"] == "zcode" and entry["session_ref"] in arch_refs:
             candidates.append({**entry, "reason": "archived"})
         elif keep_agents and (entry["agent"] or "").lower() not in keep_agents:
             candidates.append({**entry, "reason": f"agent:{entry['agent'] or 'unknown'}"})
+        elif dedup and (entry["agent"] or "").lower() == "antigravity":
+            # 原生 Antigravity 会话经 cv sync 回灌后再被批导重装产生的自回环副本
+            candidates.append({**entry, "reason": "self_loop"})
         elif dedup:
-            by_sid.setdefault(entry["sid"], []).append(entry)
+            gkey = (entry["agent"] or "", entry["session_ref"] or "") if entry["session_ref"] else ("sid", entry["sid"])
+            by_conv.setdefault(gkey, []).append(entry)
 
     if dedup:
-        for group in by_sid.values():
+        for gkey, group in by_conv.items():
             existing = [e for e in group if (conv_dir / f"{e['cid']}.db").exists()]
             if len(existing) <= 1:
                 continue
-            existing.sort(key=lambda e: _antigravity_db_score(conv_dir / f"{e['cid']}.db", e), reverse=True)
+            det_cid = ""
+            if gkey[0] and gkey[1] and gkey[0] != "sid":
+                det_cid = _deterministic_session_id({"capture": {"agent": gkey[0], "session_ref": gkey[1]}}).lower()
+            existing.sort(
+                key=lambda e: (1 if (det_cid and e["cid"].lower() == det_cid) else 0,)
+                + _antigravity_db_score(conv_dir / f"{e['cid']}.db", e),
+                reverse=True,
+            )
             for dup in existing[1:]:
                 candidates.append({**dup, "reason": "dup"})
 
@@ -3616,46 +3901,244 @@ def sync_antigravity_archived(vault: Path, project: str | None = None,
             targets.append({**c, "db_path": str(dbp), "has_db": has_db,
                             "has_summary": has_sum, "has_proto": has_pb})
 
+    removed_cids = {t["cid"].lower() for t in targets}
+    empty_projects, proj_err = _antigravity_find_empty_projects(
+        vault, conv_dir, summary_db, mapped, cwd_cache, removed_cids, project=project
+    )
+
     removed_dbs = 0
+    removed_projects = 0
     cleaned_summaries: set[str] = set()
     cleaned_proto: set[str] = set()
-    if apply and targets:
-        target_cids = [t["cid"] for t in targets]
-        cleaned_summaries, del_err = _antigravity_summary_ops(summary_db, target_cids, delete=True)
-        if del_err:
+    if apply and (targets or empty_projects):
+        if targets:
+            target_cids = [t["cid"] for t in targets]
+            cleaned_summaries, del_err = _antigravity_summary_ops(summary_db, target_cids, delete=True)
+            if del_err:
+                raise BadMigrateTarget(
+                    f"无法清理 Antigravity 摘要库 ({del_err})；请先完全关闭 Antigravity 后重试 --apply"
+                )
+            cleaned_proto, pdel_err = _antigravity_proto_prune(proto_pb, set(target_cids), delete=True)
+            if pdel_err:
+                raise BadMigrateTarget(
+                    f"无法清理 Antigravity agyhub_summaries_proto.pb ({pdel_err})；请先完全关闭 Antigravity 后重试 --apply"
+                )
+            for t in targets:
+                base = Path(t["db_path"])
+                for p in (base, Path(str(base) + "-wal"), Path(str(base) + "-shm")):
+                    if p.exists():
+                        p.unlink()
+                        if p == base:
+                            removed_dbs += 1
+        elif proj_err:
             raise BadMigrateTarget(
-                f"无法清理 Antigravity 摘要库 ({del_err})；请先完全关闭 Antigravity 后重试 --apply"
+                f"无法读取 Antigravity 摘要库 ({proj_err})；请先完全关闭 Antigravity 后重试 --apply"
             )
-        cleaned_proto, pdel_err = _antigravity_proto_prune(proto_pb, set(target_cids), delete=True)
-        if pdel_err:
-            raise BadMigrateTarget(
-                f"无法清理 Antigravity agyhub_summaries_proto.pb ({pdel_err})；请先完全关闭 Antigravity 后重试 --apply"
-            )
-        for t in targets:
-            base = Path(t["db_path"])
-            for p in (base, Path(str(base) + "-wal"), Path(str(base) + "-shm")):
-                if p.exists():
-                    p.unlink()
-                    if p == base:
-                        removed_dbs += 1
+        elif summary_db.exists():
+            _probe_antigravity_summary_writable(summary_db, "清理 Antigravity 空项目配置")
+        for ep in empty_projects:
+            jp = Path(ep["path"])
+            if jp.exists():
+                jp.unlink()
+                removed_projects += 1
 
     return {
         "applied": apply,
         "targets": targets,
+        "empty_projects": empty_projects,
         "db_files": sum(1 for t in targets if t["has_db"]),
         "summary_ids": sum(1 for t in targets if t["has_summary"]),
         "proto_ids": sum(1 for t in targets if t["has_proto"]),
         "dup_count": sum(1 for t in targets if t["reason"] == "dup"),
         "agent_count": sum(1 for t in targets if str(t["reason"]).startswith("agent:")),
         "removed_dbs": removed_dbs,
+        "removed_projects": removed_projects,
         "cleaned_summaries": len(cleaned_summaries),
         "cleaned_proto": len(cleaned_proto),
-        "summary_check_error": sum_err or pb_err,
+        "summary_check_error": sum_err or pb_err or proj_err,
+    }
+
+
+def _probe_antigravity_summary_writable(summary_db: Path, action: str = "操作") -> None:
+    """校验 Antigravity 摘要库未被客户端锁定；占用时抛 BadMigrateTarget。"""
+    if not summary_db.exists():
+        return
+    try:
+        pconn = sqlite3.connect(str(summary_db), timeout=1.5)
+        try:
+            pconn.execute("BEGIN IMMEDIATE")
+            pconn.rollback()
+        finally:
+            pconn.close()
+    except sqlite3.Error as le:
+        raise BadMigrateTarget(
+            f"无法{action} ({le})；请先完全关闭 Antigravity 后重试 --apply"
+        )
+
+
+def _antigravity_eligible_cwd(cwd: str) -> bool:
+    if not cwd:
+        return False
+    n = cwd.replace("\\", "/").lower()
+    return not any(m in n for m in (".zcode/workspace", "appdata/local/temp", "/tmp/", "\\tmp\\", "cvtest"))
+
+
+def _pb_collect_strings(data: bytes, depth: int = 0) -> list[str]:
+    out: list[str] = []
+    if depth > 6 or not data:
+        return out
+    fields, tail = _pb_decode(data)
+    if tail:
+        return out
+    for (_, wt), vals in fields.items():
+        if wt != 2:
+            continue
+        for raw in vals:
+            try:
+                s = raw.decode("utf-8")
+                if s and sum(32 <= ord(c) < 127 or ord(c) > 0x2E7F for c in s) > len(s) * 0.9:
+                    out.append(s)
+                else:
+                    out += _pb_collect_strings(raw, depth + 1)
+            except UnicodeDecodeError:
+                out += _pb_collect_strings(raw, depth + 1)
+    return out
+
+
+def _antigravity_db_fingerprint(db_path: Path) -> str:
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+        try:
+            row = conn.execute("SELECT step_payload FROM steps WHERE step_type = 14 ORDER BY idx LIMIT 1").fetchone()
+        finally:
+            conn.close()
+        if not row or not row[0]:
+            return ""
+        strs = _pb_collect_strings(bytes(row[0]))
+        return " ".join(max(strs, key=len).split()).lower()[:80] if strs else ""
+    except sqlite3.Error:
+        return ""
+
+
+def sync_to_antigravity_batch(vault: Path, agent: str = "zcode", project: str | None = None,
+                              include_archived: bool = False, limit: int = 0,
+                              apply: bool = False) -> dict:
+    """差量同步活跃顶层主对话 → Antigravity（Web 控制台与批量同步共用，默认仅 preview）。"""
+    conv_dir = HOME / ".gemini" / "antigravity" / "conversations"
+    summary_db = conv_dir.parent / "conversation_summaries.db"
+    eff_agent = None if str(agent or "").strip().lower() in ("", "all") else agent
+    allowed_agents = set(_parse_agent_filter(eff_agent))
+    arch_refs = set() if include_archived else _zcode_archived_refs()
+    sub_refs = _zcode_subagent_refs()
+
+    if project:
+        items = _resolve_project_items(vault, project, limit=limit,
+                                       include_archived=include_archived, agent=eff_agent)
+    else:
+        items = resolve_top_conversations(vault, agent=eff_agent, include_archived=include_archived, limit=limit)
+    items = [it for it in items if _antigravity_eligible_cwd(it.get("cwd") or "")
+             and (it.get("agent") or "").lower() != "antigravity"]
+
+    have_rows: set[str] = set()
+    summary_error = None
+    if summary_db.exists():
+        try:
+            sc = sqlite3.connect(f"file:{summary_db}?mode=ro", uri=True, timeout=5)
+            try:
+                have_rows = {str(r[0]).lower() for r in sc.execute("SELECT conversation_id FROM conversation_summaries") if r[0]}
+            finally:
+                sc.close()
+        except sqlite3.Error as e:
+            summary_error = str(e)
+
+    existing_fps: set[str] = set()
+    if conv_dir.exists() and have_rows:
+        for dbp in conv_dir.glob("*.db"):
+            if dbp.stem.lower() in have_rows:
+                fp = _antigravity_db_fingerprint(dbp)
+                if fp:
+                    existing_fps.add(fp)
+
+    existing_refs: set[tuple[str, str]] = set()
+    for cid, ent in _collect_antigravity_migrated_dbs(vault).items():
+        if ent["session_ref"] and (conv_dir / f"{cid}.db").exists() and cid.lower() in have_rows:
+            existing_refs.add(((ent["agent"] or "").lower(), ent["session_ref"]))
+
+    plan = []
+    seen_cascades: set[str] = set()
+    skipped_done = 0
+    skipped_dup = 0
+    for it in items:
+        sid = it["id"]
+        try:
+            env = load_snapshot(vault, sid)
+        except (ValueError, OSError, SnapshotNotFound):
+            continue
+        cap = env.get("capture") or {}
+        ag = (cap.get("agent") or "").lower()
+        sref = cap.get("session_ref") or ""
+        orig = str(cap.get("originator") or "")
+        if ag == "antigravity" or (allowed_agents and ag not in allowed_agents):
+            continue
+        if ag == "zcode" and sref in (arch_refs | sub_refs):
+            continue
+        if cap.get("parent_session_ref") or orig.startswith("workflow subagent"):
+            continue
+        cascade = _deterministic_session_id(env).lower()
+        if ((conv_dir / f"{cascade}.db").exists() and cascade in have_rows) \
+                or (sref and (ag, sref) in existing_refs):
+            skipped_done += 1
+            continue
+        fp = _antigravity_first_user_text(env).lower()[:80]
+        if fp and fp in existing_fps:
+            skipped_dup += 1
+            continue
+        if cascade in seen_cascades:
+            continue
+        seen_cascades.add(cascade)
+        plan.append({
+            "sid": sid,
+            "agent": ag,
+            "cwd": cap.get("cwd") or "",
+            "title": orig or fp or sid,
+            "cascade": cascade,
+        })
+
+    by_proj: dict[str, int] = {}
+    for p in plan:
+        key = _norm_win_path(p["cwd"]) or "(无项目)"
+        by_proj[key] = by_proj.get(key, 0) + 1
+    proj_summary = [{"cwd": k, "count": n} for k, n in sorted(by_proj.items(), key=lambda x: (-x[1], x[0]))]
+
+    imported = 0
+    errors: list[dict] = []
+    if apply and plan:
+        if not find_smigrate():
+            raise BadMigrateTarget("未找到 smigrate: uv tool install session-migrate")
+        _probe_antigravity_summary_writable(summary_db, "写入 Antigravity 摘要库")
+        for p in plan:
+            try:
+                do_import(vault, p["sid"], "antigravity", apply=True, session_id=p["cascade"])
+                imported += 1
+            except (BadMigrateTarget, SnapshotNotFound, SystemExit, Exception) as exc:
+                errors.append({"sid": p["sid"], "title": p["title"][:40], "error": str(exc)[:160]})
+
+    return {
+        "applied": apply,
+        "planned": len(plan),
+        "imported": imported,
+        "failed": len(errors),
+        "errors": errors[:10],
+        "skipped_done": skipped_done,
+        "skipped_dup": skipped_dup,
+        "projects": proj_summary,
+        "items": plan[:50],
+        "summary_error": summary_error,
     }
 
 
 def cmd_sync_antigravity(args):
-    """清理已导入 Antigravity 的 ZCode 已归档/已删除会话 (默认 dry-run)。"""
+    """清理已导入 Antigravity 的 ZCode 已归档/已删除会话及空项目注册 (默认 dry-run)。"""
     vault = vault_dir(args)
     only_ag = getattr(args, "only_agent", None)
     res = sync_antigravity_archived(
@@ -3666,7 +4149,8 @@ def cmd_sync_antigravity(args):
         only_agent=only_ag,
     )
     targets = res["targets"]
-    if not targets:
+    empty_projects = res.get("empty_projects") or []
+    if not targets and not empty_projects:
         print("Antigravity 中未发现仍存在的待清理导入会话（已与需求一致）。")
         return
     by_proj: dict[str, list[dict]] = {}
@@ -3677,16 +4161,21 @@ def cmd_sync_antigravity(args):
         for t in lst:
             title = (t["title"] or "(无标题)")[:45]
             tags = [k for k, ok in (("db", t["has_db"]), ("summary", t["has_summary"]), ("proto", t["has_proto"])) if ok]
-            if t["reason"] == "dup":
-                tags.append("dup")
+            if t["reason"] in ("dup", "self_loop"):
+                tags.append(str(t["reason"]))
             elif str(t["reason"]).startswith("agent:"):
                 tags.append(str(t["reason"]))
             print(f"  {t['cid'][:12]}  [{','.join(tags)}]  {t['sid']}  {title}")
+    if empty_projects:
+        print(f"🗂 空项目注册 ({len(empty_projects)} 个，清理后已无任何关联对话):")
+        for ep in empty_projects:
+            print(f"  {ep['id'][:12]}  [project.json]  {ep['name']}  {ep['cwd']}")
     if res["summary_check_error"]:
         print(f"提示: 只读检查摘要缓存受限 ({res['summary_check_error']}); --apply 时请先关闭 Antigravity。")
     if res["applied"]:
         print(f"\n已同步清理 Antigravity: 删除 {res['removed_dbs']} 个 .db 文件, "
-              f"清理 {res['cleaned_summaries']} 条摘要索引, {res['cleaned_proto']} 条 proto 缓存。")
+              f"清理 {res['cleaned_summaries']} 条摘要索引, {res['cleaned_proto']} 条 proto 缓存, "
+              f"清理 {res['removed_projects']} 个空项目配置。")
         print("请重新打开 Antigravity 验证左侧项目与会话列表（全部归档与历史记录仍保留在 Context Vault 与原工具中）。")
     else:
         extra = []
@@ -3694,6 +4183,8 @@ def cmd_sync_antigravity(args):
             extra.append(f"{res['dup_count']} 条重复副本")
         if res["agent_count"]:
             extra.append(f"{res['agent_count']} 条非目标来源")
+        if empty_projects:
+            extra.append(f"{len(empty_projects)} 个空项目配置")
         print(f"\ndry-run: 共待清理 {len(targets)} 条（含 {res['db_files']} 个 .db 文件, "
               f"{res['summary_ids']} 条摘要索引, {res['proto_ids']} 条 proto 缓存"
               + (f", {', '.join(extra)}" if extra else "") + "）。")
@@ -3839,6 +4330,7 @@ def cmd_warm(args):
 # ------------------------------------------------- dashboard: 账本可视化 (M2)
 
 DASH_TMPL = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Context Vault · token 经济面板</title>
 <style>
 :root{--bg:#fafafa;--card:#ffffff;--ink:#09090b;--dim:#a1a1aa;--acc:#18181b;--good:#16a34a;--warn:#d97706}
@@ -3870,8 +4362,8 @@ th{color:var(--dim);font-weight:500}
 <div class="cards">__CARDS__</div>
 <h2>按模型节省 (明细账)</h2>__BYMODEL__
 <h2>月度节省走势 (__MONTHS__ 个月)</h2><div class="months">__TIMELINE__</div>
-<h2>上游可用性 (最近探测/切换)</h2><table><tr><th></th><th>时间</th><th>profile</th><th>状态</th><th>详情</th></tr>__PROBE__</table>
-<h2>vault 快照资产 (__NSNAP__)</h2><table><tr><th>id</th><th>agent</th><th>块</th><th>入 token</th><th>cache 读</th><th>完整性</th><th>时间</th></tr>__SNAPS__</table>
+<h2>上游可用性 (最近探测/切换)</h2><table><tr><th scope="col"></th><th scope="col">时间</th><th scope="col">profile</th><th scope="col">状态</th><th scope="col">详情</th></tr>__PROBE__</table>
+<h2>vault 快照资产 (__NSNAP__)</h2><table><tr><th scope="col">id</th><th scope="col">agent</th><th scope="col">块</th><th scope="col">入 token</th><th scope="col">cache 读</th><th scope="col">完整性</th><th scope="col">时间</th></tr>__SNAPS__</table>
 </body></html>"""
 
 
@@ -4336,76 +4828,106 @@ class VaultIndex:
 
 CONSOLE_HTML = r"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>Context Vault 控制台</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect x='2.5' y='2.5' width='15' height='15' rx='3.5' fill='none' stroke='%230e7568' stroke-width='1.7'/%3E%3Crect x='6.5' y='8' width='7' height='6' rx='1' fill='%230e7568'/%3E%3Cpath d='M7.5 8V6.5a2.5 2.5 0 0 1 5 0V8' fill='none' stroke='%230e7568' stroke-width='1.7' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
-/* ================= 设计 tokens: 色彩 / 间距 4-8px / 字号 / 圆角 / 边框 / 阴影 / 控件高度 ================= */
+/* ================= 设计 tokens: Mineral Slate × Forest Teal (Adaptive Light / Dark) ================= */
 :root{
-  --bg-canvas:#f2f3f5; --bg-surface:#fff; --bg-subtle:#f7f8fa; --bg-inset:#edeff2;
-  --line:#e3e6ea; --line-soft:#ecedef; --line-strong:#d3d7dc;
-  --ink:#191c1f; --ink-2:#45494e; --ink-3:#6e747b;
-  --acc:#0e7568; --acc-strong:#0b5d53; --acc-soft:#e4f1ee; --acc-line:#bfdfd8; --acc-ink:#fff;
-  --warn:#a16207; --warn-bg:#fdf6e7; --warn-line:#ecd9a8;
-  --err:#b42323; --err-bg:#fdf0ef; --err-line:#efc5c2;
+  color-scheme:light dark;
+  --bg-canvas:light-dark(#f3f5f7,#0d1014);
+  --bg-surface:light-dark(#ffffff,#14191f);
+  --bg-subtle:light-dark(#f8fafb,#1a2028);
+  --bg-inset:light-dark(#eaeef2,#222933);
+  --line:light-dark(#dfe3e8,#27303c);
+  --line-soft:light-dark(#edf0f3,#1e2630);
+  --line-strong:light-dark(#c6cdd5,#3a4656);
+  --ink:light-dark(#15191d,#edf1f5);
+  --ink-2:light-dark(#424a52,#b6c0ca);
+  --ink-3:light-dark(#5e6770,#8d98a5);
+  --acc:#0e7568;
+  --acc-strong:light-dark(#0a5a50,#4fd1c5);
+  --acc-soft:light-dark(#e6f3f0,rgba(79,209,197,.14));
+  --acc-line:light-dark(#b7dcd4,rgba(79,209,197,.32));
+  --acc-ink:#ffffff;
+  --warn:light-dark(#9a5b05,#f5b942);
+  --warn-bg:light-dark(#fdf6e7,rgba(245,185,66,.12));
+  --warn-line:light-dark(#ead5a3,rgba(245,185,66,.32));
+  --err:light-dark(#b42323,#f87171);
+  --err-bg:light-dark(#fdf0ef,rgba(248,113,113,.13));
+  --err-line:light-dark(#eec4c1,rgba(248,113,113,.32));
   --sans:"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI",system-ui,sans-serif;
   --mono:"Cascadia Code",Consolas,"SF Mono",ui-monospace,monospace;
-  --fs-xs:12px; --fs-sm:12.5px; --fs-md:14px; --fs-lg:15px;
-  --rad-s:6px; --rad-m:10px; --rad-l:14px;
+  --fs-xs:12px; --fs-sm:12.5px; --fs-md:13.5px; --fs-lg:15px; --fs-xl:18px;
+  --rad-s:6px; --rad-m:9px; --rad-l:13px;
   --ctl-h:34px;
   --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:24px; --sp-6:32px;
-  --shadow-1:0 1px 2px rgba(16,20,24,.05);
-  --shadow-2:0 10px 30px rgba(16,20,24,.16);
-  --sidebar-w:224px; --topbar-h:52px;
+  --shadow-1:0 1px 2px light-dark(rgba(16,20,24,.04),rgba(0,0,0,.28));
+  --shadow-2:0 14px 36px light-dark(rgba(16,20,24,.15),rgba(0,0,0,.55));
+  --scrollbar-thumb:light-dark(#8b939c,#55606e); --scrollbar-track:transparent;
+  --sidebar-w:216px; --topbar-h:52px;
 }
+:root:has(> head > meta[name="color-scheme"][content="dark"]){color-scheme:dark}
+:root:has(> head > meta[name="color-scheme"][content="light"]){color-scheme:light}
 *{box-sizing:border-box;margin:0;padding:0}
-html{color-scheme:light}
-body{background:var(--bg-canvas);color:var(--ink);font:var(--fs-md)/1.6 var(--sans);
+body{background:var(--bg-canvas);color:var(--ink);font:var(--fs-md)/1.58 var(--sans);
   font-feature-settings:"tnum";-webkit-font-smoothing:antialiased;
-  display:grid;grid-template-columns:var(--sidebar-w) minmax(0,1fr);height:100vh;overflow:hidden}
+  display:grid;grid-template-columns:var(--sidebar-w) minmax(0,1fr);height:100dvh;overflow:hidden}
 ::selection{background:var(--acc-soft)}
-::-webkit-scrollbar{width:10px;height:10px}
-::-webkit-scrollbar-thumb{background:var(--line-strong);border-radius:5px;border:2px solid var(--bg-canvas)}
-::-webkit-scrollbar-thumb:hover{background:#c3c8ce}
-:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4px}
+*{scrollbar-width:thin;scrollbar-color:var(--scrollbar-thumb) var(--scrollbar-track)}
+@supports not (scrollbar-color:auto){
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:var(--scrollbar-thumb);border-radius:5px;border:2px solid var(--bg-canvas)}
+  ::-webkit-scrollbar-thumb:hover{background:var(--ink-3)}
+}
+:focus-visible{outline:2px solid var(--acc-strong);outline-offset:2px;border-radius:4px}
 button,input,select{font:inherit;color:inherit}
-svg{flex:none}
+input,textarea{caret-color:var(--acc-strong)}
+svg{flex:none;display:block}
 
 /* ================= 左侧导航 ================= */
-.sidebar{background:var(--bg-subtle);border-right:1px solid var(--line);
+.sidebar{background:var(--bg-surface);border-right:1px solid var(--line);
   display:flex;flex-direction:column;min-height:0}
 .brand{display:flex;align-items:center;gap:10px;padding:0 16px;height:var(--topbar-h);
   border-bottom:1px solid var(--line-soft);font-weight:650;font-size:var(--fs-lg);letter-spacing:.01em}
-.side-nav{padding:10px 8px;display:flex;flex-direction:column;gap:2px}
+.brand .brand-tag{margin-left:auto;font-family:var(--mono);font-size:11px;font-weight:600;
+  color:var(--ink-3);background:var(--bg-subtle);border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+.side-nav{padding:12px 10px;display:flex;flex-direction:column;gap:2px}
 .side-nav button{display:flex;align-items:center;gap:10px;width:100%;background:none;border:none;
-  color:var(--ink-2);padding:8px 12px;border-radius:var(--rad-s);cursor:pointer;font-size:13.5px;
+  color:var(--ink-2);padding:8px 11px;border-radius:var(--rad-s);cursor:pointer;font-size:13.5px;
   text-align:left;position:relative;transition:background .12s ease,color .12s ease}
-.side-nav button:hover{background:var(--bg-inset);color:var(--ink)}
+.side-nav button:hover{background:var(--bg-subtle);color:var(--ink)}
 .side-nav button.on{background:var(--acc-soft);color:var(--acc-strong);font-weight:600}
 .side-nav button.on::before{content:"";position:absolute;left:0;top:7px;bottom:7px;width:3px;
   border-radius:0 3px 3px 0;background:var(--acc)}
-.side-nav .kbd{margin-left:auto;font-family:var(--mono);font-size:var(--fs-xs);color:var(--ink-3);
-  border:1px solid var(--line);border-radius:4px;padding:0 5px;line-height:18px;background:var(--bg-surface)}
+.side-nav .kbd{margin-left:auto;font-family:var(--mono);font-size:11.5px;color:var(--ink-3);
+  border:1px solid var(--line);border-radius:4px;padding:0 5px;line-height:17px;background:var(--bg-subtle)}
 .side-foot{margin-top:auto;padding:12px 14px 14px;border-top:1px solid var(--line-soft);
-  font-size:var(--fs-xs);color:var(--ink-3);display:flex;flex-direction:column;gap:6px}
-.side-foot .health-line{display:flex;align-items:center;gap:7px;color:var(--ink-2)}
-.side-foot .health-line b{font-family:var(--mono);font-weight:600;color:var(--ink)}
-.privacy{display:flex;align-items:center;gap:6px;line-height:1.5}
+  font-size:var(--fs-xs);color:var(--ink-3);display:flex;flex-direction:column;gap:10px}
+.privacy{display:flex;align-items:center;gap:6px;line-height:1.45;color:var(--ink-2)}
+.theme-sw{display:grid;grid-template-columns:repeat(3,1fr);gap:2px;background:var(--bg-subtle);
+  border:1px solid var(--line);border-radius:var(--rad-s);padding:2px}
+.theme-sw button{background:none;border:none;color:var(--ink-3);font-size:11.5px;padding:3px 0;
+  border-radius:4px;cursor:pointer;transition:background .12s ease,color .12s ease}
+.theme-sw button:hover{color:var(--ink)}
+.theme-sw button[aria-pressed="true"]{background:var(--bg-surface);color:var(--ink);font-weight:600;box-shadow:var(--shadow-1)}
 
-/* ================= 顶栏: 当前分区 / 全局搜索 / 服务状态 ================= */
+/* ================= 顶栏: 当前分区 / 命令式检索 / 同步与服务状态 ================= */
 .workspace{display:flex;flex-direction:column;min-width:0;min-height:0}
-.topbar{height:var(--topbar-h);flex:none;display:flex;align-items:center;gap:14px;
-  padding:0 20px;background:var(--bg-surface);border-bottom:1px solid var(--line)}
-.topbar h1{font-size:var(--fs-lg);font-weight:650;white-space:nowrap}
-.gsearch{flex:1;max-width:520px;margin:0 auto;position:relative;display:flex}
+.topbar{height:var(--topbar-h);flex:none;display:flex;align-items:center;gap:12px;
+  padding:0 22px;background:var(--bg-surface);border-bottom:1px solid var(--line)}
+.topbar h1{font-size:var(--fs-lg);font-weight:650;white-space:nowrap;min-width:74px}
+.gsearch{flex:1;max-width:500px;margin-right:auto;position:relative;display:flex;align-items:center}
 .gsearch input[type=search]{width:100%;height:var(--ctl-h);background:var(--bg-subtle);border:1px solid var(--line);
-  border-radius:var(--rad-m);padding:0 46px 0 32px;font-size:13.5px;outline:none;  /* 右侧 46px 给 Enter kbd 让位 — 12px 时输入文字被 kbd 盖住 (二轮 console-8) */
+  border-radius:var(--rad-s);padding:0 74px 0 32px;font-size:13px;
   transition:border-color .12s ease,background .12s ease}
 .gsearch input[type=search]:focus{border-color:var(--acc);background:var(--bg-surface)}
 .gsearch .gs-ic{position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--ink-3);pointer-events:none}
 .gsearch kbd{position:absolute;right:8px;top:50%;transform:translateY(-50%);font-family:var(--mono);
-  font-size:11.5px;color:var(--ink-3);border:1px solid var(--line);border-radius:4px;
-  padding:0 5px;background:var(--bg-surface);pointer-events:none}
-.status-pill{display:inline-flex;align-items:center;gap:8px;font-size:var(--fs-xs);color:var(--ink-2);
+  font-size:11px;color:var(--ink-3);border:1px solid var(--line);border-radius:4px;
+  padding:0 5px;line-height:18px;background:var(--bg-surface);pointer-events:none}
+.top-actions{display:flex;align-items:center;gap:8px;flex:none}
+.status-pill{display:inline-flex;align-items:center;gap:7px;font-size:var(--fs-xs);color:var(--ink-2);
   border:1px solid var(--line);border-radius:999px;padding:4px 12px;background:var(--bg-subtle);white-space:nowrap}
 .status-pill .pulse{width:7px;height:7px;border-radius:50%;background:var(--acc);
   box-shadow:0 0 0 0 rgba(14,117,104,.4);animation:pulse 2.4s ease-out infinite}
@@ -4415,52 +4937,97 @@ svg{flex:none}
 .status-pill.auth{color:var(--warn);border-color:var(--warn-line);background:var(--warn-bg)}
 .status-pill.auth .pulse{background:var(--warn);animation:none}
 
-.content{flex:1;overflow-y:auto;padding:22px 28px 64px}
-.content-inner{max-width:1400px;margin:0 auto}
-section{animation:fadein .16s ease-out}
+.content{flex:1;overflow-y:auto;padding:20px 26px 56px}
+.content-inner{max-width:1420px;margin:0 auto}
+section{animation:fadein .14s ease-out}
 @keyframes fadein{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
 
-/* ================= 通用元素 ================= */
+/* ================= 通用架构元素 ================= */
 .card{background:var(--bg-surface);border:1px solid var(--line);border-radius:var(--rad-m);
   box-shadow:var(--shadow-1)}
-.card>.card-h{display:flex;align-items:center;gap:8px;padding:12px 16px;
-  font-size:var(--fs-xs);font-weight:600;color:var(--ink-3);letter-spacing:.04em;
-  border-bottom:1px solid var(--line-soft)}
-.card>.card-h .sub{font-weight:400;letter-spacing:0}
-.card>.card-b{padding:6px 8px}
+.card>.card-h,.mig-step>.card-h{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 16px;
+  font-size:var(--fs-xs);font-weight:650;color:var(--ink-2);letter-spacing:.03em;
+  border-bottom:1px solid var(--line-soft);min-height:40px}
+.card>.card-h .ch-l,.mig-step>.card-h .ch-l{display:flex;align-items:center;gap:8px;min-width:0}
+.card>.card-h .sub,.mig-step>.card-h .sub{font-weight:400;letter-spacing:0;color:var(--ink-3);white-space:nowrap}
+.card>.card-h .ch-link{font-weight:500;color:var(--acc-strong);background:none;border:none;cursor:pointer;font-size:var(--fs-xs);padding:2px 4px;border-radius:4px;white-space:nowrap}
+.card>.card-h .ch-link:hover{background:var(--acc-soft)}
+.card>.card-b{padding:8px 12px}
 .src{font-size:var(--fs-xs);color:var(--ink-3)}
 .hint{color:var(--ink-3);font-size:var(--fs-sm)}
 .mono{font-family:var(--mono);font-size:var(--fs-sm)}
 .nowr{white-space:nowrap}
 .num{font-variant-numeric:tabular-nums}
-.tbl-wrap{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
+
+/* ================= 响应式零横向溢出表格 (@container) ================= */
+.tbl-wrap{width:100%;max-inline-size:100%;overflow-x:auto;container:tbl / inline-size}
 table{width:100%;border-collapse:collapse;font-size:13px}
-th{font-size:var(--fs-xs);font-weight:600;color:var(--ink-2);text-align:left;letter-spacing:.03em;
-  padding:8px 12px;border-bottom:1px solid var(--line);background:var(--bg-subtle);white-space:nowrap}
-td{padding:8px 12px;border-bottom:1px solid var(--line-soft);vertical-align:middle}
+table.fixed-cols{table-layout:fixed}
+th{font-size:var(--fs-xs);font-weight:600;color:var(--ink-2);text-align:left;letter-spacing:.02em;
+  padding:8px 12px;border-bottom:1px solid var(--line);background:var(--bg-subtle);white-space:nowrap;
+  position:sticky;top:0;z-index:1}
+td{padding:8px 12px;border-bottom:1px solid var(--line-soft);vertical-align:middle;min-width:0}
 tr:last-child td{border-bottom:none}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 td.mono{font-family:var(--mono);font-size:var(--fs-sm)}
-.tbl-44 td{height:46px}
+.tbl-44 td{height:44px}
+/* 列宽预算: 保证 1440px 与 900px 桌面视口零横向溢出 */
+table.tbl-ov col.c-src{width:96px}
+table.tbl-ov col.c-dir{width:196px}
+table.tbl-ov col.c-time{width:84px}
+table.tbl-snap col.c-sid{width:204px}
+table.tbl-snap col.c-src{width:94px}
+table.tbl-snap col.c-num{width:80px}
+table.tbl-snap col.c-time{width:116px}
+table.tbl-snap col.c-dir{width:186px}
+table.tbl-snap col.c-act{width:80px}
+table.tbl-probe col.c-time{width:136px}
+table.tbl-probe col.c-node{width:146px}
+table.tbl-probe col.c-http{width:96px}
+table.tbl-probe col.c-lat{width:128px}
+.sid-wrap{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;max-width:100%}
+@container tbl (inline-size < 740px){
+  table.tbl-snap col.c-sid{width:160px}
+  table.tbl-snap col.c-dir{width:124px}
+  table.tbl-ov col.c-dir{width:140px}
+}
+@container tbl (inline-size < 560px){
+  table.fixed-cols{table-layout:auto}
+  table.fixed-cols colgroup{display:none}
+  .tbl-wrap table,.tbl-wrap tbody,.tbl-wrap tr,.tbl-wrap td{display:block;width:100%}
+  .tbl-wrap thead{display:none}
+  .tbl-wrap tr{border-bottom:1px solid var(--line);padding:8px 12px}
+  .tbl-wrap tr:last-child{border-bottom:none}
+  .tbl-wrap td{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;
+    border-bottom:none;padding:3px 0;height:auto!important;text-align:right}
+  .tbl-wrap td::before{content:attr(data-label);font-size:var(--fs-xs);color:var(--ink-3);
+    font-weight:600;flex:none;text-align:left;padding-top:1px}
+  .tbl-wrap td[data-label=""]::before{display:none}
+  .tbl-wrap td .sumbtn{max-width:100%;text-align:right;overflow:visible}
+  .tbl-wrap td .sum-line{max-width:100%;white-space:normal;flex-wrap:wrap;justify-content:flex-end;gap:4px}
+  .tbl-wrap td .sum-main{white-space:normal;overflow:visible;text-overflow:unset;word-break:break-word;flex:1 1 100%;text-align:right}
+}
+
 .linklike{background:none;border:none;padding:0;cursor:pointer;text-align:left}
-.sid{color:var(--acc-strong);font-family:var(--mono);font-size:var(--fs-sm)}
+.sid{color:var(--acc-strong);font-family:var(--mono);font-size:12.5px}
 .sid:hover{text-decoration:underline;text-underline-offset:3px}
-.chip{display:inline-block;font-size:var(--fs-xs);padding:1px 8px;border-radius:5px;
-  background:var(--bg-subtle);color:var(--ink-2);border:1px solid var(--line);white-space:nowrap}
+.sumbtn{display:block;width:100%;max-width:100%;font-size:13px;color:var(--ink);overflow:hidden}
+.sumbtn:hover .sum-main{color:var(--acc-strong);text-decoration:underline;text-underline-offset:3px}
+.chip{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;padding:1px 7px;border-radius:5px;
+  background:var(--bg-subtle);color:var(--ink-2);border:1px solid var(--line);white-space:nowrap;line-height:1.45}
 .chip.warn{color:var(--warn);border-color:var(--warn-line);background:var(--warn-bg)}
 .chip.ok{color:var(--acc-strong);background:var(--acc-soft);border-color:var(--acc-line)}
 .chip.err{color:var(--err);background:var(--err-bg);border-color:var(--err-line)}
-.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:2px;vertical-align:1px}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;flex:none}
 .dot.ok{background:var(--acc)} .dot.err{background:var(--err)} .dot.warn{background:var(--warn)} .dot.sw{background:var(--warn)} .dot.off{background:var(--line-strong)}
-.pill{display:inline-block;font-size:var(--fs-xs);padding:1px 8px;border-radius:999px;font-weight:600;font-family:var(--mono)}
+.pill{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;padding:1px 8px;border-radius:999px;font-weight:600;white-space:nowrap}
 .pill.ok{color:var(--acc-strong);background:var(--acc-soft)}
 .pill.err{color:var(--err);background:var(--err-bg)}
 .pill.warn{color:var(--warn);background:var(--warn-bg)}
-.empty{padding:32px 20px;text-align:center;color:var(--ink-3);font-size:13px;line-height:1.9}
+.empty{padding:30px 20px;text-align:center;color:var(--ink-3);font-size:13px;line-height:1.85;
+  display:flex;flex-direction:column;align-items:center;gap:8px}
 .empty code,.hint code{font-family:var(--mono);font-size:var(--fs-xs);color:var(--ink-2);
-  background:var(--bg-subtle);border:1px solid var(--line-soft);padding:1px 6px;border-radius:5px;
-  overflow-wrap:anywhere}  /* 空态里的长环境变量示例曾把 380px 视口撑到 681px (全面测试 console-3) */
-.empty .btn{margin-top:12px}
+  background:var(--bg-subtle);border:1px solid var(--line-soft);padding:1px 6px;border-radius:5px;overflow-wrap:anywhere}
 .skel{height:13px;border-radius:5px;background:linear-gradient(90deg,var(--bg-inset) 25%,var(--line-soft) 50%,var(--bg-inset) 75%);
   background-size:200% 100%;animation:shimmer 1.3s linear infinite;margin:10px 0}
 @keyframes shimmer{to{background-position:-200% 0}}
@@ -4469,201 +5036,200 @@ td.mono{font-family:var(--mono);font-size:var(--fs-sm)}
 .dir span{overflow:hidden;text-overflow:ellipsis}
 
 /* 按钮 / 表单 */
-.btn{display:inline-flex;align-items:center;gap:7px;background:var(--bg-surface);border:1px solid var(--line-strong);
-  border-radius:var(--rad-s);padding:0 14px;height:var(--ctl-h);font-size:13.5px;cursor:pointer;
-  transition:border-color .12s ease,background .12s ease,transform .08s ease;white-space:nowrap}
-.btn:hover{border-color:#bfc5cb;background:var(--bg-subtle)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;background:var(--bg-surface);
+  border:1px solid var(--line-strong);border-radius:var(--rad-s);padding:0 13px;height:var(--ctl-h);
+  font-size:13px;font-weight:500;cursor:pointer;transition:border-color .12s ease,background .12s ease,transform .08s ease;white-space:nowrap}
+.btn:hover{border-color:var(--ink-3);background:var(--bg-subtle)}
 .btn:active{transform:translateY(1px)}
 .btn.primary{background:var(--acc);border-color:var(--acc);color:var(--acc-ink);font-weight:600}
-.btn.primary:hover{background:var(--acc-strong);border-color:var(--acc-strong)}
+.btn.primary:hover{background:#0b5d53;border-color:#0b5d53}
 .btn.danger{background:var(--bg-surface);border-color:var(--err-line);color:var(--err)}
 .btn.danger:hover{background:var(--err-bg);border-color:var(--err)}
-.btn.sm{height:28px;padding:0 10px;font-size:var(--fs-xs)}
-.btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
+.btn.sm{height:27px;padding:0 9px;font-size:12px}
+.btn:disabled{opacity:.48;cursor:not-allowed;transform:none}
+.btn.on,.btn[aria-pressed="true"]{border-color:var(--acc);background:var(--acc-soft);color:var(--acc-strong);font-weight:600}
 input[type=search],select{background:var(--bg-surface);border:1px solid var(--line-strong);color:var(--ink);
-  border-radius:var(--rad-s);height:var(--ctl-h);padding:0 12px;font-size:13.5px;outline:none;
-  transition:border-color .12s ease}
+  border-radius:var(--rad-s);height:var(--ctl-h);padding:0 12px;font-size:13px;transition:border-color .12s ease}
 input[type=search]::placeholder{color:var(--ink-3)}
 input[type=search]:focus,select:focus{border-color:var(--acc)}
-select{appearance:none;-webkit-appearance:none;padding-right:30px;cursor:pointer;
-  min-width:0;width:100%;max-width:100%;  /* option 文本不可断行, width:auto 曾按文本撑爆窄视口 (全面测试 M11 复核补充) */
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236e747b' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-  background-repeat:no-repeat;background-position:right 10px center}
+select{appearance:none;-webkit-appearance:none;padding-right:28px;cursor:pointer;min-width:0;width:100%;max-width:100%;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2378828d' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 9px center}
 
-/* KPI */
-.kpi-band{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
-.kpi{background:var(--bg-surface);border:1px solid var(--line);border-radius:var(--rad-m);
-  padding:14px 16px;min-width:0;box-shadow:var(--shadow-1)}
-.kpi .v{font-family:var(--mono);font-size:22px;font-weight:650;letter-spacing:-.01em;line-height:1.25;
-  font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.kpi .v small{font-size:13px;font-weight:500;color:var(--ink-3);margin-left:4px}
-.kpi .exact{font-family:var(--mono);font-size:var(--fs-xs);color:var(--ink-3);margin-top:2px;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.kpi .k{font-size:var(--fs-xs);color:var(--ink-3);margin-top:6px;line-height:1.45;cursor:help}
+/* ================= 集成式 KPI 台账带 (极简发丝线分割, 无冗余快捷卡片) ================= */
+.kpi-band{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));
+  background:var(--bg-surface);border:1px solid var(--line);border-radius:var(--rad-m);
+  box-shadow:var(--shadow-1);overflow:hidden}
+.kpi{padding:14px 18px;min-width:0;border-right:1px solid var(--line-soft);display:flex;flex-direction:column;gap:4px}
+.kpi:last-child{border-right:none}
+.kpi .k{font-size:var(--fs-xs);color:var(--ink-3);font-weight:500;cursor:help;display:flex;align-items:center;justify-content:space-between;gap:6px}
+.kpi .v{font-family:var(--mono);font-size:23px;font-weight:650;letter-spacing:-.02em;line-height:1.2;
+  font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ink)}
+.kpi .v small{font-size:12.5px;font-weight:500;color:var(--ink-3);margin-left:4px}
+.kpi .exact{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .kpi-bad{color:var(--err)}
-tr.rowlink{cursor:pointer}
+tr.rowlink{cursor:pointer;transition:background .08s ease}
 tr.rowlink:hover{background:var(--bg-subtle)}
-.quick-row{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px}
-.quick{display:flex;align-items:center;gap:12px;background:var(--bg-surface);border:1px solid var(--line);
-  border-radius:var(--rad-m);padding:14px 16px;cursor:pointer;text-align:left;width:100%;
-  transition:border-color .12s ease,box-shadow .12s ease;box-shadow:var(--shadow-1)}
-.quick:hover{border-color:var(--acc-line);box-shadow:0 2px 8px rgba(14,117,104,.08)}
-.quick .q-ic{width:34px;height:34px;border-radius:var(--rad-s);background:var(--acc-soft);color:var(--acc-strong);
-  display:flex;align-items:center;justify-content:center;flex:none}
-.quick .q-t{font-weight:600;font-size:13.5px}
-.quick .q-d{font-size:var(--fs-xs);color:var(--ink-3);margin-top:1px;line-height:1.45}
-.quick .q-go{margin-left:auto;color:var(--ink-3)}
 
-/* 布局网格 */
-.ov-grid{display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);gap:12px;margin-top:14px;align-items:start}
-.ov-side{display:flex;flex-direction:column;gap:12px}
-.row{display:flex;justify-content:space-between;gap:10px;font-size:var(--fs-sm);padding:7px 12px;
-  border-bottom:1px solid var(--line-soft)}
-.row:last-child{border-bottom:none}
-.row .l{color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
-.row .r{color:var(--ink-2);white-space:nowrap;font-family:var(--mono);font-size:var(--fs-xs)}
-details.card>summary{list-style:none;display:flex;align-items:center;gap:8px;padding:12px 16px;cursor:pointer;
-  font-size:var(--fs-xs);font-weight:600;color:var(--ink-3);letter-spacing:.04em;user-select:none}
+/* ================= 概览双栏栅格 ================= */
+.ov-grid{display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);gap:14px;margin-top:14px;align-items:start}
+.ov-side{display:flex;flex-direction:column;gap:12px;min-width:0}
+.feed-row{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:12.5px;
+  padding:8px 14px;border-bottom:1px solid var(--line-soft);min-width:0}
+.feed-row:last-child{border-bottom:none}
+.feed-main{display:flex;align-items:center;gap:8px;min-width:0;flex:1;overflow:hidden}
+.feed-txt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink);min-width:0}
+.feed-r{display:flex;align-items:center;gap:8px;flex:none;font-size:var(--fs-xs);color:var(--ink-3);font-family:var(--mono)}
+.audit-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;background:var(--line-soft)}
+.audit-cell{background:var(--bg-surface);padding:9px 14px;display:flex;flex-direction:column;gap:2px}
+.audit-cell .al{font-size:11.5px;color:var(--ink-3)}
+.audit-cell .av{font-family:var(--mono);font-size:15px;font-weight:650;font-variant-numeric:tabular-nums;color:var(--ink)}
+
+details.card>summary{list-style:none;display:flex;align-items:center;gap:8px;padding:11px 16px;cursor:pointer;
+  font-size:var(--fs-xs);font-weight:650;color:var(--ink-2);letter-spacing:.03em;user-select:none}
 details.card>summary::-webkit-details-marker{display:none}
-details.card>summary .tw{transition:transform .15s ease;color:var(--ink-3)}
+details.card>summary .sub{font-weight:400;color:var(--ink-3)}
+details.card>summary .tw{transition:transform .15s ease;color:var(--ink-3);font-size:10px}
 details.card[open]>summary .tw{transform:rotate(90deg)}
 details.card .card-b{border-top:1px solid var(--line-soft)}
-.foot{display:flex;justify-content:space-between;align-items:center;padding:9px 16px;
-  border-top:1px solid var(--line-soft);font-size:var(--fs-xs);color:var(--ink-2)}
-.foot a{cursor:pointer;color:var(--acc-strong)}
-.foot a:hover{text-decoration:underline;text-underline-offset:3px}
-.kv{display:grid;grid-template-columns:150px minmax(0,1fr);gap:6px 14px;font-size:13px}
+.foot{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px 12px;padding:9px 16px;
+  border-top:1px solid var(--line-soft);font-size:var(--fs-xs);color:var(--ink-3)}
+.foot button.linklike,.foot a{cursor:pointer;color:var(--acc-strong);font-size:var(--fs-xs);font-weight:500;white-space:nowrap;flex:none}
+.foot button.linklike:hover,.foot a:hover{text-decoration:underline;text-underline-offset:3px}
+.kv{display:grid;grid-template-columns:130px minmax(0,1fr);gap:6px 12px;font-size:12.5px}
 .kv b{color:var(--ink-3);font-weight:500;white-space:nowrap}
 .kv span{font-variant-numeric:tabular-nums;min-width:0;overflow-wrap:anywhere}
-.section-note{font-size:var(--fs-xs);color:var(--ink-3);line-height:1.7;margin-top:10px}
+.section-note{font-size:var(--fs-xs);color:var(--ink-3);line-height:1.65;margin-top:10px}
 
 /* 月度走势 */
-.months{display:flex;gap:10px;height:150px;padding:24px 4px 0;max-width:680px}
+.months{display:flex;gap:10px;height:142px;padding:24px 4px 0;max-width:680px}
 .yax{width:52px;flex:none;display:flex;flex-direction:column;justify-content:space-between;align-items:flex-end;
   font-family:var(--mono);font-size:var(--fs-xs);color:var(--ink-3);font-variant-numeric:tabular-nums;padding-bottom:18px}
 .bars{flex:1;display:flex;gap:6px;height:100%;
-  background:repeating-linear-gradient(to top,transparent 0 36px,var(--line-soft) 36px 37px)}
+  background:repeating-linear-gradient(to top,transparent 0 34px,var(--line-soft) 34px 35px)}
 .mcol{flex:1;position:relative;min-width:0}
 .mcol .val{position:absolute;left:50%;transform:translateX(-50%);
-  /* 100% 高柱子的标签会逃出容器上沿压到卡片标题 — clamp 在容器顶内 */
   bottom:min(calc(22px + var(--h,50)*.96%),calc(100% - 4px));
   font-family:var(--mono);font-size:11.5px;color:var(--ink-2);white-space:nowrap;font-variant-numeric:tabular-nums}
-.mcol .stick{position:absolute;left:50%;bottom:22px;width:32px;max-width:60%;height:3%;
+.mcol .stick{position:absolute;left:50%;bottom:22px;width:30px;max-width:60%;height:3%;
   max-height:calc(100% - 26px);background:var(--acc);border-radius:4px 4px 0 0;transform:translateX(-50%);
-  transform-origin:bottom;animation:grow .5s cubic-bezier(.2,.7,.3,1) backwards;animation-delay:calc(var(--i,0)*40ms)}
+  transform-origin:bottom;animation:grow .45s cubic-bezier(.2,.7,.3,1) backwards;animation-delay:calc(var(--i,0)*35ms)}
 @keyframes grow{from{transform:translateX(-50%) scaleY(0)}}
-.mcol .lb{position:absolute;left:0;right:0;bottom:0;text-align:center;font-size:11.5px;color:var(--ink-3);
-  font-variant-numeric:tabular-nums}
+.mcol .lb{position:absolute;left:0;right:0;bottom:0;text-align:center;font-size:11.5px;color:var(--ink-3);font-variant-numeric:tabular-nums}
 
-/* 表格容器 (卡片化) */
+/* 表格卡片 */
 .cardbox{border:1px solid var(--line);border-radius:var(--rad-m);background:var(--bg-surface);
   box-shadow:var(--shadow-1);overflow:clip}
-.cardbox .tbl-wrap{overflow-x:auto}
-.cardbox th{background:var(--bg-subtle)}
-.sum-line{display:flex;align-items:center;gap:6px;overflow:hidden;white-space:nowrap;height:100%;min-width:0}
+.sum-line{display:flex;align-items:center;gap:6px;overflow:hidden;white-space:nowrap;min-width:0;max-width:100%}
 .sum-main{overflow:hidden;text-overflow:ellipsis;min-width:0;flex:0 1 auto}
-.mini-tag{flex:none;font-family:var(--mono);font-size:11.5px;color:var(--ink-3);
-  background:var(--bg-subtle);border:1px solid var(--line-soft);border-radius:4px;padding:0 5px;line-height:16px}
-.relay-badge{display:inline-flex;align-items:center;gap:6px;background:var(--bg-subtle);
-  border:1px solid var(--line);border-radius:6px;padding:2px 8px;line-height:1.5;vertical-align:middle}
+.mini-tag{flex:none;font-family:var(--mono);font-size:11px;color:var(--ink-3);
+  background:var(--bg-subtle);border:1px solid var(--line);border-radius:4px;padding:0 5px;line-height:16px}
+.relay-badge{display:inline-flex;align-items:center;gap:5px;background:var(--bg-subtle);
+  border:1px solid var(--line);border-radius:5px;padding:1px 7px;line-height:1.45;vertical-align:middle}
 .relay-badge .rl{color:var(--ink-3);font-size:11.5px}
-.relay-badge .rn{font-family:var(--mono);color:var(--ink);font-weight:600;font-size:var(--fs-xs)}
-.lat{font-family:var(--mono);font-size:var(--fs-sm);white-space:nowrap}
-.lat.good{color:var(--acc-strong)}.lat.mid{color:var(--ink-2)}.lat.warm{color:var(--warn)}
-.latbar{width:52px;height:3px;background:var(--bg-inset);border-radius:2px;overflow:hidden;
-  display:inline-block;vertical-align:middle;margin-left:8px}
+.relay-badge .rn{font-family:var(--mono);color:var(--ink);font-weight:600;font-size:11.5px}
+.lat{font-family:var(--mono);font-size:12.5px;white-space:nowrap}
+.lat.good{color:var(--acc-strong)}.lat.mid{color:var(--ink-2)}.lat.warm{color:var(--warn)}.lat.muted{color:var(--ink-3)}
+.latbar{width:44px;height:3px;background:var(--bg-inset);border-radius:2px;overflow:hidden;
+  display:inline-block;vertical-align:middle;margin-left:7px}
 .latbar i{display:block;height:100%;background:currentColor;border-radius:2px}
 
-/* 控件行 */
-.controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
-.controls input[type=search]{flex:1;min-width:240px;padding-left:32px;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%236e747b' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E");
-  background-repeat:no-repeat;background-position:10px center}
-.meta-line{font-size:var(--fs-xs);color:var(--ink-3);margin:0 2px 10px}  /* 曾 display:flex: 纯文本与 <b> 被拆成多个匿名 flex 项, 380px 下句子错乱断行 (二轮 console-7) */
-.meta-line .xbtn{background:none;border:none;color:var(--acc-strong);cursor:pointer;font-size:var(--fs-xs);
-  padding:2px 6px;border-radius:4px}
+/* ================= 快照工具栏 & 视图切换 ================= */
+.controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+.seg{display:inline-flex;background:var(--bg-subtle);border:1px solid var(--line);border-radius:var(--rad-s);padding:2px;gap:2px}
+.seg .btn{height:28px;border:none;background:none;padding:0 11px;box-shadow:none;font-size:12.5px}
+.seg .btn.on,.seg .btn[aria-pressed="true"]{background:var(--bg-surface);color:var(--acc-strong);box-shadow:var(--shadow-1)}
+.ctl-search{position:relative;flex:1;min-width:210px;display:flex;align-items:center}
+.ctl-search svg{position:absolute;left:10px;color:var(--ink-3);pointer-events:none}
+.ctl-search input[type=search]{width:100%;padding-left:32px}
+.meta-line{font-size:var(--fs-xs);color:var(--ink-3);margin:0 2px 10px}
+.meta-line .xbtn{background:none;border:none;color:var(--acc-strong);cursor:pointer;font-size:var(--fs-xs);padding:2px 6px;border-radius:4px}
 .meta-line .xbtn:hover{background:var(--acc-soft)}
-.pager{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 2px;
-  font-size:var(--fs-sm);color:var(--ink-2)}
-.pager .btn{height:28px;padding:0 12px;font-size:var(--fs-xs)}
+.pager{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 2px;font-size:var(--fs-sm);color:var(--ink-2)}
+.pager .btn{height:28px;padding:0 11px;font-size:12px}
 
-/* 迁移工作台 */
-.mig-wrap{display:flex;flex-direction:column;gap:12px}
-.mig-steps{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:12px;align-items:start}
+/* ================= 迁移工作台: 左右双栏 (全库搜索 + 目标格子 + 右侧实时预览/一屏执行) ================= */
+.mig-shell{display:grid;grid-template-columns:minmax(0,440px) minmax(0,1fr);gap:14px;align-items:start}
+.mig-col{display:flex;flex-direction:column;gap:12px;min-width:0}
 .mig-step{background:var(--bg-surface);border:1px solid var(--line);border-radius:var(--rad-m);box-shadow:var(--shadow-1)}
 .mig-step>.card-h .stepno{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;
-  border-radius:50%;background:var(--acc);color:var(--acc-ink);font-size:11.5px;font-weight:700;font-family:var(--mono)}
+  border-radius:50%;background:var(--acc);color:var(--acc-ink);font-size:11px;font-weight:700;font-family:var(--mono)}
 .mig-step .card-b{padding:12px 14px}
-.tgt-cards{display:flex;flex-direction:column;gap:8px}
-.tgt-card{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--line);border-radius:var(--rad-s);
-  padding:10px 12px;cursor:pointer;transition:border-color .12s ease,background .12s ease;background:var(--bg-surface)}
+.mig-src-search{display:flex;gap:6px;margin-bottom:8px}
+.mig-src-search .ctl-search{min-width:0}
+.tgt-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}
+.tgt-card{display:flex;gap:8px;align-items:flex-start;border:1px solid var(--line);border-radius:var(--rad-s);
+  padding:8px 10px;cursor:pointer;transition:border-color .12s ease,background .12s ease;background:var(--bg-surface)}
+.tgt-card.wide{grid-column:1 / -1}
 .tgt-card:hover{border-color:var(--line-strong)}
 .tgt-card.on{border-color:var(--acc);background:var(--acc-soft)}
 .tgt-card input{margin-top:3px;accent-color:var(--acc)}
-.tgt-card .tt{font-weight:600;font-size:13.5px}
-.tgt-card .td{font-size:var(--fs-xs);color:var(--ink-3);margin-top:1px;line-height:1.5}
-.apply-toggle{display:flex;gap:8px;margin-top:10px}
+.tgt-card .tt{font-weight:600;font-size:13px;line-height:1.3}
+.tgt-card .td{font-size:11.5px;color:var(--ink-3);margin-top:2px;line-height:1.4}
+.apply-toggle{display:flex;gap:7px;margin-top:10px}
 .apply-toggle button{flex:1;display:flex;flex-direction:column;align-items:flex-start;gap:2px;
-  border:1px solid var(--line);background:var(--bg-surface);border-radius:var(--rad-s);padding:8px 12px;cursor:pointer}
-.apply-toggle button .at-t{font-size:13px;font-weight:600}
-.apply-toggle button .at-d{font-size:11.5px;color:var(--ink-3);line-height:1.4}
+  border:1px solid var(--line);background:var(--bg-surface);border-radius:var(--rad-s);padding:7px 10px;cursor:pointer;text-align:left}
+.apply-toggle button .at-t{font-size:12.5px;font-weight:600}
+.apply-toggle button .at-d{font-size:11px;color:var(--ink-3);line-height:1.35}
 .apply-toggle button.on{border-color:var(--acc);background:var(--acc-soft)}
 .apply-toggle button.on.risky{border-color:var(--err);background:var(--err-bg)}
 .apply-toggle button.on.risky .at-t{color:var(--err)}
-.sel-meta{margin-top:8px;font-size:var(--fs-xs);color:var(--ink-2);line-height:1.6}
+.sel-meta{margin-top:8px;font-size:var(--fs-xs);color:var(--ink-2);line-height:1.55}
 .sel-meta .mono{font-size:11.5px}
-.immlist{list-style:none;padding:4px 0}
-.immlist li{display:flex;gap:8px;font-size:var(--fs-sm);color:var(--ink-2);padding:4px 0;line-height:1.55}
+.immlist{list-style:none;padding:2px 0}
+.immlist li{display:flex;gap:8px;font-size:12.5px;color:var(--ink-2);padding:3.5px 0;line-height:1.5}
 .immlist li svg{flex:none;margin-top:3px}
 .immlist li.good{color:var(--acc-strong)}
-/* 会话时间线 (抽屉): 按天分组的版本链 */
 .tl-day{padding:4px 0;border-bottom:1px solid var(--line-soft)}
 .tl-day:last-child{border-bottom:none}
 .tl-d{font-family:var(--mono);font-size:var(--fs-xs);color:var(--ink-3)}
 .tl-row{display:flex;align-items:center;gap:8px;font-size:var(--fs-sm);padding:3px 0;color:var(--ink-2)}
 .tl-row.cur{color:var(--ink);font-weight:600}
-.term{background:#101418;color:#dfe5ea;border-radius:var(--rad-s);padding:10px 14px;
-  font-family:var(--mono);font-size:var(--fs-sm);margin-top:12px;line-height:1.7;overflow-x:auto;white-space:nowrap}
-.term .tp{display:block;color:#8b93a3;font-size:11.5px;letter-spacing:.06em;margin-bottom:3px;
-  font-family:var(--sans);white-space:normal}
-.term code{color:#7ee2a8}
-.exec-bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-.mig-idle{border:1px dashed var(--line-strong);border-radius:var(--rad-m);padding:26px 20px;text-align:center;
-  color:var(--ink-3);font-size:13px;line-height:1.9;background:var(--bg-surface)}
-.mig-idle code{font-family:var(--mono);font-size:var(--fs-xs);color:var(--ink-2);
-  background:var(--bg-subtle);padding:2px 7px;border-radius:5px}
-/* 迁移预览: 顶部摘要条铺满宽度, 下两栏 (丢失/降级 | 恢复命令) — 左右等分放两行 kv 曾把空洞挪到左边 */
-.pv-stats{display:flex;flex-wrap:wrap;gap:8px 26px;padding:12px 16px;border:1px solid var(--line-soft);
-  border-radius:var(--rad-s);background:var(--bg-subtle);margin-bottom:16px}
-.pv-cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px 36px;align-items:start}
-.pv-cols .sec{margin:0 0 4px}
-.pv-cols .term{margin-top:10px}
-.mig-profile{margin-top:12px;padding-top:12px;border-top:1px solid var(--line-soft)}
-.mig-profile .chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
-.result-card{border:1px solid var(--acc-line);background:var(--acc-soft);border-radius:var(--rad-m);padding:14px 16px}
+.term{background:#0f1419;color:#dfe5ea;border:1px solid #242e3a;border-radius:var(--rad-s);padding:10px 13px;
+  font-family:var(--mono);font-size:12.5px;margin-top:10px;line-height:1.65;overflow-x:auto;white-space:nowrap}
+.term .tp{display:block;color:#93a0b0;font-size:11.5px;margin-bottom:3px;font-family:var(--sans);white-space:normal}
+.term code{color:#6ee7b7}
+.exec-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.mig-idle{border:1px dashed var(--line-strong);border-radius:var(--rad-s);padding:22px 18px;text-align:center;
+  color:var(--ink-3);font-size:13px;line-height:1.85;background:var(--bg-subtle)}
+.mig-idle code{font-family:var(--mono);font-size:var(--fs-xs);color:var(--ink-2);background:var(--bg-surface);padding:2px 6px;border-radius:4px}
+.pv-stats{display:flex;flex-wrap:wrap;gap:6px 18px;padding:10px 14px;border:1px solid var(--line-soft);
+  border-radius:var(--rad-s);background:var(--bg-subtle);margin-bottom:12px}
+.pv-cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px 24px;align-items:start}
+.pv-cols .sec{margin:0 0 4px;font-size:var(--fs-xs);color:var(--ink-3);font-weight:650}
+.mig-profile{margin-top:10px;padding-top:10px;border-top:1px solid var(--line-soft)}
+.mig-profile .chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.result-card{border:1px solid var(--acc-line);background:var(--acc-soft);border-radius:var(--rad-m);padding:12px 14px}
 .result-card.err{border-color:var(--err-line);background:var(--err-bg)}
-.result-card .rt{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13.5px;margin-bottom:6px}
+.result-card .rt{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13.5px;margin-bottom:5px}
 .result-card .path-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:6px 0}
 
-/* 哨兵 */
-.stat-inline{display:inline-flex;align-items:baseline;gap:6px;font-size:var(--fs-sm);color:var(--ink-2);
-  padding:6px 12px;background:var(--bg-surface);border:1px solid var(--line);border-radius:var(--rad-s)}
+/* ================= 哨兵 ================= */
+.probe-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+.probe-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));background:var(--bg-surface);
+  border:1px solid var(--line);border-radius:var(--rad-m);margin-bottom:12px;box-shadow:var(--shadow-1);overflow:hidden}
+.probe-kpis .kpi{padding:11px 16px}
+.probe-kpis .kpi .v{font-size:18px}
+.stat-inline{display:inline-flex;align-items:baseline;gap:6px;font-size:12.5px;color:var(--ink-2)}
 .stat-inline b{font-family:var(--mono);font-weight:650;font-variant-numeric:tabular-nums;color:var(--ink)}
-.probe-state{display:inline-flex;align-items:center;gap:8px;padding:6px 14px;border-radius:999px;
+.probe-state{display:inline-flex;align-items:center;gap:8px;padding:5px 13px;border-radius:999px;
   font-size:13px;font-weight:600;border:1px solid var(--line)}
 .probe-state.off{color:var(--ink-3);background:var(--bg-subtle)}
 .probe-state.ok{color:var(--acc-strong);background:var(--acc-soft);border-color:var(--acc-line)}
 .probe-state.err{color:var(--err);background:var(--err-bg);border-color:var(--err-line)}
 .probe-state.warn{color:var(--warn);background:var(--warn-bg);border-color:var(--warn-line)}
 
-/* 抽屉 */
-.backdrop{position:fixed;inset:0;background:rgba(16,20,24,.32);opacity:0;transition:opacity .2s ease;z-index:40}
-.backdrop.show{opacity:1}
-.drawer{position:fixed;top:0;right:0;bottom:0;width:min(480px,94vw);background:var(--bg-surface);
-  border-left:1px solid var(--line);z-index:41;overflow-y:auto;padding:20px 24px 28px;
-  transform:translateX(28px);opacity:0;transition:transform .22s cubic-bezier(.2,.7,.3,1),opacity .18s ease;
-  box-shadow:var(--shadow-2)}
-.drawer.show{transform:none;opacity:1}
+/* ================= 原生 <dialog> 抽屉 & Confirm & Popover Toast ================= */
+.drawer,#confirm-dlg{overscroll-behavior:contain}
+.drawer{position:fixed;inset:0;margin:0 0 0 auto;width:min(490px,94vw);max-width:none;max-height:none;
+  background:var(--bg-surface);color:var(--ink);border:0;border-left:1px solid var(--line);overflow-y:auto;padding:20px 22px 28px;
+  box-shadow:var(--shadow-2);height:auto;transform:translateX(28px);opacity:0;
+  transition:transform .2s cubic-bezier(.2,.7,.3,1),opacity .16s ease,overlay .2s allow-discrete,display .2s allow-discrete}
+.drawer[open]{transform:none;opacity:1}
+@starting-style{.drawer[open]{transform:translateX(28px);opacity:0}}
+.drawer::backdrop{background:rgba(12,16,20,.38);overflow:hidden;overscroll-behavior:contain;
+  opacity:1;transition:opacity .18s ease,overlay .2s allow-discrete,display .2s allow-discrete}
+@starting-style{.drawer[open]::backdrop{opacity:0}}
 .dw-head{display:flex;align-items:flex-start;gap:12px}
 .dw-head h3{font-size:var(--fs-lg);font-weight:650;margin-top:2px}
 .dw-sub{font-family:var(--mono);font-size:var(--fs-xs);color:var(--ink-3);word-break:break-all;margin:2px 0 0}
@@ -4671,81 +5237,116 @@ details.card .card-b{border-top:1px solid var(--line-soft)}
   color:var(--ink-3);cursor:pointer;padding:5px;display:inline-flex}
 .dw-close:hover{color:var(--ink);border-color:var(--line);background:var(--bg-inset)}
 .dw-chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:14px 0 2px}
-.drawer h3.sec{font-size:var(--fs-xs);font-weight:600;color:var(--ink-3);letter-spacing:.04em;margin:20px 0 8px}
+.drawer h3.sec{font-size:var(--fs-xs);font-weight:650;color:var(--ink-3);letter-spacing:.04em;margin:18px 0 8px}
 .dw-actions{display:flex;gap:10px;margin-top:22px;padding-top:16px;border-top:1px solid var(--line-soft)}
 .dw-actions .btn{flex:1;justify-content:center}
 
-/* toast */
-#toast{position:fixed;bottom:24px;right:24px;background:var(--bg-surface);border:1px solid var(--line);
-  border-radius:var(--rad-m);padding:12px 18px;max-width:440px;font-size:13px;line-height:1.6;
-  box-shadow:var(--shadow-2);transform:translateY(8px);opacity:0;transition:transform .16s ease,opacity .16s ease;
-  pointer-events:none;z-index:50}
-#toast.show{transform:none;opacity:1}
+#toast{position:fixed;inset:auto;bottom:22px;right:22px;margin:0;width:auto;height:auto;overflow:visible;
+  background:var(--bg-surface);color:var(--ink);border:1px solid var(--line);border-radius:var(--rad-m);
+  padding:11px 16px;max-width:420px;font-size:13px;line-height:1.55;box-shadow:var(--shadow-2);
+  transform:translateY(8px);opacity:0;pointer-events:none;
+  transition:transform .16s ease,opacity .16s ease,overlay .16s allow-discrete,display .16s allow-discrete}
+#toast:popover-open{transform:none;opacity:1}
+@starting-style{#toast:popover-open{transform:translateY(8px);opacity:0}}
 #toast.err{border-color:var(--err-line)}
 
-/* 动效偏好 */
+#confirm-dlg{border:1px solid var(--line);border-radius:var(--rad-l);background:var(--bg-surface);color:var(--ink);
+  padding:20px 22px 18px;width:min(430px,92vw);max-width:92vw;box-shadow:var(--shadow-2)}
+#confirm-dlg::backdrop{background:rgba(12,16,20,.4);overflow:hidden}
+#confirm-dlg h3{font-size:var(--fs-lg);font-weight:650;margin-bottom:8px}
+#confirm-msg{font-size:13px;line-height:1.68;color:var(--ink-2);white-space:pre-line;overflow-wrap:anywhere}
+#confirm-dlg form{display:flex;gap:10px;justify-content:flex-end;margin-top:18px}
+
 @media(prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important}
 }
 
-/* 项目树折叠视图 */
-.btn.on,.btn[aria-pressed="true"]{border-color:var(--acc);background:var(--acc-soft);color:var(--acc-strong);font-weight:600}
-.proj-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px;
-  padding:10px 14px;background:var(--bg-surface);border:1px solid var(--line);border-radius:var(--rad-m);box-shadow:var(--shadow-1)}
-.proj-toolbar label{font-size:var(--fs-xs);color:var(--ink-3);font-weight:600;white-space:nowrap}
-.proj-toolbar select{flex:1;min-width:170px;max-width:340px}
-.proj-tree{display:flex;flex-direction:column;gap:10px}
+/* ================= 项目树整合面板 ================= */
+.proj-dock{background:var(--bg-surface);border:1px solid var(--line);border-radius:var(--rad-m);
+  box-shadow:var(--shadow-1);margin-bottom:12px;overflow:hidden}
+.proj-toolbar,.proj-batch-row{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line-soft)}
+.proj-toolbar label,.proj-batch-row label{font-size:var(--fs-xs);color:var(--ink-3);font-weight:600;white-space:nowrap}
+.proj-toolbar select{flex:0 1 200px;min-width:150px}
+.proj-batch-row select{flex:0 1 230px;min-width:170px}
+.proj-toolbar .pt-end{margin-left:auto;display:flex;gap:6px;align-items:center}
+.proj-sync{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;padding:9px 14px;background:var(--bg-subtle)}
+.proj-sync .ps-lbl{font-size:var(--fs-xs);color:var(--ink-2);font-weight:600;white-space:nowrap}
+.proj-sync .ps-right{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.proj-tree{display:flex;flex-direction:column;gap:9px}
 .proj-card{overflow:hidden}
-details.proj-card>summary.proj-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:11px 14px;
+details.proj-card>summary.proj-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 14px;
   cursor:pointer;list-style:none;user-select:none;min-width:0}
 details.proj-card>summary.proj-head::-webkit-details-marker{display:none}
 details.proj-card>summary.proj-head:hover{background:var(--bg-subtle)}
-.proj-icon{font-size:14px;line-height:1;flex:none}
-.proj-meta{flex:1;min-width:140px;display:flex;flex-direction:column;min-width:0;overflow:hidden}
+.proj-icon{display:inline-flex;align-items:center;color:var(--acc-strong);flex:none}
+details>.proj-head .tw,details.card>summary .tw{transition:transform .15s ease;color:var(--ink-3);flex:none}
+details[open]>.proj-head .tw,details.card[open]>summary .tw{transform:rotate(90deg)}
+.proj-meta{flex:1;min-width:140px;display:flex;flex-direction:column;overflow:hidden}
 .proj-name{font-size:13.5px;font-weight:650;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .proj-cwd{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .proj-time{font-size:var(--fs-xs);color:var(--ink-3);font-family:var(--mono)}
 .proj-body{border-top:1px solid var(--line-soft);background:var(--bg-surface)}
-.proj-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 14px;
+.proj-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 14px;
   border-top:1px solid var(--line-soft);cursor:pointer;flex-wrap:wrap;transition:background .1s ease}
 .proj-row:first-child{border-top:none}
 .proj-row:hover{background:var(--bg-subtle)}
 .proj-row-main{flex:1;min-width:180px;overflow:hidden}
-.proj-row-t{font-size:13.5px;font-weight:500;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.proj-row-sub{display:flex;flex-wrap:wrap;gap:6px 10px;font-size:var(--fs-xs);color:var(--ink-3);margin-top:3px;align-items:center}
+.proj-row-t{font-size:13px;font-weight:500;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proj-row-sub{display:flex;flex-wrap:wrap;gap:6px 10px;font-size:var(--fs-xs);color:var(--ink-3);margin-top:2px;align-items:center}
 .proj-row-act{display:flex;gap:6px;flex:none}
 #tree-export-res{margin-bottom:12px}
 
-/* 响应式: 窄屏收起侧栏 → 顶部横排 */
-@media(max-width:900px){
-  body{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);height:auto;min-height:100vh;overflow:auto}
-  /* 裸 1fr 的 auto 最小尺寸曾让收起后的侧栏行 (brand+nav ~456px) 撑开整页横滚;
-     minmax(0,1fr) 让 .sidebar 的 overflow-x:auto 真正在栏内滚动 */
-  .sidebar{flex-direction:row;align-items:center;border-right:none;border-bottom:1px solid var(--line);
-    overflow-x:auto;padding:0 8px}
-  .brand{border-bottom:none;padding:0 10px 0 6px;height:48px}
-  .side-nav{flex-direction:row;padding:6px 4px}
-  .side-nav button{width:auto;padding:7px 12px;white-space:nowrap}
-  .side-nav button.on::before{left:8px;right:8px;top:auto;bottom:0;width:auto;height:3px;border-radius:3px 3px 0 0}
-  .side-nav .kbd{display:none}
-  .side-foot{display:none}
-  .content{overflow:visible;padding:16px 14px 56px}
-  .topbar{padding:0 12px;gap:10px}
-  .topbar h1{display:none}
-  .gsearch{max-width:none}
-  .kpi-band,.quick-row,.mig-steps{grid-template-columns:minmax(0,1fr)}
-  .ov-grid{grid-template-columns:minmax(0,1fr)}  /* 裸 1fr 的 min-content 曾撑爆窄视口整页 (全面测试 M10/M11) */
-  .pv-cols{grid-template-columns:minmax(0,1fr)}
-  .tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
-  .tbl-wrap table{min-width:640px}
-  .kv{grid-template-columns:120px minmax(0,1fr)}
+/* ================= 响应式断点 ================= */
+@media(max-width:1100px){
+  .mig-shell{grid-template-columns:minmax(0,1fr)}
 }
-@media(max-width:1280px) and (min-width:901px){
-  .kpi-band{grid-template-columns:repeat(2,1fr)}
-  .quick-row{grid-template-columns:repeat(3,1fr)}
-  .pv-cols{grid-template-columns:minmax(0,1fr)}
+@media(max-width:1200px) and (min-width:901px){
+  .kpi-band{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .kpi:nth-child(2){border-right:none}
+  .kpi:nth-child(1),.kpi:nth-child(2){border-bottom:1px solid var(--line-soft)}
+  .ov-grid{grid-template-columns:minmax(0,1fr)}
+}
+@media(max-width:900px){
+  body{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);height:auto;min-height:100dvh;overflow:auto}
+  .sidebar{display:grid;grid-template-columns:1fr auto;grid-template-rows:auto auto;align-items:center;
+    border-right:none;border-bottom:1px solid var(--line);overflow:visible;padding:0}
+  .brand{grid-column:1;grid-row:1;border-bottom:none;padding:0 12px;height:44px}
+  .brand .brand-tag,.side-nav .kbd,.privacy{display:none}
+  .side-foot{grid-column:2;grid-row:1;margin:0;border-top:none;padding:0 12px;flex-direction:row;align-items:center;gap:0}
+  .theme-sw button{padding:3px 7px}
+  .side-nav{grid-column:1 / -1;grid-row:2;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:2px;padding:4px 8px 6px;border-top:1px solid var(--line-soft)}
+  .side-nav button{justify-content:center;width:100%;padding:7px 4px;font-size:12.5px;white-space:nowrap}
+  .side-nav button.on::before{left:12px;right:12px;top:auto;bottom:0;width:auto;height:3px;border-radius:3px 3px 0 0}
+  .content{overflow:visible;padding:14px 14px 52px}
+  .topbar{height:auto;min-height:var(--topbar-h);padding:8px 12px;gap:8px;flex-wrap:wrap}
+  .topbar h1{display:none}
+  .gsearch{flex:1 1 200px;min-width:0;max-width:none}
+  .gsearch input[type=search]{padding-right:12px}
+  .gsearch kbd{display:none}
+  .top-actions{flex:0 1 auto;max-width:100%;min-width:0;margin-left:auto}
+  .status-pill{max-width:100%;overflow:hidden;text-overflow:ellipsis}
+  .ctl-search{min-width:160px}
+  .kpi-band{grid-template-columns:minmax(0,1fr)}
+  .kpi{border-right:none;border-bottom:1px solid var(--line-soft)}
+  .kpi:last-child{border-bottom:none}
+  .ov-grid,.pv-cols,.tgt-cards,.probe-kpis{grid-template-columns:minmax(0,1fr)}
+  .proj-toolbar .pt-end,.proj-sync .ps-right{margin-left:0}
+  .kv{grid-template-columns:110px minmax(0,1fr)}
+}
+@media(max-width:600px){
+  .gsearch{flex:1 1 100%}
+  .top-actions{width:100%;justify-content:space-between}
 }
 </style></head><body>
+<!--
+THESIS: Archival Specimen Ledger — crisp 1px hairline-ruled mineral slate sheets anchored by one deep forest-teal seal, removing stacked chrome so sessions, projects, and migration tools sit immediately in reach.
+OWN-WORLD: Mineral canvas (#f3f5f7 / #0d1014 dark), white elevated panes bounded by hairline dividers, deep graphite ink, tabular monospace IDs, semantic status indicators, zero shadow stacks.
+STORY: Operators verify real vault tallies in one top ledger bar, inspect clean session headlines without horizontal overflow, expand projects/sync Antigravity in one consolidated dock, and filter-search any snapshot into a single-screen dual-pane migration workbench.
+FIRST VIEWPORT: Topbar houses section heading, `/` global search, quick sync, and service health pill; Overview puts the 4-cell KPI ledger directly above the 7:5 session table and clean right rail (probe health, formatted memory highlights, audit grid).
+FORM: Candidate 4 (Archival Specimen Ledger), seed d55f1135, raised via hairline grid clarity, explicit wayfinding junctions, dual-leg migration coupon preview, and zero-clipping @container tables.
+FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
+-->
 
 <aside class="sidebar">
   <div class="brand">
@@ -4754,7 +5355,8 @@ details.proj-card>summary.proj-head:hover{background:var(--bg-subtle)}
       <rect x="6.5" y="8" width="7" height="6" rx="1" fill="#0e7568"/>
       <path d="M7.5 8V6.5a2.5 2.5 0 0 1 5 0V8" stroke="#0e7568" stroke-width="1.7" stroke-linecap="round"/>
     </svg>
-    Context Vault
+    <span>Context Vault</span>
+    <span class="brand-tag">LOCAL</span>
   </div>
   <nav class="side-nav" aria-label="控制台分区">
     <button data-t="ov" class="on" aria-current="page">
@@ -4778,7 +5380,11 @@ details.proj-card>summary.proj-head:hover{background:var(--bg-subtle)}
       </svg>
       本地回环 · 数据不出机器
     </span>
-    <span class="health-line"><span class="dot ok" id="foot-dot"></span><span id="foot-health">连接中…</span></span>
+    <div class="theme-sw" role="group" aria-label="界面主题">
+      <button type="button" data-theme="light dark" aria-pressed="true" onclick="setTheme('light dark')">跟随</button>
+      <button type="button" data-theme="light" aria-pressed="false" onclick="setTheme('light')">浅色</button>
+      <button type="button" data-theme="dark" aria-pressed="false" onclick="setTheme('dark')">深色</button>
+    </div>
   </div>
 </aside>
 
@@ -4787,56 +5393,61 @@ details.proj-card>summary.proj-head:hover{background:var(--bg-subtle)}
     <h1 id="sec-title">概览</h1>
     <div class="gsearch">
       <span class="gs-ic"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></span>
-      <input type="search" id="g-q" placeholder="搜索全部历史会话 — 项目、模型、任务关键词" aria-label="全局搜索历史会话">
-      <kbd>Enter</kbd>
+      <input type="search" id="g-q" placeholder="全局检索历史会话 — 项目名、模型或关键词" aria-label="全局搜索历史会话">
+      <kbd>/ · Enter</kbd>
     </div>
-    <span class="status-pill" id="status" role="status"><span class="pulse"></span>连接中</span>
+    <div class="top-actions">
+      <button class="btn sm" id="top-sync-btn" onclick="syncVaultNow()" title="扫描 ZCode / Codex / Claude / Antigravity 最新会话入库"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.3-3.55M13.5 2.5v2.4h-2.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span>同步</span></button>
+      <span class="status-pill" id="status" role="status"><span class="pulse"></span>连接中</span>
+    </div>
   </header>
 
   <div class="content"><div class="content-inner">
 
   <!-- ============ 概览 ============ -->
   <section id="t-ov" aria-label="概览">
-    <div class="quick-row">
-      <button class="quick" onclick="setTab('snap')">
-        <span class="q-ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><ellipse cx="7" cy="7" rx="4.5" ry="4.5" stroke="currentColor" stroke-width="1.6"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>
-        <span><span class="q-t">查看快照</span><br><span class="q-d" id="q-snap-d">浏览全部库存与搜索</span></span>
-        <span class="q-go">→</span>
-      </button>
-      <button class="quick" onclick="setTab('mig')">
-        <span class="q-ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 8h11m0 0-3.5-3.5M13 8l-3.5 3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
-        <span><span class="q-t">生成交接</span><br><span class="q-d">选快照 → 预览损失 → 导出 / 迁移</span></span>
-        <span class="q-go">→</span>
-      </button>
-      <button class="quick" onclick="setTab('probe')">
-        <span class="q-ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" opacity=".45"/><circle cx="8" cy="8" r="2.6" stroke="currentColor" stroke-width="1.6"/><path d="M8 1.6V4M8 12v2.4M1.6 8H4M12 8h2.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span>
-        <span><span class="q-t">服务状态</span><br><span class="q-d" id="q-svc-d">服务健康与上游哨兵</span></span>
-        <span class="q-go">→</span>
-      </button>
-    </div>
-
     <div class="kpi-band" id="ov-band">
-      <div class="skel" style="width:180px"></div><div class="skel" style="width:160px"></div>
-      <div class="skel" style="width:170px"></div><div class="skel" style="width:150px"></div>
+      <div class="kpi"><div class="skel" style="width:70%"></div></div>
+      <div class="kpi"><div class="skel" style="width:65%"></div></div>
+      <div class="kpi"><div class="skel" style="width:75%"></div></div>
+      <div class="kpi"><div class="skel" style="width:60%"></div></div>
     </div>
 
     <div class="ov-grid">
       <div class="card">
-        <div class="card-h">最近入库会话</div>
-        <div id="ov-latest"><div class="skel" style="height:110px"></div></div>
+        <div class="card-h">
+          <span class="ch-l">最近入库会话 <span class="sub">（每会话仅列最新版本）</span></span>
+          <button class="ch-link" onclick="setTab('snap')">全部快照 →</button>
+        </div>
+        <div id="ov-latest"><div style="padding:14px"><div class="skel" style="height:120px"></div></div></div>
       </div>
       <div class="ov-side">
-        <div class="card"><div class="card-h">哨兵 · 最近探测</div><div id="ov-probe"><div class="hint" style="padding:8px 12px">加载中…</div></div></div>
-        <div class="card"><div class="card-h">最新记忆</div><div id="ov-mem"><div class="hint" style="padding:8px 12px">加载中…</div></div></div>
-        <details class="card">
-          <summary><span class="tw">▶</span>审计 · 库内事件<span class="sub">（点开查看汇总与时间线）</span></summary>
-          <div class="card-b" id="ov-audit"><div class="hint" style="padding:8px 12px">加载中…</div></div>
-        </details>
+        <div class="card">
+          <div class="card-h">
+            <span class="ch-l">哨兵 · 最近探测</span>
+            <button class="ch-link" onclick="setTab('probe')">节点状态 →</button>
+          </div>
+          <div id="ov-probe"><div class="hint" style="padding:10px 14px">加载中…</div></div>
+        </div>
+        <div class="card">
+          <div class="card-h">
+            <span class="ch-l">最新记忆摘要</span>
+            <button class="ch-link" onclick="setTab('snap');snapTreeMode=false;loadSnaps()">按关键词检索 →</button>
+          </div>
+          <div id="ov-mem"><div class="hint" style="padding:10px 14px">加载中…</div></div>
+        </div>
+        <div class="card">
+          <div class="card-h">
+            <span class="ch-l">库内事件审计</span>
+            <button class="ch-link" onclick="setTab('probe')">事件详情 →</button>
+          </div>
+          <div id="ov-audit"><div class="hint" style="padding:10px 14px">加载中…</div></div>
+        </div>
       </div>
     </div>
 
-    <details class="card" style="margin-top:12px">
-      <summary><span class="tw">▶</span>用量明细<span class="sub">（数据源与口径逐项标注）</span></summary>
+    <details class="card" id="ov-usage-card" style="margin-top:14px">
+      <summary><svg class="tw" width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>模型与节省用量明细<span class="sub" id="ov-usage-sum">（点击展开 · 按真实数据源口径展示）</span></summary>
       <div class="card-b" id="ov-usage" style="padding:12px 16px 16px"><div class="skel" style="width:40%"></div></div>
     </details>
   </section>
@@ -4844,15 +5455,22 @@ details.proj-card>summary.proj-head:hover{background:var(--bg-subtle)}
   <!-- ============ 快照资产 ============ -->
   <section id="t-snap" style="display:none" aria-label="快照资产">
     <div class="controls">
-      <input type="search" id="snap-q" placeholder="搜索全部历史会话 — 项目名、模型、任务关键词…" aria-label="搜索快照"
-        onkeydown="if(event.key==='Enter')snapSearch()">
-      <button class="btn" onclick="snapSearch()">搜索</button>
-      <button class="btn" onclick="loadSnaps()">最近</button>
-      <button class="btn" id="snap-tree-btn" onclick="snapTreeToggle()" aria-pressed="false"
-        title="按项目文件夹折叠浏览全部顶层主对话（自动过滤子代理碎片）">📁 项目树</button>
+      <div class="seg" role="group" aria-label="浏览视图">
+        <button class="btn on" id="snap-list-btn" onclick="loadSnaps()">最近列表</button>
+        <button class="btn" id="snap-tree-btn" onclick="snapTreeToggle()" aria-pressed="false"
+          title="按项目文件夹折叠浏览全部顶层主对话（自动过滤子代理碎片）"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 4.5a1.3 1.3 0 0 1 1.3-1.3h2.8l1.3 1.3h5.3a1.3 1.3 0 0 1 1.3 1.3v6.2a1.3 1.3 0 0 1-1.3 1.3H3.3A1.3 1.3 0 0 1 2 12V4.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg><span>项目树</span></button>
+      </div>
+      <div class="ctl-search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input type="search" id="snap-q" placeholder="在当前视图筛选项目名、路径或关键词…" aria-label="筛选快照"
+          onkeydown="if(event.key==='Enter')snapSearch()">
+      </div>
+      <button class="btn primary" onclick="snapSearch()">筛选</button>
       <button class="btn" id="snap-sort" onclick="snapSort()">时间 ↓</button>
       <button class="btn" id="snap-leaves" onclick="snapLeavesToggle()" aria-pressed="true"
         title="每个会话只列演进链的最新版本; 再点显示全部历史版本">仅最新版本</button>
+      <button class="btn" id="sync-now-btn" onclick="syncVaultNow()"
+        title="立即扫描 ZCode / Codex / Claude / Antigravity 最新会话入库"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.3-3.55M13.5 2.5v2.4h-2.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span>立即同步</span></button>
     </div>
     <div class="meta-line" id="snap-meta"></div>
     <div id="snap-list" aria-live="polite"><div class="skel" style="width:50%"></div><div class="skel" style="width:72%"></div><div class="skel" style="width:60%"></div></div>
@@ -4860,39 +5478,39 @@ details.proj-card>summary.proj-head:hover{background:var(--bg-subtle)}
 
   <!-- ============ 迁移工作台 ============ -->
   <section id="t-mig" style="display:none" aria-label="迁移工作台">
-    <div class="mig-wrap">
-      <div class="mig-steps">
+    <div class="mig-shell">
+      <div class="mig-col">
         <div class="mig-step">
-          <div class="card-h"><span class="stepno">1</span>选择源快照</div>
+          <div class="card-h"><span class="ch-l"><span class="stepno">1</span>选择源快照</span><span class="sub" id="mig-pool-hint">支持全库检索</span></div>
           <div class="card-b">
-            <label for="mig-sid" class="hint" style="display:block;margin-bottom:6px">最近 50 个快照；也可从快照资产搜索或详情抽屉带入</label>
-            <select id="mig-sid" onchange="onMigSource()"><option value="">加载中…</option></select>
+            <div class="mig-src-search">
+              <div class="ctl-search">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+                <input type="search" id="mig-search" placeholder="搜全库会话：关键词、项目名或 cv_ ID…" aria-label="搜索迁移源快照"
+                  oninput="onMigFilterInput()" onkeydown="if(event.key==='Enter'){event.preventDefault();migSearchPool(true)}">
+              </div>
+              <button class="btn sm" type="button" onclick="clearMigFilter()" id="mig-filter-clr" hidden>重置</button>
+            </div>
+            <select id="mig-sid" aria-label="源快照列表" onchange="onMigSource()"><option value="">加载中…</option></select>
             <div class="sel-meta" id="mig-src-meta"></div>
             <div class="mig-profile" id="mig-src-profile"></div>
           </div>
         </div>
+
         <div class="mig-step">
-          <div class="card-h"><span class="stepno">2</span>选择目标</div>
+          <div class="card-h"><span class="ch-l"><span class="stepno">2</span>目标格式</span><span class="sub">写入去向在右侧第 4 步抉择</span></div>
           <div class="card-b">
             <div class="tgt-cards" id="tgt-cards" role="radiogroup" aria-label="迁移目标">
               <label class="tgt-card on"><input type="radio" name="tgt" value="codex" checked onchange="onMigTarget()">
-                <span><span class="tt">Codex</span><br><span class="td">生成 rollout 会话文件，codex resume 续写</span></span></label>
+                <span><span class="tt">Codex</span><br><span class="td">rollout 文件 · codex resume</span></span></label>
               <label class="tgt-card"><input type="radio" name="tgt" value="claude" onchange="onMigTarget()">
-                <span><span class="tt">Claude Code</span><br><span class="td">生成 projects 会话 jsonl，claude --resume 恢复</span></span></label>
+                <span><span class="tt">Claude Code</span><br><span class="td">projects jsonl · --resume</span></span></label>
               <label class="tgt-card"><input type="radio" name="tgt" value="antigravity" onchange="onMigTarget()">
-                <span><span class="tt">Antigravity</span><br><span class="td">转换为原生 .db 会话文件，可写入 Antigravity 会话目录（重启应用生效）</span></span></label>
+                <span><span class="tt">Antigravity</span><br><span class="td">原生 .db（重启 app 生效）</span></span></label>
               <label class="tgt-card"><input type="radio" name="tgt" value="zcode" onchange="onMigTarget()">
-                <span><span class="tt">ZCode 写回 · 实验性</span><br><span class="td">写回 ZCode 主库（先自动备份；重启 ZCode 后在列表出现）</span></span></label>
-              <label class="tgt-card"><input type="radio" name="tgt" value="markdown" onchange="onMigTarget()">
-                <span><span class="tt">Markdown 简报 · 任意 agent</span><br><span class="td">≤48KB 交接简报（停在哪 / 最近动作 / 活上下文尾部）</span></span></label>
-            </div>
-            <div class="apply-toggle" id="apply-toggle">
-              <button class="on" data-apply="0" onclick="setApply(false)">
-                <span class="at-t">写入 outbox（默认 · 安全）</span>
-                <span class="at-d">产物落 vault/outbox/，绝不触碰真实会话目录</span></button>
-              <button data-apply="1" onclick="setApply(true)">
-                <span class="at-t">写入真实会话目录</span>
-                <span class="at-d">目标 agent 的 resume 列表将出现此会话（需确认）</span></button>
+                <span><span class="tt">ZCode 写回</span><br><span class="td">实验性 · 先备份后写主库</span></span></label>
+              <label class="tgt-card wide"><input type="radio" name="tgt" value="markdown" onchange="onMigTarget()">
+                <span><span class="tt">Markdown 交接简报 · 任意 agent</span><br><span class="td">≤48KB 结构化交接简报（停点 / 最近动作 / 活上下文尾部）</span></span></label>
             </div>
             <div class="hint" id="mig-md-note" style="display:none;margin-top:8px">
               Markdown 目标始终导出到 outbox，无写入会话目录语义。</div>
@@ -4900,24 +5518,26 @@ details.proj-card>summary.proj-head:hover{background:var(--bg-subtle)}
         </div>
       </div>
 
-      <div class="mig-step">
-        <div class="card-h"><span class="stepno">3</span>迁移预览<span class="sub">（切源自动重算 · 目标相关损失绑定当前目标）</span></div>
-        <div class="card-b"><div id="mig-preview">
-          <div class="mig-idle">选中源快照后，这里展示<b>保真度预览</b>：将保留的上下文块、预计 tokens、损失清单与恢复命令。<br>
-            迁移采用 stateless replay —— 压缩边界之后为活上下文，摘要注入为新会话首条消息。</div>
-        </div></div>
-      </div>
+      <div class="mig-col">
+        <div class="mig-step">
+          <div class="card-h"><span class="ch-l"><span class="stepno">3</span>迁移保真度预演</span><span class="sub">按当前源与目标实时测算</span></div>
+          <div class="card-b"><div id="mig-preview">
+            <div class="mig-idle">在左侧选中或检索源快照后，这里展示<b>保真度预演</b>：活上下文块数、tokens 估算、损失说明与恢复命令。<br>
+              采用 stateless replay —— 压缩边界之后为活上下文，摘要注入为新会话首条消息。</div>
+          </div></div>
+        </div>
 
-      <div class="mig-step">
-        <div class="card-h"><span class="stepno">4</span>执行并查看结果</div>
-        <div class="card-b">
-          <div class="exec-bar">
-            <button class="btn primary" id="mig-outbox" onclick="migGo(false)">生成到 outbox（安全）</button>
-            <button class="btn danger" id="mig-apply" onclick="migGo(true)">写入目标会话目录</button>
-            <span class="hint" id="mig-exec-hint"></span>
+        <div class="mig-step">
+          <div class="card-h"><span class="ch-l"><span class="stepno">4</span>执行并查看产物</span></div>
+          <div class="card-b">
+            <div class="exec-bar">
+              <button class="btn primary" id="mig-outbox" onclick="migGo(false)">生成到 outbox（安全）</button>
+              <button class="btn danger" id="mig-apply" onclick="migGo(true)">写入目标会话目录</button>
+              <span class="hint" id="mig-exec-hint"></span>
+            </div>
+            <div id="mig-result" style="margin-top:12px" aria-live="polite"></div>
+            <div class="section-note">写入真实目录后，对应 agent 重启或使用恢复命令即可续写；默认写入 <code>vault/outbox/</code> 零副作用。</div>
           </div>
-          <div id="mig-result" style="margin-top:12px" aria-live="polite"></div>
-          <div class="section-note">写入真实目录后用 <b>codex resume</b> / <b>claude --resume</b> 恢复；恢复命令将按迁移结果里的真实 session id / 文件生成。</div>
         </div>
       </div>
     </div>
@@ -4925,47 +5545,70 @@ details.proj-card>summary.proj-head:hover{background:var(--bg-subtle)}
 
   <!-- ============ 哨兵 ============ -->
   <section id="t-probe" style="display:none" aria-label="哨兵">
-    <div class="controls">
-      <span class="probe-state off" id="probe-state"><span class="dot off"></span>读取中…</span>
+    <div class="probe-head">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span class="probe-state off" id="probe-state"><span class="dot off"></span>读取中…</span>
+        <span class="hint" id="probe-last"></span>
+      </div>
       <button class="btn primary" id="probe-btn" onclick="probeNow()">立即探测上游</button>
-      <span class="hint" id="probe-last"></span>
     </div>
-    <div class="controls" style="margin-top:2px">
-      <span class="stat-inline">监控节点 <b id="sn-nodes">—</b></span>
-      <span class="stat-inline" id="sn-avail-wrap">最近样本 ok 率 <b id="sn-avail">—</b></span>
-      <span class="stat-inline">平均延迟 (ok 事件) <b id="sn-lat">—</b></span>
-      <span class="hint" id="sn-note">样本口径见下方说明</span>
+    <div class="probe-kpis">
+      <div class="kpi"><div class="k"><span>监控节点</span></div><div class="v" id="sn-nodes">—</div></div>
+      <div class="kpi" id="sn-avail-wrap"><div class="k"><span>最近样本通过率</span></div><div class="v" id="sn-avail">—</div></div>
+      <div class="kpi"><div class="k"><span>平均延迟（正常样本）</span></div><div class="v" id="sn-lat">—</div></div>
     </div>
     <div id="probe-detail" style="margin-bottom:12px"></div>
     <div id="probe-list" aria-live="polite"><div class="skel" style="width:55%"></div><div class="skel" style="width:42%"></div></div>
-    <div class="section-note" id="probe-caliber">统计只基于上面列出的最近事件样本（/probe_events 最近 200 条），
-      不代表全天覆盖；未配置节点时不会显示"全部上游正常"。</div>
+    <div class="section-note" id="probe-caliber">样本口径：<span id="sn-note">最近 200 条事件</span>，不代表全天可用率；未配置节点时保持空态，不虚报正常。</div>
   </section>
 
   </div></div>
 </div>
 
-<div id="toast" role="status" aria-live="polite"></div>
-<div class="backdrop" id="backdrop" hidden></div>
-<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="dw-title" hidden>
+<div id="toast" popover="manual" role="status" aria-live="polite"></div>
+<dialog class="drawer" id="drawer" aria-labelledby="dw-title" closedby="any">
   <div class="dw-head">
     <div style="min-width:0">
       <h3 id="dw-title">快照详情</h3>
       <p class="dw-sub" id="dw-sub"></p>
     </div>
-    <button class="dw-close" id="dw-close" aria-label="关闭详情" onclick="closeDrawer()">
+    <button class="dw-close" id="dw-close" aria-label="关闭详情" autofocus onclick="closeDrawer()">
       <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3.5 3.5l9 9m0-9-9 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
     </button>
   </div>
   <div id="dw-body"></div>
-</aside>
+</dialog>
+<dialog id="confirm-dlg" aria-labelledby="confirm-t">
+  <h3 id="confirm-t">确认写入真实会话目录</h3>
+  <p id="confirm-msg"></p>
+  <form method="dialog">
+    <button class="btn" value="cancel" autofocus>取消</button>
+    <button class="btn danger" id="confirm-ok" value="ok">确认写入</button>
+  </form>
+</dialog>
 <script>
-/* ================= 基础工具 ================= */
+/* ================= 主题与基础工具 ================= */
 const $=s=>document.querySelector(s);
 const $$=s=>document.querySelectorAll(s);
+function applyThemeMeta(v){
+  const val=(v==="light"||v==="dark")?v:"light dark";
+  try{const m=document.querySelector('meta[name="color-scheme"]');if(m)m.content=val}catch(e){}
+  $$(".theme-sw button").forEach(b=>b.setAttribute("aria-pressed",(b.dataset.theme===val)?"true":"false"));
+}
+function setTheme(v){
+  const val=(v==="light"||v==="dark")?v:"light dark";
+  try{if(typeof localStorage!=="undefined"){val==="light dark"?localStorage.removeItem("cv-theme"):localStorage.setItem("cv-theme",val)}}catch(e){}
+  applyThemeMeta(val);
+}
+(()=>{
+  let saved="light dark";
+  try{if(typeof localStorage!=="undefined"){const s=localStorage.getItem("cv-theme");if(s==="light"||s==="dark")saved=s}}catch(e){}
+  applyThemeMeta(saved);
+  try{window.addEventListener("storage",e=>{if(e&&e.key==="cv-theme")applyThemeMeta(e.newValue||"light dark")})}catch(e){}
+})();
+
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const num=v=>(+v||0).toLocaleString("en-US");
-/* 缩写值 + 精确值并陈: 展示缩写, title 与 exact 行给精确值 */
 const bn=v=>{v=+v||0;return v>=1e9?(v/1e9).toFixed(2)+"B":v>=1e6?(v/1e6).toFixed(1)+"M":v>=1e4?(v/1e3).toFixed(1)+"k":num(v)};
 const numT=v=>'<span class="num" title="'+num(v)+'">'+bn(v)+"</span>";
 const usd=v=>v==null?"—":"$"+(+v).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -4975,21 +5618,32 @@ const frel=s=>{if(!s)return"";const d=new Date(s);if(isNaN(d))return String(s).s
   const m=Math.round((Date.now()-d.getTime())/6e4);
   return m<1?"刚刚":m<60?m+" 分钟前":m<1440?Math.round(m/60)+" 小时前":Math.round(m/1440)+" 天前"};
 const shortSid=s=>{s=String(s||"");return s.length>22?s.slice(0,14)+"…"+s.slice(-5):s};
-const truncPath=(p,n)=>{p=String(p||"");return p.length>n?p.slice(0,n-1)+"…":p};
+const truncPath=(p,n)=>{
+  p=String(p||"—");
+  const lim=n||32;
+  if(p.length<=lim)return p;
+  const parts=p.split(/[\\/]/).filter(Boolean);
+  if(parts.length>=2){
+    const last=parts[parts.length-1],head=parts[0];
+    if(head.length+last.length+3<=lim)return head+"\\…\\"+last;
+    if(last.length+2<=lim)return "…\\"+last;
+    return "…\\"+last.slice(-(lim-2));
+  }
+  return p.slice(0,lim-1)+"…";
+};
 
 let toastTimer;
-function toast(m,err){const t=$("#toast");t.textContent=m;t.classList.toggle("err",!!err);t.classList.add("show");
-  clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove("show"),5200)}
+function toast(m,err){const t=$("#toast");t.textContent=m;t.classList.toggle("err",!!err);
+  if(!t.matches(":popover-open"))t.showPopover();
+  clearTimeout(toastTimer);toastTimer=setTimeout(()=>{if(t.matches(":popover-open"))t.hidePopover()},5200)}
 
 class ApiError extends Error{constructor(msg,code){super(msg);this.code=code}}
 let bootRetry=null;
 function scheduleBoot(){if(bootRetry)return;bootRetry=setTimeout(()=>{bootRetry=null;boot()},4000)}
-function markSvcBad(){ /* 数据域 fetch 失败 = 服务不可达: 状态徽章不得继续撒谎"服务正常" (全面测试 M13) */
+function markSvcBad(){
   const s=$("#status");
   if(!s.classList.contains("err")){s.classList.add("err");
     s.innerHTML="<span class='pulse'></span>服务异常 · 4s 后重试";}
-  const fd=$("#foot-dot");if(fd)fd.className="dot err";
-  const fh=$("#foot-health");if(fh)fh.textContent="未连接";
   scheduleBoot();
 }
 async function api(p,opt){
@@ -5001,8 +5655,7 @@ async function api(p,opt){
   }
   return r.json();
 }
-/* 竞态守卫: 每个加载域一个序号, 旧响应到达时直接丢弃, 不覆盖新选择 */
-function seqGuard(container){
+function seqGuard(){
   const box={seq:0};
   return async fn=>{
     const my=++box.seq;
@@ -5012,51 +5665,70 @@ function seqGuard(container){
   };
 }
 
-const WARN='<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 2L15 14H1L8 2Z" stroke="#a16207" stroke-width="1.5" stroke-linejoin="round"/><path d="M8 6.5v3.5M8 12v.5" stroke="#a16207" stroke-width="1.5" stroke-linecap="round"/></svg>';
-const GOOD='<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.3" stroke="#0e7568" stroke-width="1.5"/><path d="M5.4 8.2l1.8 1.8 3.4-3.8" stroke="#0e7568" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-const ERRIC='<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.3" stroke="#b42323" stroke-width="1.5"/><path d="M8 4.8v4M8 11.2v.4" stroke="#b42323" stroke-width="1.6" stroke-linecap="round"/></svg>';
+const WARN='<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 2L15 14H1L8 2Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" style="color:var(--warn)"/><path d="M8 6.5v3.5M8 12v.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" style="color:var(--warn)"/></svg>';
+const GOOD='<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.3" stroke="currentColor" stroke-width="1.5" style="color:var(--acc-strong)"/><path d="M5.4 8.2l1.8 1.8 3.4-3.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="color:var(--acc-strong)"/></svg>';
+const ERRIC='<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.3" stroke="currentColor" stroke-width="1.5" style="color:var(--err)"/><path d="M8 4.8v4M8 11.2v.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" style="color:var(--err)"/></svg>';
 const errEmpty=(msg,retry)=>'<div class="empty">'+ERRIC+'<div>'+esc(msg)+"</div>"+
   (retry?'<button class="btn sm" onclick="'+retry+'">重试</button>':"")+"</div>";
 
-/* 单元格允许裸字符串或 {t,num} 对象; 行数组可挂 __tr 属性输出 <tr> 附加属性 */
+const TBL_COLS={
+  "tbl-ov":'<colgroup><col class="c-src"><col><col class="c-dir"><col class="c-time"></colgroup>',
+  "tbl-snap":'<colgroup><col class="c-sid"><col><col class="c-src"><col class="c-num"><col class="c-time"><col class="c-dir"><col class="c-act"></colgroup>',
+  "tbl-probe":'<colgroup><col class="c-time"><col class="c-node"><col class="c-http"><col class="c-lat"><col></colgroup>'
+};
 const cell=c=>(c&&typeof c==="object")?c:{t:c};
 const table=(heads,rows,cls)=>{if(!rows||!rows.length)return"";
-  const hs=heads.map((h,i)=>{const c=cell(rows[0][i]);return "<th"+(c.num?' class="num"':"")+">"+h+"</th>"}).join("");
+  const lbls=heads.map(h=>String(h).replace(/<[^>]*>/g,"").trim());
+  const hs=heads.map((h,i)=>{const c=cell(rows[0][i]);return '<th scope="col"'+(c.num?' class="num"':"")+">"+h+"</th>"}).join("");
   const bs=rows.map(r=>{const open="<tr"+(r.__tr?" "+r.__tr:"")+">";
-    return open+r.map(c0=>{const c=cell(c0);return "<td"+(c.num?' class="num"':"")+">"+c.t+"</td>"}).join("")+"</tr>"}).join("");
-  return '<div class="tbl-wrap"><table'+(cls?' class="'+cls+'"':"")+">"+
+    return open+r.map((c0,i)=>{const c=cell(c0);return "<td data-label=\""+esc(lbls[i]||"")+"\""+(c.num?' class="num"':"")+">"+c.t+"</td>"}).join("")+"</tr>"}).join("");
+  const ckey=(cls||"").split(/\s+/).find(k=>k in TBL_COLS);
+  const cg=ckey?TBL_COLS[ckey]:"";
+  return '<div class="tbl-wrap"><table'+(cls?' class="'+cls+'"':"")+">"+cg+
     "<thead><tr>"+hs+"</tr></thead><tbody>"+bs+"</tbody></table></div>"};
 
-/* 会话摘要清洗 (剥本地 URL / 路径残尾 → 标签) */
-const cleanSummary=s=>{let t=String(s||"");const tags=[];
+/* 清洗会话摘要 & 记忆正文的 Markdown/URL/路径残留 */
+const stripMd=s=>String(s||"")
+  .replace(/```[\s\S]*?```/g," ")
+  .replace(/`([^`\n]+)`/g,"$1")
+  .replace(/\*\*([^*\n]+)\*\*/g,"$1")
+  .replace(/__([^_\n]+)__/g,"$1")
+  .replace(/^[#>*\s]+/gm,"");
+const cleanSummary=s=>{let t=stripMd(s);const tags=[];
   t=t.replace(/https?:\/\/\S+/g," ");
-  t=t.replace(/\[([^\]\n]{1,24})\]\([^)\n]{0,40}/g,(m,g)=>{tags.push(g);return " "});
-  t=t.replace(/\(([A-Za-z]:\\?[^)\n]{0,30})/g,(m,g)=>{tags.push(g);return " "});
+  t=t.replace(/\[([^\]\n]{1,24})\]\([^)\n]{0,60}\)?/g,(m,g)=>{tags.push(g);return " "});
+  t=t.replace(/\(([A-Za-z]:\\?[^)\n]{0,36})\)?/g,(m,g)=>{tags.push(g);return " "});
   t=t.replace(/\b[A-Za-z]:\\[^\s",;)]+/g,(m)=>{tags.push(m);return " "});
   t=t.replace(/\s+/g," ").trim();
   return {text:t||"(无文本)",tags:[...new Set(tags)].slice(0,2)}};
 const sumCell=s=>{const c=cleanSummary(s);
-  return '<span class="sum-line" title="'+esc(s||"")+'"><span class="sum-main">'+esc(c.text)+"</span>"+
-    c.tags.map(t=>'<span class="mini-tag">'+esc(t)+"</span>").join("")+"</span>"};
-const dirCell=(p,max)=>'<span class="dir" title="'+esc(p||"—")+'"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6Z"/></svg><span>'+esc(truncPath(p||"—",max||34))+"</span></span>";
+  return '<span class="sum-line" title="'+esc(stripMd(s)||"")+'"><span class="sum-main">'+esc(c.text)+"</span>"+
+    c.tags.map(t=>'<span class="mini-tag">'+esc(truncPath(t,18))+"</span>").join("")+"</span>"};
+const dirCell=(p,max)=>'<span class="dir" title="'+esc(p||"—")+'"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6Z"/></svg><span>'+esc(truncPath(p||"—",max||26))+"</span></span>";
 const agentCell=a=>"<span class='chip'>"+esc(a||"?")+"</span>";
-const compCell=r=>r&&r!=="full"
-  ?'<span class="chip warn" title="源转录不含 assistant 文本等限制 — 详见快照详情">'+esc(r)+"</span>"
-  :'<span style="color:var(--ink-3)">完整</span>';
-const relayBadge=p=>'<span class="relay-badge" title="上游中转节点 '+esc(p||"")+'">'+
-  '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>'+
-  '<span class="rl">Relay ·</span><span class="rn">'+esc(p||"—")+"</span></span>";
-const copyText=(t,msg)=>{const done=()=>toast(msg||"已复制");
-  if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(done).catch(()=>fallbackCopy(t,done));
-  else fallbackCopy(t,done)};
-const fallbackCopy=(t,done)=>{const ta=document.createElement("textarea");ta.value=t;
-  ta.style.position="fixed";ta.style.opacity="0";document.body.appendChild(ta);ta.select();
-  try{document.execCommand("copy");done()}catch(e){toast("复制失败",1)}
-  ta.remove()};
+const memKindMeta=k=>{
+  if(k==="preference")return{t:"偏好",cls:"ok"};
+  if(k==="decision")return{t:"决策",cls:"warn"};
+  if(k==="summary")return{t:"摘要",cls:""};
+  if(k==="fact")return{t:"事实",cls:""};
+  return{t:k||"记忆",cls:""};
+};
+const formatNodeId=p=>{
+  const s=String(p||"").trim();
+  if(!s)return"—";
+  return /^\d+$/.test(s)?("节点 #"+s):s;
+};
+const relayBadge=p=>'<span class="relay-badge" title="上游节点 '+esc(p||"")+'">'+
+  '<span class="rn">'+esc(formatNodeId(p))+"</span></span>";
 
-/* ================= 分区导航 + 深链 ================= */
+const copyText=async(t,msg)=>{
+  try{await navigator.clipboard.writeText(t)}
+  catch(e){toast("复制失败: "+String(e&&e.message||e),1);return}
+  toast(msg||"已复制")};
+
+/* ================= 分区导航 + 快捷键 ================= */
 const TABS=["ov","snap","mig","probe"];
-const TAB_TITLE={ov:"概览",snap:"快照资产",mig:"迁移",probe:"哨兵"};
+const TAB_TITLE={ov:"概览",snap:"快照资产",mig:"迁移工作台",probe:"上游哨兵"};
 function setTab(t){
   if(!TABS.includes(t))t="ov";
   $$("nav.side-nav button").forEach(x=>{const on=x.dataset.t===t;
@@ -5070,9 +5742,13 @@ function setTab(t){
 $$("nav.side-nav button").forEach(b=>b.onclick=()=>setTab(b.dataset.t));
 document.addEventListener("keydown",e=>{
   const t=e.target,tag=t&&t.tagName;
-  if(tag&&/^(INPUT|SELECT|TEXTAREA)$/.test(tag))return;
-  if(drawerOpen)return;
-  const n=+e.key;  /* 1-4 快捷切分区 (侧栏 kbd 提示) */
+  if(tag&&/^(INPUT|SELECT|TEXTAREA)$/.test(tag)){
+    if(e.key==="Escape"&&t.blur)t.blur();
+    return;
+  }
+  if(drawerIsOpen())return;
+  if(e.key==="/"){e.preventDefault();const g=$("#g-q");if(g&&g.focus)g.focus();return}
+  const n=+e.key;
   if(n>=1&&n<=TABS.length){setTab(TABS[n-1]);e.preventDefault()}
 });
 $("#g-q").addEventListener("keydown",e=>{
@@ -5086,8 +5762,6 @@ $("#g-q").addEventListener("keydown",e=>{
 
 /* ================= 服务健康 ================= */
 function stripToken(){
-  /* B03 配套: 首访 ?token= 已种成 HttpOnly cookie, 地址栏不再保留凭据
-     (分享/截屏/历史记录里不泄漏 token; 失败时不清理, 用户还需带 token 重试) */
   if(/[?&]token=/.test(location.search||"")&&window.history)
     history.replaceState(null,"",location.pathname+(location.hash||""));
 }
@@ -5095,102 +5769,99 @@ async function checkHealth(){
   const h=await api("/healthz");
   const s=$("#status");s.classList.remove("err","auth");
   s.innerHTML='<span class="pulse"></span>服务正常 · '+num(h.snapshots)+" 快照 · "+num(h.terms)+" 索引词项";
-  $("#foot-dot").className="dot ok";
-  $("#foot-health").innerHTML="健康 · <b>"+num(h.snapshots)+"</b> 快照";
-  $("#q-svc-d").textContent="服务正常 · "+num(h.snapshots)+" 快照 · 上游哨兵";
-  $("#q-snap-d").textContent=num(h.snapshots)+" 个快照版本待浏览";
   return h;
 }
-let healthSeq=seqGuard(null);
+let healthSeq=seqGuard();
 async function boot(){
   try{
     await healthSeq(async()=>checkHealth());
     stripToken();
-    loadOv();refreshSnaps();  /* boot 恢复不重置用户搜索词/页码 (markSvcBad→boot 曾清空, 二轮 console-4) */
+    loadOv();refreshSnaps();
   }catch(e){
     const s=$("#status");
     if(e&&e.code===401){s.classList.remove("err");s.classList.add("auth");
       s.innerHTML='<span class="pulse"></span>需要鉴权 — 请用带 token 的链接重新打开 (凭据不入页面)';}
     else{s.classList.add("err");
       s.innerHTML="<span class='pulse'></span>服务异常 · 4s 后重试";}
-    $("#foot-dot").className="dot err";
-    $("#foot-health").textContent=e&&e.code===401?"需要鉴权":"未连接";
-    scheduleBoot();  /* 常驻重启/部署窗口期自动恢复 (scheduleBoot 去重, 不与 api 侧失败双开循环) */
+    scheduleBoot();
   }
 }
 
 /* ================= 概览 ================= */
-const ovSeq=seqGuard(null);
-const kvRow=(k,v)=>'<div class="row"><span class="l">'+k+'</span><span class="r">'+v+"</span></div>";
-
+const ovSeq=seqGuard();
 async function loadOv(){
-  $("#ov-band").innerHTML='<div class="skel" style="width:180px"></div><div class="skel" style="width:160px"></div><div class="skel" style="width:170px"></div><div class="skel" style="width:150px"></div>';
+  $("#ov-band").innerHTML='<div class="kpi"><div class="skel" style="width:70%"></div></div>'.repeat(4);
   try{
     const d=await ovSeq(()=>api("/ledger"));
-    const lt=d.lifetime||{};const ow=d.owned||{};
+    const ow=d.owned||{};
     const zu=d.zcode_usage||{};
-    /* 独立会话数: 后端没有该口径时显示版本数并注明, 不编造 */
     const sessions=(ow.sessions!=null)?ow.sessions:null;
     const hit=(ow.cache_hit_rate!=null)?ow.cache_hit_rate:null;
     const hitSem=ow.semantics||"cache 读 / 全部输入 (按来源口径规范化的分母)";
-    const inEff=(ow.input_effective!=null)?ow.input_effective:((ow.tokens_in||0));
-    /* zcode model_usage 是 OpenAI 语义: input 已含 cache 读 (实证 0 行 cache_read>input) —
-       曾把 tin+cr 相加, zcode 输入被计两次 (KPI 虚高约一倍) */
+    const inEff=(ow.input_effective!=null)?ow.input_effective:(ow.tokens_in||0);
     const ztIn=Object.values(zu).reduce((s,a)=>s+(a.tin||0),0);
-    /* 快照账本已含 zcode 叶子用量 (索引层回填); 有 model_usage 全量时用它替换快照里的 zcode 部分,
-       不重复相加 (model_usage 还覆盖未入库/已删会话, 是 zcode 的真相源) */
     const zOwned=(((ow.by_agent||[]).find(a=>a.agent==="zcode"))||{}).tokens_in||0;
     const totalIn=(inEff||0)-(ztIn>0?zOwned:0)+ztIn;
     const band=
-      kpi(num(ow.snapshots||0),"快照版本","vault/snapshots 内容寻址快照 · 含被演进替代的历史版本")+
-      kpi(sessions==null?"—":num(sessions),"独立会话",sessions==null?"后端未提供独立会话口径":"按 lineage 演进链去重后的会话数")+
+      kpi(num(ow.snapshots||0),"快照版本","vault/snapshots 内容寻址快照 · 含被演进替代的历史版本","不可变内容寻址")+
+      kpi(sessions==null?"—":num(sessions),"独立会话",sessions==null?"后端未提供独立会话口径":"按 lineage 演进链去重后的会话数","按演进链去重")+
       kpi('<span title="'+num(totalIn)+'">'+bn(totalIn)+'</span><small>tokens</small>',
-        '累计输入 tokens<div class="exact">精确 '+num(totalIn)+'</div>',
-        "口径: 快照内嵌 usage 规范化总输入 ("+num(inEff||0)+", Claude 语义补回 cache 读/写) · zcode 以 model_usage 全量调用 ("+num(ztIn)+") 替换快照内的 zcode 部分 · 均含 cache 读")+
+        '累计输入 tokens',
+        "口径: 快照内嵌 usage 规范化总输入 ("+num(inEff||0)+", Claude 语义补回 cache 读/写) · zcode 以 model_usage 全量调用 ("+num(ztIn)+") 替换快照内的 zcode 部分 · 均含 cache 读",
+        '精确 '+num(totalIn)+(ztIn>0?' · 含 zcode 全量':''))+
       kpi(hit==null?"—":'<span class="'+(hit>1?"kpi-bad":"")+'">'+(hit*100).toFixed(1)+"%</span>",
         "缓存命中率",
-        "口径: "+hitSem+" · 数据源: vault 快照内嵌 usage");
+        "口径: "+hitSem+" · 数据源: vault 快照内嵌 usage",
+        hit==null?"尚无缓存样本":"近库加权命中");
     $("#ov-band").innerHTML=band;
 
-    /* 最近入库会话: 每会话只列演进链最新版本 (同一会话的历史版本不再刷屏) */
     let rc=null;try{rc=await api("/recent?limit=10&leaves=1")}catch(e){}
     const total=(rc&&rc.total)||0;
     const arr=(rc&&rc.rows)||[];
     $("#ov-latest").innerHTML=(arr.length?table(["来源","会话摘要","位置","入库时间"],
-      arr.map(s=>{const tr=[agentCell(s.agent),sumCell(s.first),dirCell(s.cwd,26),
-        '<span class="nowr" title="'+esc(s.created_at||"")+'">'+frel(s.created_at)+"</span>"];
-        tr.__tr='class="rowlink" tabindex="0" role="button" aria-label="打开快照详情" '+
-          'onclick="snapDetail(\''+s.sid+'\',\''+(s.created_at||"")+'\')" '+
-          'onkeydown="if(event.key===\'Enter\')snapDetail(\''+s.sid+'\',\''+(s.created_at||"")+'\')"';
-        return tr}),"tbl-44")
-      :'<div class="empty">还没有会话入库<br>先运行 <code>python tools/cv.py sync</code> 或单文件 <code>cv export &lt;会话文件&gt;</code>'+
+      arr.map(s=>{const tr=[agentCell(s.agent),
+        '<button class="linklike sumbtn" title="打开快照详情" onclick="event.stopPropagation();snapDetail(\''+s.sid+'\',\''+(s.created_at||"")+'\')">'+sumCell(s.first)+"</button>",
+        dirCell(s.cwd,22),
+        '<span class="nowr hint" title="'+esc(s.created_at||"")+'">'+frel(s.created_at)+"</span>"];
+        tr.__tr='class="rowlink" onclick="snapDetail(\''+s.sid+'\',\''+(s.created_at||"")+'\')"';
+        return tr}),"tbl-44 fixed-cols tbl-ov")
+      :'<div class="empty">还没有会话入库<br>先点右上角 <b>↻ 立即同步</b> 或运行 <code>python tools/cv.py sync</code>'+
        '<br><button class="btn sm" onclick="loadOv()">重试</button></div>')+
-      '<div class="foot"><span>显示最近 '+arr.length+" 个会话 · 共 "+num(total)+" 个会话 / "+
-        num((rc&&rc.versions_total)||total)+" 个快照版本</span>"+
-      '<a onclick="setTab(\'snap\')">查看全部 →</a></div>';
+      '<div class="foot"><span>显示最近 '+arr.length+" 个独立会话 · 共 "+num(total)+" 个会话 / "+
+        num((rc&&rc.versions_total)||total)+" 个版本</span>"+
+      '<button class="linklike" onclick="setTab(\'snap\')">浏览全部 →</button></div>';
 
-    /* 右栏: 哨兵 / 记忆 / 审计 (可展开) */
-    let pv=[];try{pv=(await api("/probe_events?limit=3")).filter(e=>e.status!=="prune")}catch(e){}
+    let pv=[];try{pv=(await api("/probe_events?limit=4")).filter(e=>e.status!=="prune")}catch(e){}
     $("#ov-probe").innerHTML=Array.isArray(pv)&&pv.length?pv.map(e=>{
       const st=e.status||"?";const cls=st==="ok"?"ok":(st==="http_error"||st==="error")?"err":"warn";
-      return '<div class="row"><span class="l"><span class="dot '+cls+'"></span>'+relayBadge(e.profile)+
-      ' <span class="pill '+cls+'">'+esc(st)+'</span></span><span class="r">'+frel(e.ts)+"</span></div>"}).join("")
-      :'<div class="hint" style="padding:8px 12px">暂无探测记录 · 到哨兵页立即探测，或等托盘周期探测</div>';
-    let mr=[];try{mr=await api("/memory?q=&limit=3");mr=(mr&&mr.memories)||[]}catch(e){mr=[]}
-    $("#ov-mem").innerHTML=mr.length?mr.map(m=>'<div class="row"><span class="l" title="'+esc(m.content)+
-      '">['+esc(m.kind)+"] "+esc(String(m.content).slice(0,36))+
-      '</span><span class="r">'+esc(m.project||"—")+"</span></div>").join("")
-      :'<div class="hint" style="padding:8px 12px">暂无记忆 · <code>cv memory extract</code> 提取</div>';
+      const lbl=st==="ok"?((e.http_code||200)+" 正常"):(st==="http_error"||st==="error")?(e.http_code?(e.http_code+" 异常"):"无响应"):st==="switch"?"切换":esc(st);
+      const latTxt=(st==="ok"&&e.latency_ms)?('<span class="hint">'+e.latency_ms+'ms</span>'):"";
+      return '<div class="feed-row"><span class="feed-main"><span class="dot '+cls+'"></span>'+
+        '<span class="mono">'+esc(formatNodeId(e.profile))+'</span>'+
+        '<span class="pill '+cls+'">'+esc(lbl)+'</span>'+latTxt+
+        '</span><span class="feed-r">'+frel(e.ts)+"</span></div>"}).join("")
+      :'<div class="hint" style="padding:10px 14px">暂无探测记录 · 到哨兵页点击「立即探测上游」</div>';
+
+    let mr=[];try{mr=await api("/memory?q=&limit=4");mr=(mr&&mr.memories)||[]}catch(e){mr=[]}
+    $("#ov-mem").innerHTML=mr.length?mr.map(m=>{
+      const km=memKindMeta(m.kind);
+      const txt=stripMd(m.content).replace(/\s+/g," ").trim();
+      return '<div class="feed-row"><span class="feed-main">'+
+        '<span class="chip '+km.cls+'">'+esc(km.t)+'</span>'+
+        '<span class="feed-txt" title="'+esc(txt)+'">'+esc(txt)+'</span></span>'+
+        '<span class="feed-r"><span class="chip">'+esc(m.project||"全局")+"</span></span></div>";
+    }).join("")
+      :'<div class="hint" style="padding:10px 14px">暂无记忆 · <code>cv memory extract</code> 提取</div>';
+
     let au=null;try{au=await api("/audit")}catch(e){}
     $("#ov-audit").innerHTML=au?
-      '<div style="padding:4px 8px 8px">'+
-      kvRow("累计事件",num(au.total_events||0))+
-      kvRow("探测 ok / 异常",num((au.summary||{}).ok_probes||0)+" / "+num((au.summary||{}).abnormal||0))+
-      kvRow("上游切换",num((au.summary||{}).switches||0))+
-      kvRow("模型消失事件",num((au.summary||{}).model_missing_events||0))+
-      '</div><div class="foot"><span>事件全量 '+num(au.total_events||0)+" 条</span>"+
-      '<a onclick="setTab(\'probe\')">去哨兵查看 →</a></div>'
-      :'<div class="hint" style="padding:8px 12px">—</div>';
+      '<div class="audit-grid">'+
+      '<div class="audit-cell"><span class="al">累计事件</span><span class="av">'+num(au.total_events||0)+'</span></div>'+
+      '<div class="audit-cell"><span class="al">探测正常</span><span class="av" style="color:var(--acc-strong)">'+num((au.summary||{}).ok_probes||0)+'</span></div>'+
+      '<div class="audit-cell"><span class="al">异常告警</span><span class="av" style="color:'+(((au.summary||{}).abnormal||0)>0?'var(--err)':'var(--ink)')+'">'+num((au.summary||{}).abnormal||0)+'</span></div>'+
+      '<div class="audit-cell"><span class="al">切换 / 缺失</span><span class="av">'+num((au.summary||{}).switches||0)+' / '+num((au.summary||{}).model_missing_events||0)+'</span></div>'+
+      '</div>'
+      :'<div class="hint" style="padding:10px 14px">—</div>';
 
     renderUsage(d);
   }catch(e){
@@ -5199,34 +5870,34 @@ async function loadOv(){
     $("#ov-latest").innerHTML="";$("#ov-usage").innerHTML="";
   }
 }
-const kpi=(v,k,tip)=>'<div class="kpi"'+(tip?' title="'+esc(tip)+'"':"")+'><div class="v">'+v+
-  '</div><div class="k">'+k+"</div></div>";
+const kpi=(v,k,tip,sub)=>'<div class="kpi"'+(tip?' title="'+esc(tip)+'"':"")+'>'+
+  '<div class="k"><span>'+k+'</span></div>'+
+  '<div class="v">'+v+'</div>'+
+  (sub?'<div class="exact">'+sub+'</div>':'')+'</div>';
 
-/* 用量明细 (details 区): headroom 与 zcode 是可选数据源, 未接入给说明不占主体 */
 function renderUsage(d){
-  const lt=d.lifetime||{};const ow=d.owned||{};
+  const lt=d.lifetime||{};
   const zu=d.zcode_usage||{};
   const zrows=Object.entries(zu);
   const anyPrice=zrows.some(([,a])=>a.cost!=null);
   let h="";
-  h+='<div class="card-h" style="padding-left:0;border-bottom:none">ZCode 用量 <span class="sub">— 数据源: ZCode 主库 model_usage 全量调用记录; 无价目模型不计成本 (订阅制口径)</span></div>';
+  h+='<div class="hint" style="margin-bottom:8px"><b>ZCode 用量</b> — 数据源: ZCode 主库 model_usage 全量调用记录；无价目模型按订阅制不计成本</div>';
   h+=zrows.length?table(anyPrice?["模型","调用次数","输入 tok","cache 读","成本 (按价目)"]:["模型","调用次数","输入 tok","cache 读"],
     zrows.map(([m,a])=>{const r=['<span class="mono">'+esc(m)+"</span>",{t:num(a.n),num:1},
       {t:'<span title="'+num(a.tin)+'">'+bn(a.tin)+"</span>",num:1},
       {t:'<span title="'+num(a.cr)+'">'+bn(a.cr)+"</span>",num:1}];
       if(anyPrice)r.push({t:a.cost==null?"未提供价目":'<span title="$'+a.cost+'">'+usd(a.cost)+"</span>",num:1});
       return r;}))
-    :'<div class="hint" style="padding:6px 0">未接入 — 运行 <code>cv ledger import-zcode</code> 或由托盘自动导入; 此处不留空卡。</div>';
-  h+='<div class="card-h" style="padding-left:0;border-bottom:none;margin-top:16px">headroom 通路节省 <span class="sub">— 数据源: headroom 导入; 未接入不显示走势</span></div>';
+    :'<div class="hint" style="padding:4px 0">未接入 ZCode model_usage 记录；有活动会话后自动统计。</div>';
   const hasLt=(lt.saved_usd||0)+(lt.cache_savings_usd||0)>0;
   const ms=d.monthly||[];
+  h+='<div class="hint" style="margin:14px 0 6px"><b>headroom 通路节省</b> — 仅在导入 headroom 账本时展示</div>';
   if(!hasLt&&!ms.length){
-    h+='<div class="hint" style="padding:6px 0">未接入 — 运行 <code>cv ledger import-headroom</code> 导入; 金额类指标只在有数据源时出现, 不以 0 占位。</div>';
+    h+='<div class="hint" style="padding:2px 0">未接入 — 运行 <code>cv ledger import-headroom</code> 导入；未连接时不虚构金额。</div>';
   }else{
     if(ms.length){
       const mx=Math.max(...ms.map(m=>m.c||0),1);
       const fmt=v=>"$"+(v>=1000?(v/1000).toFixed(1)+"k":v.toFixed(0));
-      /* 月少时收紧图宽 (~90px/月), 避免 2 根柱子摊满整卡显得稀疏; 680px CSS 上限兜底 */
       const mw=Math.min(680,ms.length*90+120);
       h+='<div class="months" style="max-width:'+mw+'px"><div class="yax"><span>'+fmt(mx)+'</span><span>'+fmt(mx/2)+
         '</span><span>$0</span></div><div class="bars">'+ms.map((m,i)=>{const hh=Math.max(100*(m.c||0)/mx,3);
@@ -5243,14 +5914,29 @@ function renderUsage(d){
       " — 按官方价目折算 (估算, 非账单)。</div>";
   }
   $("#ov-usage").innerHTML=h;
+  try{
+    const sumEl=$("#ov-usage-sum");
+    if(sumEl){
+      const pts=[];
+      if(zrows.length){
+        const zCalls=zrows.reduce((s,[,a])=>s+(a.n||0),0);
+        pts.push("ZCode "+num(zrows.length)+" 模型 · "+num(zCalls)+" 次调用");
+      }
+      if(hasLt)pts.push("headroom 压缩省 "+usd(lt.saved_usd||0)+" · 缓存省 "+usd(lt.cache_savings_usd||0));
+      sumEl.textContent=pts.length?("（"+pts.join(" · ")+" · 点击展开明细）"):"（暂未接入计费明细 · 点击查看接入说明）";
+    }
+  }catch(e){}
 }
 
-/* ================= 快照资产 ================= */
-const snapsSeq=seqGuard(null);
-let snapPage=0,snapAsc=false,snapMode="recent",snapQuery="",snapLeaves=true,snapTreeMode=false,treeTarget="antigravity",treeApply=false,treeAgent="zcode";
+/* ================= 快照资产 & 项目树 ================= */
+const snapsSeq=seqGuard();
+let snapPage=0,snapAsc=false,snapMode="recent",snapQuery="",snapLeaves=true,snapTreeMode=false,treeTarget="antigravity",treeApply=false,treeAgent="zcode",treeArchived=false;
+const projOpenState={};
+
 function updateSnapTreeBtn(){
-  const b=$("#snap-tree-btn");
-  if(b)b.setAttribute("aria-pressed",snapTreeMode?"true":"false");
+  const b=$("#snap-tree-btn"),lbBtn=$("#snap-list-btn");
+  if(b){b.setAttribute("aria-pressed",snapTreeMode?"true":"false");b.classList.toggle("on",snapTreeMode)}
+  if(lbBtn){lbBtn.setAttribute("aria-pressed",snapTreeMode?"false":"true");lbBtn.classList.toggle("on",!snapTreeMode)}
   const sb=$("#snap-sort"),lb=$("#snap-leaves");
   if(sb)sb.style.display=snapTreeMode?"none":"";
   if(lb)lb.style.display=snapTreeMode?"none":"";
@@ -5260,15 +5946,15 @@ function snapTreeToggle(){
   updateSnapTreeBtn();
   if(snapTreeMode){loadProjectTree()}else{snapMode==="search"?snapSearch(true):renderSnaps()}
 }
-function snapLeavesToggle(){ /* 同会话演进链折叠为一行 (×N 版本) ↔ 全部历史版本 */
+function snapLeavesToggle(){
   snapLeaves=!snapLeaves;snapPage=0;
   const b=$("#snap-leaves");b.textContent=snapLeaves?"仅最新版本":"全部版本";
   b.setAttribute("aria-pressed",snapLeaves?"true":"false");
   if(snapTreeMode){snapTreeMode=false;updateSnapTreeBtn()}
-  if(snapMode==="search"){snapSearch();return}  /* 搜索结果与折叠无关 — 曾静默丢结果切到最近列表 (二轮 console-5) */
+  if(snapMode==="search"){snapSearch();return}
   renderSnaps();
 }
-async function refreshSnaps(){ /* boot 恢复用: 按当前状态重渲染, 不重置搜索词/页码 */
+async function refreshSnaps(){
   if(snapTreeMode){try{await loadProjectTree()}catch(e){}return}
   if(snapMode==="search"){try{await snapSearch()}catch(e){}return}
   await renderSnaps();
@@ -5303,6 +5989,21 @@ async function snapSearch(keepPage){
     $("#snap-meta").textContent="";
   }
 }
+async function syncVaultNow(){
+  const btns=[$("#sync-now-btn"),$("#top-sync-btn")].filter(Boolean);
+  const olds=btns.map(b=>b.innerHTML);
+  btns.forEach(b=>{b.disabled=true;b.textContent="同步中…"});
+  try{
+    const r=await api("/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+    await checkHealth();
+    loadOv();
+    await refreshSnaps();
+    toast("入库同步完成：新增 "+num(r.new||0)+" · 更新 "+num(r.updated||0)+" · 总快照 "+num(r.total||0));
+  }catch(e){
+    toast("同步失败："+e.message,1);
+  }
+  btns.forEach((b,i)=>{b.disabled=false;b.innerHTML=olds[i]});
+}
 async function loadProjectTree(){
   snapTreeMode=true;updateSnapTreeBtn();
   const q=($("#snap-q")&&$("#snap-q").value||"").trim();
@@ -5311,6 +6012,7 @@ async function loadProjectTree(){
     const qs=[];
     if(q)qs.push("project="+encodeURIComponent(q));
     if(treeAgent)qs.push("agent="+encodeURIComponent(treeAgent));
+    if(treeArchived)qs.push("archived=1");
     const url="/projects"+(qs.length?("?"+qs.join("&")):"");
     const d=await snapsSeq(()=>api(url));
     renderProjectTree(d,q);
@@ -5321,49 +6023,94 @@ async function loadProjectTree(){
   }
 }
 function toggleAllProjects(open){
-  $$("#snap-list details.proj-card").forEach(el=>{el.open=!!open});
+  $$("#snap-list details.proj-card").forEach(el=>{
+    el.open=!!open;
+    if(el.dataset&&el.dataset.cwd)projOpenState[el.dataset.cwd]=!!open;
+  });
+}
+function onProjCardToggle(el){
+  if(el&&el.dataset&&el.dataset.cwd)projOpenState[el.dataset.cwd]=!!el.open;
+}
+const CHEV_IC='<svg class="tw" width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const PROJ_FOLD_IC='<svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 4.5a1.3 1.3 0 0 1 1.3-1.3h2.8l1.3 1.3h5.3a1.3 1.3 0 0 1 1.3 1.3v6.2a1.3 1.3 0 0 1-1.3 1.3H3.3A1.3 1.3 0 0 1 2 12V4.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+const PROJ_CHAT_IC='<svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 3.5h10a1 1 0 0 1 1 1v6.2a1 1 0 0 1-1 1H6.5L3.5 14v-2.3H3a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+const treeCanApply=t=>t==="codex"||t==="claude"||t==="antigravity"||t==="zcode";
+function onTreeTgtChange(val){
+  treeTarget=val;
+  const ok=treeCanApply(val);
+  const cb=$("#tree-apply"),lbl=$("#tree-apply-wrap"),hint=$("#tree-apply-hint");
+  if(!ok){
+    treeApply=false;
+    if(cb){cb.checked=false;cb.disabled=true}
+  }else{
+    if(cb)cb.disabled=false;
+  }
+  if(lbl)lbl.style.opacity=ok?"1":".5";
+  if(hint)hint.textContent=ok?"":"（该目标仅导出至 vault/outbox/）";
 }
 function renderProjectTree(d,q){
   const projs=(d&&d.projects)||[];
   const tp=d.total_projects||projs.length,tc=d.total_conversations||0;
+  const applyOk=treeCanApply(treeTarget);
+  if(!applyOk)treeApply=false;
   $("#snap-meta").innerHTML=(q?('项目筛选「'+esc(q)+'」· '):'按项目树折叠浏览 · ')+
     "共 <b class='num'>"+num(tp)+"</b> 个项目文件夹 · <b class='num'>"+num(tc)+
-    "</b> 条顶层主对话（已过滤历史版本与子代理碎片）"+
+    "</b> 条顶层主对话（已过滤历史版本与子代理碎片"+(treeArchived?"；含已归档":"")+"）"+
     (q?' <button class="xbtn" onclick="$(\'#snap-q\').value=\'\';loadProjectTree()">查看全部项目 ×</button>':"");
+  const bar='<div class="proj-dock">'+
+    '<div class="proj-toolbar">'+
+      '<label for="tree-agent">来源筛选</label>'+
+      '<select id="tree-agent" onchange="treeAgent=this.value;loadProjectTree()">'+
+        '<option value="zcode"'+(treeAgent==="zcode"?" selected":"")+'>仅 ZCode（默认）</option>'+
+        '<option value=""'+(treeAgent===""?" selected":"")+'>全部来源（含 Codex / Claude）</option>'+
+        '<option value="codex"'+(treeAgent==="codex"?" selected":"")+'>仅 Codex</option>'+
+        '<option value="claude-code"'+(treeAgent==="claude-code"?" selected":"")+'>仅 Claude Code</option>'+
+      '</select>'+
+      '<label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer">'+
+        '<input type="checkbox" id="tree-arch"'+(treeArchived?' checked':'')+' style="accent-color:var(--acc)" onchange="treeArchived=this.checked;loadProjectTree()">包含已归档</label>'+
+      '<div class="pt-end">'+
+        '<button class="btn sm" onclick="toggleAllProjects(true)">全部展开</button>'+
+        '<button class="btn sm" onclick="toggleAllProjects(false)">全部收起</button>'+
+      '</div>'+
+    '</div>'+
+    '<div class="proj-batch-row">'+
+      '<label for="tree-tgt">单条 / 整项导出目标</label>'+
+      '<select id="tree-tgt" onchange="onTreeTgtChange(this.value)">'+
+        '<option value="antigravity"'+(treeTarget==="antigravity"?" selected":"")+'>Antigravity（原生 .db 会话）</option>'+
+        '<option value="claude"'+(treeTarget==="claude"?" selected":"")+'>Claude Code</option>'+
+        '<option value="codex"'+(treeTarget==="codex"?" selected":"")+'>Codex</option>'+
+        '<option value="markdown"'+(treeTarget==="markdown"?" selected":"")+'>Markdown 简报（outbox）</option>'+
+        '<option value="zcode"'+(treeTarget==="zcode"?" selected":"")+'>ZCode 写回（实验性）</option>'+
+        '<option value="cursor"'+(treeTarget==="cursor"?" selected":"")+'>Cursor</option>'+
+        '<option value="opencode"'+(treeTarget==="opencode"?" selected":"")+'>OpenCode</option>'+
+        '<option value="qwen"'+(treeTarget==="qwen"?" selected":"")+'>Qwen Code</option>'+
+        '<option value="kimi"'+(treeTarget==="kimi"?" selected":"")+'>Kimi CLI</option>'+
+        '<option value="copilot"'+(treeTarget==="copilot"?" selected":"")+'>Copilot</option>'+
+      '</select>'+
+      '<label id="tree-apply-wrap" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;opacity:'+(applyOk?"1":".5")+'">'+
+        '<input type="checkbox" id="tree-apply"'+(treeApply&&applyOk?' checked':'')+(applyOk?'':' disabled')+' style="accent-color:var(--acc)" onchange="treeApply=this.checked">同时写入真实目录</label>'+
+      '<span class="hint" id="tree-apply-hint">'+(applyOk?'':'（该目标仅导出至 vault/outbox/）')+'</span>'+
+    '</div>'+
+    '<div class="proj-sync">'+
+      '<span class="ps-lbl">Antigravity 免命令行双向维护</span>'+
+      '<span class="hint">清理归档/已删/重复 · 按当前来源一键补齐活跃会话</span>'+
+      '<div class="ps-right">'+
+        '<button class="btn sm" id="agy-sync-btn" onclick="agySyncPreview()">清理 Antigravity</button>'+
+        '<button class="btn sm primary" id="agy-batch-btn" onclick="agyBatchPreview()">一键补齐导入 → Antigravity</button>'+
+      '</div>'+
+    '</div>'+
+  '</div>'+
+  '<div id="tree-export-res" hidden></div>';
   if(!projs.length){
-    $("#snap-list").innerHTML='<div class="empty">'+WARN+'<div>没有匹配「'+esc(q||"")+'」的项目或主对话</div>'+
+    $("#snap-list").innerHTML=bar+'<div class="empty">'+WARN+'<div>没有匹配「'+esc(q||"")+'」的项目或主对话</div>'+
       (q?'<button class="btn" onclick="$(\'#snap-q\').value=\'\';loadProjectTree()">显示全部项目</button>'
         :'<button class="btn" onclick="loadSnaps()">返回列表</button>')+'</div>';
     return;
   }
-  const bar='<div class="proj-toolbar">'+
-    '<label for="tree-agent">来源筛选</label>'+
-    '<select id="tree-agent" onchange="treeAgent=this.value;loadProjectTree()">'+
-      '<option value="zcode"'+(treeAgent==="zcode"?" selected":"")+'>仅 ZCode（默认）</option>'+
-      '<option value=""'+(treeAgent===""?" selected":"")+'>全部来源（含 Codex / Claude）</option>'+
-      '<option value="codex"'+(treeAgent==="codex"?" selected":"")+'>仅 Codex</option>'+
-      '<option value="claude-code"'+(treeAgent==="claude-code"?" selected":"")+'>仅 Claude Code</option>'+
-    '</select>'+
-    '<label for="tree-tgt">一键导出目标</label>'+
-    '<select id="tree-tgt" onchange="treeTarget=this.value">'+
-      '<option value="antigravity"'+(treeTarget==="antigravity"?" selected":"")+'>Antigravity（原生 .db 会话）</option>'+
-      '<option value="claude"'+(treeTarget==="claude"?" selected":"")+'>Claude Code</option>'+
-      '<option value="codex"'+(treeTarget==="codex"?" selected":"")+'>Codex</option>'+
-      '<option value="markdown"'+(treeTarget==="markdown"?" selected":"")+'>Markdown 简报（≤48KB 到 outbox）</option>'+
-      '<option value="zcode"'+(treeTarget==="zcode"?" selected":"")+'>ZCode 写回（实验性 · 需重启 ZCode）</option>'+
-      '<option value="cursor">Cursor</option>'+
-      '<option value="opencode">OpenCode</option>'+
-      '<option value="qwen">Qwen Code</option>'+
-      '<option value="kimi">Kimi CLI</option>'+
-      '<option value="copilot">Copilot</option>'+
-    '</select>'+
-    '<label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer">'+
-      '<input type="checkbox" id="tree-apply"'+(treeApply?' checked':'')+' style="accent-color:var(--acc)" onchange="treeApply=this.checked">同时写入真实会话目录</label>'+
-    '<button class="btn sm" onclick="toggleAllProjects(true)">全部展开</button>'+
-    '<button class="btn sm" onclick="toggleAllProjects(false)">全部收起</button>'+
-  '</div><div id="tree-export-res" hidden></div>';
   const cards=projs.map((g,i)=>{
-    const open=i<5?" open":"";
+    const cwdKey=String(g.cwd||g.name||i);
+    const isOpen=(cwdKey in projOpenState)?projOpenState[cwdKey]:(i<2);
+    const open=isOpen?" open":"";
     const cwdDisp=g.is_ungrouped?"ZCode / 默认工作区未分组任务":g.cwd;
     const rows=(g.conversations||[]).map(c=>{
       const cleaned=cleanSummary(c.title||"(无标题)");
@@ -5379,22 +6126,22 @@ function renderProjectTree(d,q){
           '</div>'+
         '</div>'+
         '<div class="proj-row-act">'+
-          '<button class="btn sm" data-sid="'+esc(sid)+'" data-title="'+esc(cleaned.text)+'" onclick="event.stopPropagation();quickExportConv(this)">一键导出</button>'+
+          '<button class="btn sm" data-sid="'+esc(sid)+'" data-title="'+esc(cleaned.text)+'" onclick="event.stopPropagation();quickExportConv(this)">导出</button>'+
           '<button class="btn sm" onclick="event.stopPropagation();snapDetail(\''+sid+'\',\''+esc(c.created_at||"")+'\')">详情</button>'+
         '</div>'+
       '</div>';
     }).join("");
-    return '<details class="card proj-card"'+open+'>'+
+    return '<details class="card proj-card" data-cwd="'+esc(cwdKey)+'"'+open+' ontoggle="onProjCardToggle(this)">'+
       '<summary class="proj-head">'+
-        '<span class="tw">▶</span>'+
-        '<span class="proj-icon">'+(g.is_ungrouped?"💬":"📁")+'</span>'+
+        CHEV_IC+
+        '<span class="proj-icon">'+(g.is_ungrouped?PROJ_CHAT_IC:PROJ_FOLD_IC)+'</span>'+
         '<span class="proj-meta">'+
           '<span class="proj-name">'+esc(g.name)+'</span>'+
           '<span class="proj-cwd" title="'+esc(cwdDisp)+'">'+esc(cwdDisp)+'</span>'+
         '</span>'+
         '<span class="chip">'+num(g.count)+' 条</span>'+
         '<span class="proj-time nowr" title="'+esc(g.latest||"")+'">'+frel(g.latest)+'</span>'+
-        '<button class="btn sm primary" data-proj="'+esc(g.cwd)+'" data-name="'+esc(g.name)+'" onclick="event.preventDefault();event.stopPropagation();quickExportProj(this)">导出整项 ('+num(g.count)+')</button>'+
+        '<button class="btn sm primary" data-proj="'+esc(g.cwd)+'" data-name="'+esc(g.name)+'" data-count="'+num(g.count)+'" onclick="event.preventDefault();event.stopPropagation();quickExportProj(this)">导出整项 ('+num(g.count)+')</button>'+
       '</summary>'+
       '<div class="proj-body">'+rows+'</div>'+
     '</details>';
@@ -5408,10 +6155,123 @@ function showTreeExportRes(html,isErr){
   box.className=isErr?"result-card err":"result-card";
   box.innerHTML=html;
 }
+function agyTargetLabel(t){
+  if(t==="antigravity")return "Antigravity conversations 目录（需重启 Antigravity 生效）";
+  if(t==="zcode")return "ZCode 主数据库（写回前自动备份，需重启 ZCode 生效）";
+  if(t==="codex")return "Codex 会话目录";
+  if(t==="claude")return "Claude Code projects 目录";
+  return t+" 会话目录";
+}
+function agyApplyHint(t){
+  if(t==="antigravity")return "已写入 conversations 目录，完全重启 Antigravity 生效";
+  if(t==="zcode")return "已写回 ZCode 主库（已自动备份），完全重启 ZCode 生效";
+  return "已写入目标原生会话目录";
+}
+async function agySyncPreview(){
+  const btn=$("#agy-sync-btn"),old=btn?btn.textContent:"";
+  if(btn){btn.disabled=true;btn.textContent="检查中…"}
+  const q=($("#snap-q")&&$("#snap-q").value||"").trim();
+  const qs=["dedup=1","only_agent=zcode"];
+  if(q)qs.push("project="+encodeURIComponent(q));
+  try{
+    const r=await api("/antigravity/sync?"+qs.join("&"));
+    const tc=r.targets_count||0,ec=(r.empty_projects||[]).length;
+    if(!tc&&!ec){
+      showTreeExportRes('<div class="rt">'+GOOD+'Antigravity 已与 ZCode 完全一致</div>'+
+        '<div class="hint">未发现需清理的已归档/已删项目对话、重复副本或空项目配置。</div>',false);
+      toast("Antigravity 已是最新状态");
+    }else{
+      const sample=(r.targets||[]).slice(0,8).map(t=>'<li><code>'+esc(t.cid.slice(0,8))+'</code> · '+esc(t.cwd||"")+' · '+esc(t.title||"(无标题)")+' <span class="chip">'+esc(t.reason)+'</span></li>').join("");
+      const emp=(r.empty_projects||[]).slice(0,8).map(e=>'<li>'+esc(e.name)+' <span class="mono">('+esc(e.cwd||e.id.slice(0,8))+')</span></li>').join("");
+      showTreeExportRes(
+        '<div class="rt">'+WARN+'待清理 Antigravity：'+num(tc)+' 条导入会话 · '+num(ec)+' 个空项目配置</div>'+
+        '<div class="hint">含 '+num(r.db_files||0)+' 个 .db 文件、'+num(r.summary_ids||0)+' 条摘要索引、'+num(r.proto_ids||0)+' 条 proto 缓存'+
+        (r.dup_count?' · '+num(r.dup_count)+' 条重复副本':'')+(r.agent_count?' · '+num(r.agent_count)+' 条非 ZCode 来源':'')+'。</div>'+
+        (sample?'<ul class="immlist" style="margin-top:8px">'+sample+(tc>8?'<li class="hint">…其余 '+num(tc-8)+' 条省略</li>':'')+'</ul>':'')+
+        (emp?'<div class="hint" style="margin-top:6px"><b>空项目注册：</b></div><ul class="immlist">'+emp+(ec>8?'<li class="hint">…其余 '+num(ec-8)+' 个省略</li>':'')+'</ul>':'')+
+        (r.summary_check_error?'<div class="hint" style="margin-top:6px;color:var(--warn)">提示: 当前摘要库只读受限（'+esc(r.summary_check_error)+'）；执行前请先完全退出 Antigravity。</div>':'')+
+        '<div class="exec-bar" style="margin-top:10px"><button class="btn danger sm" id="agy-sync-apply-btn" onclick="agySyncApply()">确认执行清理</button></div>',false);
+    }
+  }catch(e){
+    showTreeExportRes('<div class="rt">'+ERRIC+'清理预览失败</div><div class="hint">'+esc(e.message)+'</div>',true);
+    toast("清理预览失败："+e.message,1);
+  }
+  if(btn){btn.disabled=false;btn.textContent=old}
+}
+async function agySyncApply(){
+  if(!await askConfirm("清理仅从 Antigravity 移除已归档/已删/重复副本及空项目配置；Context Vault 与 ZCode 原始记录完整保留。\n\n注意：若 Antigravity 客户端正在运行会锁住摘要库，建议在浏览器打开本页面并先完全退出 Antigravity。","确认清理 Antigravity","确认清理"))return;
+  const q=($("#snap-q")&&$("#snap-q").value||"").trim();
+  const btn=$("#agy-sync-apply-btn");if(btn){btn.disabled=true;btn.textContent="清理中…"}
+  try{
+    const r=await api("/antigravity/sync",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({project:q||"",dedup:true,only_agent:"zcode",apply:true})});
+    showTreeExportRes(
+      '<div class="rt">'+GOOD+'Antigravity 清理完成</div>'+
+      '<div class="hint">删除 '+num(r.removed_dbs||0)+' 个 .db 文件 · 清理 '+num(r.cleaned_summaries||0)+' 条摘要 · '+
+      num(r.cleaned_proto||0)+' 条 proto 缓存 · 移除 '+num(r.removed_projects||0)+' 个空项目配置。重启 Antigravity 后生效。</div>',false);
+    toast("Antigravity 清理完成");
+  }catch(e){
+    showTreeExportRes('<div class="rt">'+ERRIC+'清理被中止</div><div class="hint">'+esc(e.message)+'</div>'+
+      '<div class="hint" style="margin-top:4px">请先在任务管理器/托盘完全退出 Antigravity（保留当前浏览器页），再点重试。</div>'+
+      '<div style="margin-top:8px"><button class="btn danger sm" onclick="agySyncApply()">重试清理</button></div>',true);
+    toast("清理失败："+e.message,1);
+  }
+}
+async function agyBatchPreview(){
+  const btn=$("#agy-batch-btn"),old=btn?btn.textContent:"";
+  if(btn){btn.disabled=true;btn.textContent="扫描中…"}
+  const q=($("#snap-q")&&$("#snap-q").value||"").trim();
+  const ag=treeAgent||"all";
+  const qs=["agent="+encodeURIComponent(ag)];
+  if(q)qs.push("project="+encodeURIComponent(q));
+  if(treeArchived)qs.push("archived=1");
+  try{
+    const r=await api("/antigravity/batch?"+qs.join("&"));
+    if(!r.planned){
+      showTreeExportRes('<div class="rt">'+GOOD+'没有需要补齐导入的对话</div>'+
+        '<div class="hint">已存在跳过 '+num(r.skipped_done||0)+' 条 · 指纹去重跳过 '+num(r.skipped_dup||0)+' 条（来源：'+esc(ag)+'）。</div>',false);
+      toast("全部符合条件的对话均已在 Antigravity");
+    }else{
+      const ps=(r.projects||[]).slice(0,8).map(p=>'<li><span class="mono">'+esc(p.cwd)+'</span> — '+num(p.count)+' 条</li>').join("");
+      showTreeExportRes(
+        '<div class="rt">'+WARN+'待补齐导入 Antigravity：'+num(r.planned)+' 条主对话（涉及 '+num((r.projects||[]).length)+' 个项目）</div>'+
+        '<div class="hint">已存在跳过 '+num(r.skipped_done||0)+' 条 · 指纹重复跳过 '+num(r.skipped_dup||0)+' 条 · 来源筛选：'+esc(ag)+'。</div>'+
+        (ps?'<ul class="immlist" style="margin-top:8px">'+ps+'</ul>':'')+
+        (r.summary_error?'<div class="hint" style="margin-top:6px;color:var(--warn)">摘要库只读提示：'+esc(r.summary_error)+'</div>':'')+
+        '<div class="exec-bar" style="margin-top:10px"><button class="btn primary sm" id="agy-batch-apply-btn" onclick="agyBatchApply()">确认导入 Antigravity</button></div>',false);
+    }
+  }catch(e){
+    showTreeExportRes('<div class="rt">'+ERRIC+'扫描失败</div><div class="hint">'+esc(e.message)+'</div>',true);
+    toast("扫描失败："+e.message,1);
+  }
+  if(btn){btn.disabled=false;btn.textContent=old}
+}
+async function agyBatchApply(){
+  if(!await askConfirm("将把待补齐的活跃主对话转换为 Antigravity 原生 .db 并登记摘要与项目目录（已存在对话自动跳过不重复导入）。\n\n注意：若 Antigravity 正在运行会锁住摘要库，请先退出 Antigravity 后执行。","确认批量导入 Antigravity","确认导入"))return;
+  const q=($("#snap-q")&&$("#snap-q").value||"").trim();
+  const ag=treeAgent||"all";
+  const btn=$("#agy-batch-apply-btn");if(btn){btn.disabled=true;btn.textContent="批量导入中…"}
+  try{
+    const r=await api("/antigravity/batch",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({agent:ag,project:q||"",archived:!!treeArchived,apply:true})});
+    showTreeExportRes(
+      '<div class="rt">'+GOOD+'批量补齐导入完成：成功 '+num(r.imported||0)+' 条'+(r.failed?'（失败 '+num(r.failed)+' 条）':'')+'</div>'+
+      '<div class="hint">已跳过已有 '+num((r.skipped_done||0)+(r.skipped_dup||0))+' 条 · 完全重启 Antigravity 后在对应项目下显示。</div>',r.failed>0);
+    toast("导入 Antigravity 完成：+"+num(r.imported||0));
+  }catch(e){
+    showTreeExportRes('<div class="rt">'+ERRIC+'批量导入失败</div><div class="hint">'+esc(e.message)+'</div>'+
+      '<div style="margin-top:8px"><button class="btn primary sm" onclick="agyBatchApply()">重试导入</button></div>',true);
+    toast("批量导入失败："+e.message,1);
+  }
+}
 async function quickExportConv(btn){
   const sid=btn.dataset.sid,title=btn.dataset.title||sid;
   const tgt=($("#tree-tgt")&&$("#tree-tgt").value)||treeTarget||"antigravity";
-  const apply=(tgt!=="markdown")&&!!(($("#tree-apply")&&$("#tree-apply").checked)||treeApply);
+  const canApply=tgt==="codex"||tgt==="claude"||tgt==="antigravity"||tgt==="zcode";
+  const apply=canApply&&!!(($("#tree-apply")&&$("#tree-apply").checked)||treeApply);
+  if(apply){
+    if(!await askConfirm("源对话: "+title.slice(0,60)+"\n目标: "+agyTargetLabel(tgt)+"\n\n将写入目标工具的真实会话数据。", "确认写入真实会话目录", "确认写入"))return;
+  }
   const old=btn.textContent;
   btn.disabled=true;btn.textContent="导出中…";
   try{
@@ -5422,7 +6282,7 @@ async function quickExportConv(btn){
       '<div class="path-row"><span class="hint">文件:</span><span class="mono" style="word-break:break-all">'+esc(r.dest||"")+'</span>'+
       '<button class="btn sm" data-v="'+esc(r.dest||"")+'" onclick="copyData(this,\'已复制文件路径\')">复制路径</button></div>'+
       '<div class="hint">'+num(r.lines||0)+' 行'+(r.dropped?' · 丢弃未配对 tool_result ×'+num(r.dropped):'')+
-      (r.applied&&tgt==="antigravity"?' · 重启 Antigravity 后在对应项目下显示':'')+'</div>',false);
+      (r.applied?' · '+agyApplyHint(tgt):'')+'</div>',false);
     toast((r.applied?"已写入 → ":"已导出 → ")+tgt);
   }catch(e){
     showTreeExportRes('<div class="rt">'+ERRIC+'导出失败</div><div class="hint">'+esc(e.message)+'</div>',true);
@@ -5431,21 +6291,26 @@ async function quickExportConv(btn){
   btn.disabled=false;btn.textContent=old;
 }
 async function quickExportProj(btn){
-  const proj=btn.dataset.proj,name=btn.dataset.name||proj;
+  const proj=btn.dataset.proj,name=btn.dataset.name||proj,cnt=btn.dataset.count||"全部";
   const tgt=($("#tree-tgt")&&$("#tree-tgt").value)||treeTarget||"antigravity";
-  const apply=(tgt!=="markdown")&&!!(($("#tree-apply")&&$("#tree-apply").checked)||treeApply);
+  const canApply=tgt==="codex"||tgt==="claude"||tgt==="antigravity"||tgt==="zcode";
+  const apply=canApply&&!!(($("#tree-apply")&&$("#tree-apply").checked)||treeApply);
+  if(apply){
+    if(!await askConfirm("项目: "+name+"（"+cnt+" 条主对话）\n目标: "+agyTargetLabel(tgt)+"\n\n将批量写入目标工具的真实会话目录。", "确认批量写入真实目录", "确认写入"))return;
+  }
   const old=btn.textContent;
   btn.disabled=true;btn.textContent="批量导出中…";
   try{
     const body={project:proj,target:tgt,apply:apply};
     if(treeAgent)body.agent=treeAgent;
+    if(treeArchived)body.archived=true;
     const r=await api("/migrate_project",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify(body)});
     showTreeExportRes(
       '<div class="rt">'+GOOD+(r.applied?'已批量导入项目「':'已批量导出项目「')+esc(name)+'」共 '+num(r.count||0)+' 条主对话 → '+esc(tgt)+'</div>'+
       '<div class="path-row"><span class="hint">输出目录:</span><span class="mono" style="word-break:break-all">'+esc(r.dest_dir||"")+'</span>'+
       '<button class="btn sm" data-v="'+esc(r.dest_dir||"")+'" onclick="copyData(this,\'已复制输出目录\')">复制目录</button></div>'+
-      '<div class="hint">共 '+num(r.total_lines||0)+' 行 · '+(r.applied?(tgt==="antigravity"?'已写入 conversations 目录，完全重启 Antigravity 生效':'已全部写入目标原生会话目录'):'产物已全部落入 vault/outbox/')+'</div>',false);
+      '<div class="hint">共 '+num(r.total_lines||0)+' 行 · '+(r.applied?agyApplyHint(tgt):'产物已全部落入 vault/outbox/')+'</div>',false);
     toast((r.applied?"已导入项目「":"已导出项目「")+name+"」×"+num(r.count||0));
   }catch(e){
     showTreeExportRes('<div class="rt">'+ERRIC+'批量导出失败</div><div class="hint">'+esc(e.message)+'</div>',true);
@@ -5467,17 +6332,16 @@ async function renderSnaps(){
   }
 }
 const sidBtn=sid=>"<button class='linklike sid' title=\""+esc(sid)+"（点击打开详情）\" onclick=\"event.stopPropagation();snapDetail('"+sid+"')\">"+esc(shortSid(sid))+"</button>";
-/* 复制类按钮经 data-v 传值: Windows 路径反斜杠不会被 onclick 里的字符串字面量转义吃掉 */
 const copyBtn=sid=>"<button class='btn sm' title='复制完整 SID' aria-label='复制 SID' data-v=\""+esc(sid)+"\" onclick=\"event.stopPropagation();copyData(this,'已复制完整 SID')\">复制 SID</button>";
 function copyData(btn,msg){copyText(btn.dataset.v,msg||"已复制")}
 function copySid(sid){copyText(sid,"已复制完整 SID: "+sid)}
 function renderSnapTable(rows,opt){
   let meta="";
   if(opt.search){
-    meta='搜索「'+esc(opt.search)+'」— <b class="num">'+num(opt.hits||0)+"</b> 条命中"+
-      ' <button class="xbtn" onclick="loadSnaps()">清空搜索 ×</button>';
+    meta='筛选「'+esc(opt.search)+'」— <b class="num">'+num(opt.hits||0)+"</b> 条命中"+
+      ' <button class="xbtn" onclick="loadSnaps()">清空筛选 ×</button>';
   }else if(snapLeaves){
-    meta="最近入库 · 共 <b class='num'>"+num(opt.total||0)+"</b> 个会话 (每会话显示最新版本 · 库存 <b class='num'>"+
+    meta="最近入库 · 共 <b class='num'>"+num(opt.total||0)+"</b> 个独立会话 (每会话显示最新版本 · 库存 <b class='num'>"+
       num(opt.versionsTotal||opt.total||0)+"</b> 个快照版本)";
   }else{
     meta="最近入库 · 共 <b class='num'>"+num(opt.total||0)+"</b> 个快照版本 (含演进历史版本)";
@@ -5493,65 +6357,75 @@ function renderSnapTable(rows,opt){
   if(!rows.length){
     body=opt.search
       ?'<div class="empty">'+WARN+'<div>没有命中「'+esc(opt.search)+'」— 换个关键词试试：项目名、文件路径、任务描述都行</div>'+
-       '<button class="btn" onclick="loadSnaps()">清空搜索，显示最近</button></div>'
-      :'<div class="empty">vault 还是空的<br>导出第一个会话：<code>python tools/cv.py sync</code>'+
-       '<br>或单文件：<code>python tools/cv.py export ~/.codex/sessions/…/rollout-*.jsonl</code></div>';
+       '<button class="btn" onclick="loadSnaps()">清空筛选，显示最近</button></div>'
+      :'<div class="empty">vault 还是空的<br>点右上角 <b>↻ 立即同步</b> 或运行：<code>python tools/cv.py sync</code></div>';
   }else{
     body='<div class="cardbox">'+
       table(opt.search
-        ?["快照","会话摘要","来源","得分","完整性","时间","目录",""]
-        :["快照","会话摘要","来源","块数","完整性","时间","目录",""],
-        rows.map(r=>{const tr=[sidBtn(r.sid)+(r.versions>1?' <span class="chip" title="该会话共 '+
-            num(r.versions)+' 个演进版本 (此行为最新版本)">×'+num(r.versions)+"</span>":""),
-          sumCell(r.first),agentCell(r.agent),
-          {t:opt.search?num(Math.round(r.score)):num(r.blocks),num:1},
-          compCell(r.completeness),
-          '<span class="mono nowr" title="'+esc(r.created_at||"")+'">'+ftime(r.created_at)+"</span>",
-          dirCell(r.cwd,30),copyBtn(r.sid)];
-          tr.__tr='class="rowlink" tabindex="0" role="button" aria-label="打开快照详情 '+esc(shortSid(r.sid))+
-            '" onclick="snapDetail(\''+r.sid+'\',\''+(r.created_at||"")+'\')" '+
-            'onkeydown="if(event.key===\'Enter\')snapDetail(\''+r.sid+'\',\''+(r.created_at||"")+'\')"';
-          return tr}),"tbl-44")+"</div>";
+        ?["快照","会话摘要","来源","得分","时间","目录",""]
+        :["快照","会话摘要","来源","块数","时间","目录",""],
+        rows.map(r=>{
+          const srcHtml=agentCell(r.agent)+(r.completeness&&r.completeness!=="full"
+            ?' <span class="chip warn" title="转录不完整: '+esc(r.completeness)+'">!</span>':"");
+          const verHtml=r.versions>1?'<span class="mini-tag" title="共 '+num(r.versions)+' 个版本">×'+num(r.versions)+'</span>':"";
+          const tr=['<span class="sid-wrap">'+sidBtn(r.sid)+verHtml+'</span>',
+            sumCell(r.first),srcHtml,
+            {t:opt.search?num(Math.round(r.score)):num(r.blocks),num:1},
+            '<span class="mono nowr" title="'+esc(r.created_at||"")+'">'+ftime(r.created_at)+"</span>",
+            dirCell(r.cwd,22),copyBtn(r.sid)];
+          tr.__tr='class="rowlink" onclick="snapDetail(\''+r.sid+'\',\''+(r.created_at||"")+'\')"';
+          return tr}),"tbl-44 fixed-cols tbl-snap")+"</div>";
   }
   const pg=opt.search?"":pager(opt.total||0,opt.rows||0);
   $("#snap-list").innerHTML=pg+body+(opt.search?"":pg);
 }
 
 /* ================= 快照详情抽屉 ================= */
-let drawerOpen=false,lastFocus=null;
+const drawerIsOpen=()=>$("#drawer").open;
 function openDrawer(){
-  if(drawerOpen)return;drawerOpen=true;lastFocus=document.activeElement;
-  const d=$("#drawer"),b=$("#backdrop");d.hidden=false;b.hidden=false;
-  void d.offsetHeight; /* 同步 reflow 触发过渡 */
-  d.classList.add("show");b.classList.add("show");
-  $("#dw-close").focus();
+  const d=$("#drawer");
+  if(d.open)return;
+  d.showModal();
 }
 function closeDrawer(){
-  if(!drawerOpen)return;drawerOpen=false;
-  const d=$("#drawer"),b=$("#backdrop");
-  d.classList.remove("show");b.classList.remove("show");
-  setTimeout(()=>{if(drawerOpen)return;  /* 关后 220ms 内已重开: 旧定时器不得把开着抽屉藏掉 (曾卡死 drawerOpen, 全面测试 M12) */
-    d.hidden=true;b.hidden=true},220);
-  if(lastFocus&&lastFocus.focus)lastFocus.focus();
+  const d=$("#drawer");
+  if(d.open)d.close();
 }
-document.addEventListener("keydown",e=>{
-  if(e.key==="Escape")closeDrawer();
-  if(e.key==="Tab"&&drawerOpen){ /* 焦点陷阱 */
-    const f=$("#drawer").querySelectorAll("button,[href],input,select,textarea");
-    if(!f.length)return;
-    const first=f[0],last=f[f.length-1];
-    if(e.shiftKey&&document.activeElement===first){last.focus();e.preventDefault()}
-    else if(!e.shiftKey&&document.activeElement===last){first.focus();e.preventDefault()}
-  }});
-$("#backdrop").addEventListener("click",closeDrawer);
 
-let dwSeq=0;  /* 抽屉竞态守卫: 慢响应不得覆盖用户已切换到的快照 (二轮 console-2) */
-function toMig(sid){ /* "迁移此快照 →": 曾引用未定义的 toMig, 点击直接报错 */
+let confirmRes=null;
+$("#confirm-dlg").addEventListener("close",()=>{
+  const v=$("#confirm-dlg").returnValue;
+  $("#confirm-dlg").returnValue="";
+  $("#confirm-t").textContent="确认写入真实会话目录";
+  $("#confirm-ok").textContent="确认写入";
+  const r=confirmRes;confirmRes=null;
+  if(r)r(v==="ok");
+});
+const askConfirm=(msg,title,okText)=>new Promise(res=>{confirmRes=res;
+  $("#confirm-t").textContent=title||"确认写入真实会话目录";
+  $("#confirm-ok").textContent=okText||"确认写入";
+  $("#confirm-msg").textContent=msg;
+  $("#confirm-dlg").showModal();});
+
+let dwSeq=0;
+async function toMig(sid){
   closeDrawer();setTab("mig");
+  const ms=$("#mig-search");if(ms)ms.value="";
+  const clr=$("#mig-filter-clr");if(clr)clr.hidden=true;
   const sel=$("#mig-sid");
   const pick=()=>{const o=[...sel.options].find(x=>x.value===sid);if(o){sel.value=sid;onMigSource();return true}return false};
   if(sel.dataset.filled==="1"&&pick())return;
-  delete sel.dataset.filled;fillMig().then(()=>{if(!pick())toast("该快照不在最近 50 条里 — 请在迁移页搜索选择")}).catch(()=>{});
+  if(!sel.dataset.filled){delete sel.dataset.filled;await fillMig().catch(()=>{});if(pick())return}
+  /* 老快照不在最近 200 条里: 直接拉 /snapshot 注入选项并立即预览, 不再失败阻断 */
+  try{
+    const d=await api("/snapshot?id="+encodeURIComponent(sid));
+    const c=d.capture||{};
+    const lbl=esc(shortSid(sid))+" · "+esc(c.agent||"?")+" · "+esc(truncPath(c.cwd||"",24))+"（详情带入）";
+    const optHtml='<option value="'+esc(sid)+'">'+lbl+'</option>';
+    sel.innerHTML=optHtml+(sel.innerHTML||"");
+    sel.value=sid;
+    onMigSource();
+  }catch(e){toast("未能载入该快照: "+String(e&&e.message||e),1)}
 }
 async function snapDetail(sid,ts){
   const my=++dwSeq;
@@ -5590,7 +6464,7 @@ async function snapDetail(sid,ts){
       "<div class='dw-actions'>"+
       "<button class='btn primary' onclick=\"toMig('"+sid+"')\">迁移此快照 →</button>"+
       "<button class='btn' onclick=\"copySid('"+sid+"')\">复制 SID</button></div>";
-    (async()=>{ /* 会话时间线: 该会话全部版本按天分组 (leaf=当前版本) */
+    (async()=>{
       try{
         const tl=await api("/timeline?session="+encodeURIComponent(c.session_ref||"")+"&agent="+encodeURIComponent(c.agent||""));
         if(my!==dwSeq)return;
@@ -5607,26 +6481,80 @@ async function snapDetail(sid,ts){
 }
 const kv=(k,v)=>"<b>"+k+"</b><span>"+(v==null?"—":v)+"</span>";
 
-/* ================= 迁移工作台 ================= */
-const migSeq=seqGuard(null);
-let migApply=false,migLastPreview=null;
+/* ================= 迁移工作台 (支持全库即时搜源 + 一屏双栏预览执行) ================= */
+const migSeq=seqGuard(),migPoolSeq=seqGuard();
+let migLastPreview=null,migRecentRows=[],migFilterTimer=null;
 
+function migOptionHtml(rows){
+  return rows.map(r=>{
+    const sum=r.first?cleanSummary(r.first).text.slice(0,26):"";
+    const dir=r.cwd?truncPath(r.cwd,18):"";
+    const meta=[shortSid(r.sid),r.agent||"?",sum||dir||"",ftime(r.created_at)].filter(Boolean).join(" · ");
+    return '<option value="'+esc(r.sid)+'">'+esc(meta)+"</option>";
+  }).join("");
+}
 async function fillMig(){
   let d=null;
-  try{d=await api("/recent?limit=50&offset=0")}
-  catch(e){ /* 网络失败不得谎报"vault 为空", 也不置 filled — 下次进分区自动重拉 (全面测试 M14) */
+  try{d=await migPoolSeq(()=>api("/recent?limit=200&offset=0&leaves=1"))}
+  catch(e){
+    if(e&&e.stale)return;
     $("#mig-sid").innerHTML='<option value="">加载失败 — 服务异常</option>';
     $("#mig-src-meta").innerHTML="<span class='hint'>加载失败: "+esc(String(e&&e.message||e))+"</span>";
     $("#mig-preview").innerHTML='<div class="mig-idle">快照列表加载失败 — 服务恢复后重进本页重试。</div>';
     return}
-  const rows=d.rows||[];
+  migRecentRows=d.rows||[];
   const sel=$("#mig-sid");
   sel.dataset.filled="1";
-  sel.innerHTML=rows.length
-    ?rows.map(r=>'<option value="'+r.sid+'">'+esc(shortSid(r.sid))+" · "+esc(r.agent||"?")+" · "+
-      num(r.blocks)+" 块 · "+ftime(r.created_at)+"</option>").join("")
-    :'<option value="">（vault 为空 — 先 cv sync 入库）</option>';
+  const hint=$("#mig-pool-hint");
+  if(hint)hint.textContent="已载入 "+num(migRecentRows.length)+" 个独立会话 · 支持搜全库";
+  sel.innerHTML=migRecentRows.length
+    ?migOptionHtml(migRecentRows)
+    :'<option value="">（vault 为空 — 先 ↻ 立即同步）</option>';
   onMigSource();
+}
+function onMigFilterInput(){
+  const q=($("#mig-search")&&$("#mig-search").value||"").trim();
+  const clr=$("#mig-filter-clr");if(clr)clr.hidden=!q;
+  clearTimeout(migFilterTimer);
+  migFilterTimer=setTimeout(()=>migSearchPool(false),220);
+}
+function clearMigFilter(){
+  const ms=$("#mig-search");if(ms)ms.value="";
+  const clr=$("#mig-filter-clr");if(clr)clr.hidden=true;
+  const sel=$("#mig-sid");
+  sel.innerHTML=migRecentRows.length?migOptionHtml(migRecentRows):'<option value="">（无快照）</option>';
+  const hint=$("#mig-pool-hint");if(hint)hint.textContent="已载入 "+num(migRecentRows.length)+" 个独立会话 · 支持搜全库";
+  onMigSource();
+}
+async function migSearchPool(showToast){
+  const q=($("#mig-search")&&$("#mig-search").value||"").trim();
+  if(!q){clearMigFilter();return}
+  const sel=$("#mig-sid"),hint=$("#mig-pool-hint");
+  try{
+    if(/^cv_[0-9a-f]{8,64}$/i.test(q)){
+      const s=await migPoolSeq(()=>api("/snapshot?id="+encodeURIComponent(q)));
+      const c=s.capture||{};
+      const row=[{sid:q,agent:c.agent,first:c.cwd||"",cwd:c.cwd,created_at:""}];
+      sel.innerHTML=migOptionHtml(row);
+      if(hint)hint.textContent="按精确 SID 匹配";
+      onMigSource();return;
+    }
+    const d=await migPoolSeq(()=>api("/search?q="+encodeURIComponent(q)+"&limit=30"));
+    const hits=d.hits||[];
+    const ql=q.toLowerCase();
+    const local=migRecentRows.filter(r=>(r.sid||"").toLowerCase().includes(ql)||
+      (r.first||"").toLowerCase().includes(ql)||(r.cwd||"").toLowerCase().includes(ql)||
+      (r.agent||"").toLowerCase().includes(ql));
+    const seen=new Set();const merged=[];
+    for(const r of [...hits,...local]){if(r&&r.sid&&!seen.has(r.sid)){seen.add(r.sid);merged.push(r)}}
+    sel.innerHTML=merged.length?migOptionHtml(merged):'<option value="">未检索到匹配「'+esc(q)+'」的快照</option>';
+    if(hint)hint.textContent="检索命中 "+num(merged.length)+" 条";
+    if(showToast&&!merged.length)toast("未找到匹配「"+q+"」的快照",1);
+    onMigSource();
+  }catch(e){
+    if(e&&e.stale)return;
+    if(showToast)toast("检索失败: "+String(e&&e.message||e),1);
+  }
 }
 function migTarget(){const r=document.querySelector('input[name=tgt]:checked');return r?r.value:"codex"}
 function onMigTarget(){
@@ -5635,22 +6563,15 @@ function onMigTarget(){
   const outOnly=t==="markdown";
   $("#mig-md-note").style.display=outOnly?"block":"none";
   if(outOnly)$("#mig-md-note").textContent="Markdown 目标始终导出到 outbox，无写入会话目录语义。";
-  $("#apply-toggle").style.display=outOnly?"none":"flex";
-  if(outOnly&&migApply)setApply(false);
   $("#mig-outbox").textContent=outOnly?"导出交接简报（始终 outbox）":"生成到 outbox（安全）";
   $("#mig-apply").style.display=outOnly?"none":"inline-flex";
-  renderMigPreview();  /* 目标相关损失/命令与目标绑定 — 重校准渲染, 不重复请求 */
-}
-function setApply(v){
-  migApply=v;
-  $$("#apply-toggle button").forEach(b=>{const on=(b.dataset.apply==="1")===v;
-    b.classList.toggle("on",on);b.classList.toggle("risky",on&&v)});
+  renderMigPreview();
 }
 function onMigSource(){
   const sel=$("#mig-sid");
   const opt=sel.options[sel.selectedIndex];
-  $("#mig-src-meta").innerHTML=(!opt||!opt.value)?"<span class='hint'>无可用快照 — 先 <code>cv sync</code> 入库</span>"
-    :"已选 <span class='mono'>"+esc(opt.value)+"</span> · "+esc((opt.textContent||"").split(" · ").slice(1).join(" · "));
+  $("#mig-src-meta").innerHTML=(!opt||!opt.value)?"<span class='hint'>无可用快照 — 先 <b>↻ 立即同步</b> 或搜其他关键词</span>"
+    :"已选 <span class='mono'>"+esc(opt.value)+"</span>";
   migPreview();
 }
 function migExecEnabled(on){
@@ -5660,7 +6581,7 @@ function migExecEnabled(on){
 }
 async function migPreview(){
   const id=$("#mig-sid").value;
-  if(!id){$("#mig-preview").innerHTML='<div class="mig-idle">vault 为空 — 先 <code>cv sync</code> 或 <code>cv export</code> 入库后再迁移。</div>';
+  if(!id){$("#mig-preview").innerHTML='<div class="mig-idle">暂无已选快照 — 在左侧搜索关键词或点击右上角 <b>↻ 立即同步</b>。</div>';
     migExecEnabled(false);return}
   $("#mig-preview").innerHTML='<div class="skel" style="width:55%"></div><div class="skel" style="width:75%"></div><div class="skel" style="width:40%"></div>';
   migLastPreview=null;migExecEnabled(false);
@@ -5683,9 +6604,9 @@ function immList(p){
   return imm;
 }
 function targetLossNote(t){
-  /* 目标绑定损失: 现有 /preview 不含逐目标损失明细 — 如实标注, 不冒充完整 */
   if(t==="markdown")return "Markdown 是降级档：仅保留停点/最近动作/活上下文尾部摘要，工具调用配对细节不进简报。";
   if(t==="antigravity")return "Antigravity 目标：经 smigrate 转换并自动补步级时间戳与项目目录；产物落 vault/outbox/，导入后出现在 Conversations 列表。";
+  if(t==="zcode")return "ZCode 写回（实验性）：转换为 ZCode session/message/part 写入主库；执行写入前自动先备份 ZCode 数据库。";
   if(t==="codex")return "Codex 目标：developer 注入块被过滤（由目标运行时重新注入）；未配对 tool_result 逐条计数进迁移报告。";
   if(t==="claude")return "Claude Code 目标：developer 注入块被过滤；未配对 tool_result 逐条计数进迁移报告。";
   return "";
@@ -5695,7 +6616,6 @@ function renderMigPreview(){
   if(!p)return;
   const t=migTarget();
   const imm=immList(p);
-  /* 源画像: 填充步骤①并给迁移前决策所需信息 (agent/完整性/目录/历史累计输入) */
   const prof=document.getElementById("mig-src-profile");
   if(prof)prof.innerHTML=
     "<div class='chips'>"+
@@ -5704,24 +6624,21 @@ function renderMigPreview(){
     "</div>"+
     "<div class='kv'>"+kv("项目目录",esc(p.cwd||"—"))+
     kv("历史累计输入",num(p.history_tokens_in)+" tokens（源口径）")+"</div>";
-  /* 预览结构: 顶部横向摘要条 (按宽度自然铺满) + 下两栏 (左=丢失/降级, 右=恢复命令) —
-     曾用左右等分放两行 kv, 空洞只是从右边挪到左边 (用户 11-08 二次反馈) */
   $("#mig-preview").innerHTML=
     '<div class="pv-stats">'+
-    '<span class="stat-inline">活上下文 <b>'+num(p.live_blocks)+"</b> 块 · ~"+num(p.live_tokens_est)+" tokens</span>"+
-    (p.compactions?'<span class="stat-inline">压缩边界 '+num(p.compactions)+" 次</span>":"")+
+    '<span class="stat-inline">活上下文 <b>'+num(p.live_blocks)+"</b> 块 · ~"+num(p.live_tokens_est)+" tok</span>"+
+    (p.compactions?'<span class="stat-inline">压缩边界 <b>'+num(p.compactions)+"</b> 次</span>":"")+
     '<span class="stat-inline">构成 <b>'+(Object.entries(p.live_dist||{}).map(([k,v])=>esc(k)+"×"+num(v)).join(" · ")||"—")+"</b></span>"+
-    '<span class="stat-inline">历史累计输入 <b>'+num(p.history_tokens_in)+"</b> tokens（源口径）</span>"+
+    '<span class="stat-inline">累计输入 <b>'+num(p.history_tokens_in)+"</b> tok</span>"+
     "</div>"+
     '<div class="pv-cols">'+
-    '<div><h3 class="sec">丢失 / 降级</h3>'+
+    '<div><h3 class="sec">丢失 / 降级说明</h3>'+
     '<ul class="immlist">'+(imm.length?imm.map(i=>"<li>"+WARN+"<span>"+i+"</span></li>").join("")
       :"<li class='good'>"+GOOD+"源端无已知损失项</li>")+"</ul>"+
-    '<div class="section-note">'+esc(targetLossNote(t))+
-    "（现有 /preview 接口未提供逐目标的处理明细 — 以执行后迁移报告的逐条计数为准）</div></div>"+
-    '<div><h3 class="sec">恢复命令</h3><div class="term"><span class="tp">按执行结果里的真实 session id / 文件生成</span>'+
+    '<div class="section-note">'+esc(targetLossNote(t))+"</div></div>"+
+    '<div><h3 class="sec">恢复命令（执行后生成真实 ID）</h3><div class="term"><span class="tp">预览命令</span>'+
     '<code id="mig-cmd">$ '+esc(previewCmd(t))+"</code></div>"+
-    '<div class="hint" style="margin-top:10px">执行后此处会替换为带真实 session id / 文件名的可复制命令。</div></div>'+
+    '<div class="hint" style="margin-top:8px">点击下方执行按钮，结果将替换为可直接复制的精确命令。</div></div>'+
     "</div>";
   migExecEnabled(true);
 }
@@ -5729,6 +6646,7 @@ function previewCmd(t){
   if(t==="claude")return "claude --resume";
   if(t==="markdown")return "code vault/outbox/brief-*.md";
   if(t==="antigravity")return "dir vault\\outbox\\harness-antigravity-*.json";
+  if(t==="zcode")return "zcode  # 写入模式直接入主库，重启 ZCode 生效";
   return "codex resume";
 }
 async function migGo(apply){
@@ -5737,8 +6655,8 @@ async function migGo(apply){
   if(!migLastPreview)return toast("预览未就绪，不能执行",1);
   if(apply){
     const sel=$("#mig-sid");const label=sel.options[sel.selectedIndex]?sel.options[sel.selectedIndex].textContent:id;
-    const tgtName=t==="codex"?"Codex 会话目录":(t==="antigravity"?"Antigravity conversations 目录（需重启 Antigravity 生效）":"Claude Code projects 目录");
-    if(!confirm("确认写入真实会话目录？\n\n源快照: "+label+"\n目标: "+tgtName+"\n\n目标 agent 的会话列表将出现此会话。"))return;
+    const tgtName=agyTargetLabel(t);
+    if(!await askConfirm("源快照: "+label+"\n目标: "+tgtName+"\n\n目标 agent 的会话列表将出现此会话。"))return;
   }
   const btns=[$("#mig-outbox"),$("#mig-apply")];
   btns.forEach(b=>b&&(b.disabled=true));
@@ -5770,6 +6688,8 @@ function renderMigResult(r,ctx){
     cmdNote=r.applied?"会话 id = 写入文件名 (uuid)":"outbox 产物 — 写入模式才会进 projects 目录";
   }else if(ctx.target==="antigravity"){
     cmd=fpath;cmdNote=r.applied?"已写入 Antigravity conversations 目录，完全关闭并重启 Antigravity 后在对应项目下显示":"outbox 产物（已对齐原生步骤与项目结构）— 选择写入真实目录或 --apply 可直接落盘";
+  }else if(ctx.target==="zcode"){
+    cmd=fpath;cmdNote=r.applied?"已写回 ZCode 主库（已先备份原库），完全关闭并重启 ZCode 后在对应项目列表出现":"outbox 产物（ZCode payload）— 选择写入真实目录或 --apply 可写回主库";
   }else{
     cmd="code \""+fpath+"\"";cmdNote="Markdown 简报 — 任意 agent / 编辑器可读";
   }
@@ -5778,7 +6698,7 @@ function renderMigResult(r,ctx){
     (r.applied?"已写入目标会话目录":"已生成到 vault/outbox/")+
     (ctx.target==="markdown"?"（交接简报）":"")+"</div>"+
     '<div class="path-row"><span class="hint">文件:</span><span class="mono" style="word-break:break-all">'+esc(fpath)+"</span>"+
-    '<button class="btn sm" data-v="'+esc(fpath)+'" onclick="copyData(this,\'已复制路径\')">复制路径</button></div>'+
+    '<button class="btn sm" data-v="'+esc(fpath)+'" onclick="copyData(this,\'已复制文件路径\')">复制路径</button></div>'+
     '<div class="hint">'+num(r.lines)+" 行"+(r.dropped?" · 丢弃未配对 tool_result ×"+num(r.dropped):" · 无丢弃")+
     (r.new_sid?" · session id <span class='mono'>"+esc(r.new_sid)+"</span>":"")+"</div>"+
     '<div class="term"><span class="tp">'+esc(cmdNote)+"</span><code>$ "+esc(cmd)+
@@ -5786,7 +6706,7 @@ function renderMigResult(r,ctx){
 }
 
 /* ================= 哨兵 ================= */
-const probeSeq=seqGuard(null);
+const probeSeq=seqGuard();
 const shortModels=s=>{try{const m=JSON.parse(s);return m.by_agent?Object.entries(m.by_agent).map(([k,v])=>k+"×"+v).join(" · ")+" 活跃会话":""}catch(e){return""}};
 function probeStateOf(rows){
   if(!rows.length)return {cls:"off",txt:"未配置 / 暂无探测记录"};
@@ -5796,7 +6716,7 @@ function probeStateOf(rows){
   const missing=states.some(r=>r.missing_models&&r.missing_models!=="[]");
   const err=states.some(r=>r.status==="http_error"||r.status==="error");
   if(missing)return {cls:"err",txt:"模型缺失 — 见事件详情"};
-  if(err)return {cls:"err",txt:"存在失败节点 — 见事件详情"};
+  if(err)return {cls:"err",txt:"存在异常节点 — 见事件详情"};
   const okAll=states.every(r=>r.status==="ok");
   if(okAll)return {cls:"ok",txt:states.length+" 个节点最近探测正常（基于最近样本）"};
   return {cls:"warn",txt:"部分节点待确认 — 见事件详情"};
@@ -5805,21 +6725,20 @@ async function loadProbe(){
   const el=$("#probe-list");
   el.innerHTML='<div class="skel" style="width:60%"></div><div class="skel" style="width:45%"></div>';
   try{
-    const rows=(await probeSeq(()=>api("/probe_events?limit=200"))).filter(r=>r.status!=="prune");  /* GC 留痕不是探测样本 — 曾污染 ok 率/节点数/状态 (二轮 console-3) */
+    const rows=(await probeSeq(()=>api("/probe_events?limit=200"))).filter(r=>r.status!=="prune");
     const st=probeStateOf(rows);
     $("#probe-state").className="probe-state "+st.cls;
     $("#probe-state").innerHTML='<span class="dot '+st.cls+'"></span>'+esc(st.txt);
-    $("#probe-last").textContent=rows.length?("最新事件 "+frel(rows[0].ts)+" · 30 秒自动刷新（仅本页可见时）"):"";
-    /* 头部统计: 明确"最近样本"口径 */
+    $("#probe-last").textContent=rows.length?("最新样本 "+frel(rows[0].ts)+" · 仅本页可见时每 30s 自动刷新"):"";
     const nodes=new Set(rows.map(r=>r.profile).filter(Boolean));
     const okN=rows.filter(r=>r.status==="ok").length;
     const lats=rows.filter(r=>r.status==="ok"&&r.latency_ms).map(r=>r.latency_ms);
     $("#sn-nodes").textContent=nodes.size||"—";
-    $("#sn-avail").textContent=rows.length?((okN/rows.length)*100).toFixed(1)+"%（"+okN+"/"+rows.length+"）":"—";
-    $("#sn-avail-wrap").title="口径: 最近 "+rows.length+" 条事件 (即下方样本) 内 status=ok 的占比 — 非全天可用率";
+    $("#sn-avail").textContent=rows.length?((okN/rows.length)*100).toFixed(1)+"% ("+okN+"/"+rows.length+")":"—";
+    $("#sn-avail-wrap").title="口径: 最近 "+rows.length+" 条事件内正常响应占比 — 非全天可用率";
     $("#sn-lat").textContent=lats.length?Math.round(lats.reduce((a,b)=>a+b,0)/lats.length)+" ms":"—";
-    $("#sn-note").textContent=rows.length?("样本: 最近 "+rows.length+" 条事件（/probe_events limit=200）"):"尚无样本";
-    /* 逐节点最新状态 */
+    $("#sn-note").textContent=rows.length?("最近 "+rows.length+" 条事件（limit=200）"):"尚无样本";
+
     const by={};
     rows.forEach(r=>{if(r.profile&&!(r.profile in by))by[r.profile]=r});
     const profs=Object.entries(by);
@@ -5828,31 +6747,34 @@ async function loadProbe(){
       const txt=r.missing_models&&r.missing_models!=="[]"?("模型缺失 "+r.missing_models)
         :r.status==="ok"?("HTTP "+(r.http_code||200)+" · "+(r.latency_ms||"—")+" ms · 模型可用")
         :r.status==="switch"?("切换检测 · "+(shortModels(r.models)||"profile 变更"))
-        :(r.status==="http_error"||r.status==="error")?("HTTP "+(r.http_code||"—")+" · 上游无响应 / 非 2xx")
+        :(r.status==="http_error"||r.status==="error")?("HTTP "+(r.http_code||"无响应")+" · 上游异常")
         :esc(r.status||"—");
-      return '<span class="chip" style="margin:0 8px 8px 0"><span class="dot '+cls+'" style="margin-right:6px"></span>'+relayBadge(p)+" "+esc(txt)+"</span>";
+      return '<span class="chip" style="margin:0 8px 8px 0"><span class="dot '+cls+'"></span><b class="mono">'+esc(formatNodeId(p))+'</b><span class="hint">· '+esc(txt)+'</span></span>';
     }).join(""):"";
+
     const httpCell=r=>{
-      if(r.status==="ok")return '<span class="pill ok">'+(r.http_code||200)+" OK</span>";
-      if(r.status==="switch")return '<span class="pill warn">SWITCH</span>';
-      if(r.status==="http_error"||r.status==="error")return '<span class="pill err">'+(r.http_code||"ERR")+" ERR</span>";
+      if(r.status==="ok")return '<span class="pill ok">'+(r.http_code||200)+" 正常</span>";
+      if(r.status==="switch")return '<span class="pill warn">节点切换</span>';
+      if(r.status==="http_error"||r.status==="error")return '<span class="pill err">'+(r.http_code?(r.http_code+" 异常"):"无响应")+"</span>";
       return '<span class="pill warn">'+esc(r.status||"—")+"</span>"};
     const latCell=r=>{
       if(!r.latency_ms)return '<span class="hint">—</span>';
+      if(r.status!=="ok")return '<span class="lat muted">'+r.latency_ms+" ms</span>";
       const v=r.latency_ms;const cls=v<800?"good":v<=1500?"mid":"warm";
       const pct=Math.min(100,Math.round(v/2000*100));
       return '<span class="lat '+cls+'">'+v+" ms"+'<span class="latbar"><i style="width:'+pct+'%"></i></span></span>'};
     const detCell=r=>{
       if(r.missing_models&&r.missing_models!=="[]")return '<span style="color:var(--err)">模型消失 '+esc(r.missing_models)+"</span>";
-      if(r.status==="ok")return '<span class="hint">模型可用性校验通过</span> <span class="mini-tag">GET /v1/models</span>';
+      if(r.status==="ok")return '<span class="hint">模型列表校验通过</span> <span class="mini-tag">GET /v1/models</span>';
       if(r.status==="switch")return '<span class="hint">切换检测 · '+esc(shortModels(r.models)||"profile 变更")+"</span>";
-      if(r.status==="http_error"||r.status==="error")return '<span class="hint">上游无响应 / 非 2xx</span>';
+      if(r.status==="http_error"||r.status==="error")return '<span class="hint">上游无响应 / 非 2xx 返回</span>';
       return '<span class="hint">—</span>'};
+
     el.innerHTML=rows.length?'<div class="cardbox">'+
-      table(["时间","上游节点 (Profile)","HTTP 状态","响应延迟","详情"],
+      table(["时间","监控节点","状态","响应延迟","详情"],
         rows.map(r=>{const cls=r.status==="ok"?"ok":(r.status==="warm"||r.status==="probe")?"warn":(r.status==="switch")?"sw":"err";
-          return ['<span class="dot '+cls+'"></span><span class="mono nowr" title="'+esc(r.ts||"")+'">'+ftime(r.ts)+"</span>",
-            relayBadge(r.profile),httpCell(r),latCell(r),detCell(r)]}))+"</div>"
+          return ['<span class="mono nowr" title="'+esc(r.ts||"")+'" style="display:inline-flex;align-items:center;gap:6px"><span class="dot '+cls+'"></span>'+ftime(r.ts)+"</span>",
+            '<span class="mono">'+esc(formatNodeId(r.profile))+"</span>",httpCell(r),latCell(r),detCell(r)]}),"fixed-cols tbl-probe")+"</div>"
       :'<div class="empty">'+WARN+'<div>暂无探测事件 — 还不能断言任何上游状态。</div>'+
        '<div class="hint" style="margin-top:6px;line-height:1.8">配置探测节点（二选一）：<br>'+
        '<code>~/.headroom/switcher-profiles.json</code> 或环境变量 <code>CV_RELAY_PROFILES=\'[{"id":"myrelay","openai_api_url":"https://host","default_model":"m"}]\'</code><br>'+
@@ -5891,7 +6813,7 @@ async function probeNow(){
 const h0=(location.hash||"").slice(1);
 setTab(TABS.includes(h0)?h0:"ov");
 boot();
-setInterval(()=>{  /* 哨兵 30s 轮询: 仅哨兵页可见且文档可见时 */
+setInterval(()=>{
   if($("#t-probe").style.display!=="none"&&document.visibilityState==="visible"){
     delete $("#probe-list").dataset.loaded;loadProbe()}
 },30000);
@@ -6241,6 +7163,30 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                         include_archived=(q.get("archived") == "1"),
                         agent=q.get("agent") or None,
                     ))
+                if u.path == "/antigravity/sync":
+                    only_ag = q["only_agent"].strip() or None if "only_agent" in q else "zcode"
+                    res = sync_antigravity_archived(
+                        vault,
+                        project=q.get("project") or None,
+                        apply=False,
+                        dedup=(q.get("dedup", "1") == "1"),
+                        only_agent=only_ag,
+                    )
+                    return self._json(self._agy_sync_json(res))
+                if u.path == "/antigravity/batch":
+                    try:
+                        lim = int(q.get("limit", 0) or 0)
+                    except ValueError:
+                        return self._json({"error": "invalid limit: 需要整数"}, 400)
+                    res = sync_to_antigravity_batch(
+                        vault,
+                        agent=q.get("agent", "zcode"),
+                        project=q.get("project") or None,
+                        include_archived=(q.get("archived") == "1"),
+                        limit=lim,
+                        apply=False,
+                    )
+                    return self._json(res)
                 if u.path == "/snapshot":
                     qid = q.get("id", "")
                     if not self._sid_ok(qid):
@@ -6256,9 +7202,46 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                             "routes": ["/", "/healthz", "/search?q=", "/context?q=", "/preview?id=",
                                        "/recent", "/projects", "/timeline?session=", "/stats",
                                        "/snapshot?id=", "/ledger", "/probe_events",
-                                       "POST /migrate", "POST /migrate_project", "POST /probe"]}, 404)
+                                       "/antigravity/sync", "/antigravity/batch",
+                                       "POST /sync", "POST /migrate", "POST /migrate_project",
+                                       "POST /antigravity/sync", "POST /antigravity/batch", "POST /probe"]}, 404)
             except Exception as e:
                 self._json({"error": str(e)}, 500)
+
+        @staticmethod
+        def _agy_sync_json(res: dict) -> dict:
+            return {
+                "applied": res["applied"],
+                "targets_count": len(res["targets"]),
+                "targets": [
+                    {
+                        "cid": t["cid"],
+                        "sid": t["sid"],
+                        "agent": t["agent"],
+                        "cwd": t["cwd"],
+                        "title": t["title"],
+                        "reason": t["reason"],
+                        "has_db": t["has_db"],
+                        "has_summary": t["has_summary"],
+                        "has_proto": t["has_proto"],
+                    }
+                    for t in res["targets"]
+                ],
+                "empty_projects": [
+                    {"id": e["id"], "name": e["name"], "cwd": e["cwd"]}
+                    for e in res.get("empty_projects") or []
+                ],
+                "db_files": res["db_files"],
+                "summary_ids": res["summary_ids"],
+                "proto_ids": res["proto_ids"],
+                "dup_count": res["dup_count"],
+                "agent_count": res["agent_count"],
+                "removed_dbs": res["removed_dbs"],
+                "removed_projects": res.get("removed_projects", 0),
+                "cleaned_summaries": res["cleaned_summaries"],
+                "cleaned_proto": res["cleaned_proto"],
+                "summary_check_error": res.get("summary_check_error"),
+            }
 
         def do_POST(self):
             import urllib.parse as _up
@@ -6312,7 +7295,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     )
                     if not items:
                         return self._json({"error": f"未找到项目的顶层主对话: {proj}"}, 404)
-                    apply_flag = bool(body.get("apply")) and target in ("codex", "claude", "antigravity")
+                    apply_flag = bool(body.get("apply")) and target in ("codex", "claude", "antigravity", "zcode")
                     results = []
                     try:
                         for it in items:
@@ -6330,6 +7313,41 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                         "files": [r["dest"] for r in results],
                         "total_lines": sum(r["lines"] for r in results),
                     })
+                if u.path == "/sync":
+                    res = sync_vault(vault, debounce=bool(body.get("debounce")), quiet=True)
+                    idx.rebuild()
+                    return self._json(res)
+                if u.path == "/antigravity/sync":
+                    only_ag = str(body["only_agent"]).strip() or None if "only_agent" in body else "zcode"
+                    try:
+                        res = sync_antigravity_archived(
+                            vault,
+                            project=str(body.get("project") or "").strip() or None,
+                            apply=bool(body.get("apply")),
+                            dedup=bool(body.get("dedup", True)),
+                            only_agent=only_ag,
+                        )
+                    except BadMigrateTarget as e:
+                        return self._json({"error": str(e)}, 400)
+                    return self._json(self._agy_sync_json(res))
+                if u.path == "/antigravity/batch":
+                    try:
+                        lim = int(body.get("limit") or 0)
+                    except (TypeError, ValueError):
+                        return self._json({"error": "invalid limit: 需要整数"}, 400)
+                    ag = str(body.get("agent") if "agent" in body else "zcode").strip()
+                    try:
+                        res = sync_to_antigravity_batch(
+                            vault,
+                            agent=ag,
+                            project=str(body.get("project") or "").strip() or None,
+                            include_archived=bool(body.get("archived")),
+                            limit=lim,
+                            apply=bool(body.get("apply")),
+                        )
+                    except BadMigrateTarget as e:
+                        return self._json({"error": str(e)}, 400)
+                    return self._json(res)
                 if u.path == "/probe":
                     baseline_p = vault / "probe_baseline.json"
                     baseline = json.loads(baseline_p.read_text(encoding="utf-8")) if baseline_p.exists() else {}

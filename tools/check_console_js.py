@@ -22,7 +22,8 @@ js = re.search(r"<script>(.*)</script>", html, re.S).group(1)
 out = sys.argv[1] if len(sys.argv) > 1 else "emit"
 if out == "run":
     mock = ('const _el=()=>({innerHTML:"",textContent:"",classList:{add(){},toggle(){},remove(){}},style:{},'
-            'dataset:{},setAttribute(){},removeAttribute(){},addEventListener(){},options:[],value:""});'
+            'dataset:{},setAttribute(){},removeAttribute(){},addEventListener(){},options:[],value:"",'
+            'open:false,matches:()=>false,showModal(){},close(){},showPopover(){},hidePopover(){}});'
             'const document={querySelector:_el,querySelectorAll:()=>[],getElementById:_el,addEventListener(){},body:_el()};'
             'const location={search:"",hash:""};const window={addEventListener(){},location:{}};'
             'const navigator={clipboard:{writeText:async()=>{}}};'
@@ -38,7 +39,8 @@ elif out == "unit":
         'const _els={};'
         'const _el=k=>_els[k]||(_els[k]={innerHTML:"",textContent:"",value:"",hidden:false,style:{},'
         'dataset:{},options:[],offsetHeight:0,classList:{add(){},toggle(){},remove(){},contains:()=>false},'
-        'setAttribute(){},removeAttribute(){},addEventListener(){},focus(){}});'
+        'setAttribute(){},removeAttribute(){},addEventListener(){},focus(){},'
+        'open:false,matches:()=>false,showModal(){},close(){},showPopover(){},hidePopover(){}});'
         'const document={querySelector:s=>_el(s),querySelectorAll:()=>[],getElementById:s=>_el("#"+s),'
         'addEventListener(){},body:_el("body")};'
         'let _replace=null;'
@@ -65,6 +67,9 @@ elif out == "unit":
         'model_missing_events:0},total_events:2};'
         'if(u.indexOf("/search")===0)return DATA.search;'
         'if(u.indexOf("/healthz")===0)return {snapshots:1,terms:1};'
+        'if(u.indexOf("/sync")===0)return {new:1,updated:0,total:2};'
+        'if(u.indexOf("/antigravity/sync")===0)return {targets_count:1,targets:[{cid:"11111111",cwd:"D:\\\\proj",title:"arch",reason:"archived"}],empty_projects:[{id:"p1",name:"p1",cwd:"d:/p1"}],db_files:1,summary_ids:1,proto_ids:1};'
+        'if(u.indexOf("/antigravity/batch")===0)return {planned:1,skipped_done:1,skipped_dup:0,projects:[{cwd:"d:/proj",count:1}]};'
         'return {};}});'
         'process.on("unhandledRejection",e=>{console.error("unhandledRejection:",e);process.exit(9)});')
     tests = (
@@ -86,8 +91,14 @@ elif out == "unit":
         'await snapSearch();'
         'if(_el("#snap-list").innerHTML.indexOf("cardbox")<0){console.error("B06: 命中表格未渲染");process.exit(5);}'
         'await loadProjectTree();'
-        'if(_el("#snap-list").innerHTML.indexOf("proj-card")<0){console.error("T4: 项目树未渲染");process.exit(7);}'
-        'console.log("console unit OK: B03 token-strip / B04 loadOv / B06 empty+hit / T4 project-tree");'
+        'const sl=_el("#snap-list").innerHTML;'
+        'if(sl.indexOf("proj-card")<0||sl.indexOf("proj-sync")<0){console.error("T4: 项目树或同步条未渲染");process.exit(7);}'
+        'await agySyncPreview();'
+        'if(_el("#tree-export-res").innerHTML.indexOf("待清理 Antigravity")<0){console.error("A1: 清理预览未渲染");process.exit(8);}'
+        'await agyBatchPreview();'
+        'if(_el("#tree-export-res").innerHTML.indexOf("待补齐导入 Antigravity")<0){console.error("A2: 批导预览未渲染");process.exit(10);}'
+        'await syncVaultNow();'
+        'console.log("console unit OK: B03 token-strip / B04 loadOv / B06 empty+hit / T4 project-tree / sync+agy");'
         'process.exit(0);'
         '})().catch(e=>{console.error("unit failed:",(e&&e.message)||e);process.exit(6)});')
     Path("console_unit.js").write_text(mock + js + tests, encoding="utf-8")

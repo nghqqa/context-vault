@@ -7,7 +7,7 @@
 <meta name="description" content="把 AI 编程会话变成你自己机器上的中立资产：不可变快照、双向迁移、token 账本、跨会话记忆、MCP 后端。零依赖，数据不出机器。">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='2' y='6' width='12' height='8' rx='2' fill='%23c2402a'/><path d='M5 6V4a3 3 0 016 0v2' stroke='%23c2402a' stroke-width='2' fill='none'/></svg>">
 <style>
-:root{--bg:#fafafa;--bg1:#ffffff;--bg2:#f1ece1;--line:#e2ddd2;--ink:#09090b;--ink2:#71717a;--dim:#a1a1aa;--acc:#18181b;--warn:#d97706;--mono:ui-monospace,"Cascadia Code",Consolas,monospace}
+:root{--bg:#fafafa;--bg1:#ffffff;--bg2:#f1ece1;--line:#e2ddd2;--ink:#09090b;--ink2:#71717a;--dim:#71717a;--acc:#18181b;--warn:#d97706;--mono:ui-monospace,"Cascadia Code",Consolas,monospace}
 *{margin:0;box-sizing:border-box}
 body{background:var(--bg);color:var(--ink);font:15px/1.7 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
 a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
@@ -32,7 +32,8 @@ nav a{color:var(--ink2);margin-left:26px;font-size:14px}
 .term code{color:#e4e4e7;flex:1;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .term button{background:none;border:0;color:#a1a1aa;cursor:pointer;font-size:15px;padding:2px 4px}
 .term button.ok{color:#10b981}
-.hero .meta{margin-top:16px;color:#a1a1aa;font-size:13px}
+.term button.bad{color:#ef4444}
+.hero .meta{margin-top:16px;color:var(--dim);font-size:13px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;padding:22px 0 10px}
 .card{background:#fff;border:1px solid #e4e4e7;border-radius:12px;padding:20px;transition:border-color .15s,transform .15s,box-shadow .15s}
 .card:hover{border-color:#c8c8cc;transform:translateY(-2px);box-shadow:0 6px 16px rgba(9,9,11,.06)}
@@ -66,22 +67,22 @@ footer{border-top:1px solid var(--line);margin-top:80px;padding:30px 0 44px;colo
 </header>
 
 <section class="hero">
-  <div class="badge"><span class="bdot"></span>v0.5 · Local-First AI Asset Engine · MIT</div>
+  <div class="badge"><span class="bdot"></span>v0.6 · Local-First AI Asset Engine · MIT</div>
   <h1>换模型、换工具，<br>会话上下文<em>不再清零</em></h1>
   <p>Context Vault 把你的 AI 编程会话变成<b>你自己机器上的中立资产</b>：不可变快照、双向迁移、token 账本、跨会话记忆。agent 来来去去，vault 一直在。</p>
-  <div class="term"><span class="ps1">$</span><code>git clone https://github.com/nghqqa/context-vault</code><button onclick="navigator.clipboard.writeText('git clone https://github.com/nghqqa/context-vault');this.textContent='✓';this.classList.add('ok');setTimeout(()=>{this.textContent='⧉';this.classList.remove('ok')},1600)">⧉</button></div>
+  <div class="term"><span class="ps1">$</span><code>git clone https://github.com/nghqqa/context-vault</code><button aria-label="复制 git clone 命令" onclick="copyCmd(this)">⧉</button></div>
   <div class="meta">Python 3.9+ · 纯标准库零依赖 · Windows / Linux / macOS · MIT 开源</div>
 </section>
 
 <h2 id="features">六个能力，一个位置</h2>
 <p class="sub">市面上的迁移工具都是一次性搬运工；Context Vault 是资产库——存储、谱系、账本、审计。</p>
 <div class="grid">
-  <div class="card"><div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/></svg></div><h3><b>快照资产库</b></h3><p><code>Codex</code> / <code>Claude Code</code> / 18 种桥接 harness 的会话，导出为供应商中立格式：内容寻址、不可变、幂等、自动 lineage 会话树。</p></div>
-  <div class="card"><div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3 4 7l4 4M4 7h16M16 21l4-4-4-4M20 17H4"/></svg></div><h3><b>诚实迁移</b></h3><p><code>Codex</code> ⇄ <code>Claude Code</code> 双向（双端真机验证），默认 <code>dry-run</code>，逐字段告诉你什么保住了、什么搬不走。另有 <code>Markdown</code> 交接简报档，任何 agent 都能吃。</p></div>
-  <div class="card"><div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15zM4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/></svg></div><h3><b>token 账本</b></h3><p>按模型成本、缓存命中率——全部从会话文件内嵌的 <code>usage</code> 记录聚合，不需要任何代理。</p></div>
-  <div class="card"><div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 2.2 6.6H21l-5.4 4.1 2.1 6.6L12 16.2l-5.7 4.1 2.1-6.6L3 9.6h6.8z"/></svg></div><h3><b>跨会话记忆</b></h3><p>决策、偏好、摘要从历史自动提取，每条记忆注明来源快照、可回读核实。引擎接口可插拔。</p></div>
-  <div class="card"><div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M6 8h12l-1 6a5 5 0 0 1-10 0L6 8zM12 19v3"/></svg></div><h3><b>MCP 记忆后端</b></h3><p>一条命令接入 <code>Claude Code</code> / <code>Codex</code> / <code>Cursor</code>。新任务开始时问一句"关于 X 我们之前定过什么"。</p></div>
-  <div class="card"><div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8a6 6 0 0 1 0 8.4M7.8 16.2a6 6 0 0 1 0-8.4M19 5a10 10 0 0 1 0 14M5 19A10 10 0 0 1 5 5"/></svg></div><h3><b>上游哨兵</b></h3><p>定时探测 <code>relay</code> 的模型清单，模型静默消失即刻告警并留下审计痕——下架又上架，只有留痕才知道。</p></div>
+  <div class="card"><div class="ic"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/></svg></div><h3><b>快照资产库</b></h3><p><code>Codex</code> / <code>Claude Code</code> / 18 种桥接 harness 的会话，导出为供应商中立格式：内容寻址、不可变、幂等、自动 lineage 会话树。</p></div>
+  <div class="card"><div class="ic"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3 4 7l4 4M4 7h16M16 21l4-4-4-4M20 17H4"/></svg></div><h3><b>诚实迁移</b></h3><p><code>Codex</code> ⇄ <code>Claude Code</code> 双向（双端真机验证），默认 <code>dry-run</code>，逐字段告诉你什么保住了、什么搬不走。另有 <code>Markdown</code> 交接简报档，任何 agent 都能吃。</p></div>
+  <div class="card"><div class="ic"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15zM4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/></svg></div><h3><b>token 账本</b></h3><p>按模型成本、缓存命中率——全部从会话文件内嵌的 <code>usage</code> 记录聚合，不需要任何代理。</p></div>
+  <div class="card"><div class="ic"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 2.2 6.6H21l-5.4 4.1 2.1 6.6L12 16.2l-5.7 4.1 2.1-6.6L3 9.6h6.8z"/></svg></div><h3><b>跨会话记忆</b></h3><p>决策、偏好、摘要从历史自动提取，每条记忆注明来源快照、可回读核实。引擎接口可插拔。</p></div>
+  <div class="card"><div class="ic"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M6 8h12l-1 6a5 5 0 0 1-10 0L6 8zM12 19v3"/></svg></div><h3><b>MCP 记忆后端</b></h3><p>一条命令接入 <code>Claude Code</code> / <code>Codex</code> / <code>Cursor</code>。新任务开始时问一句"关于 X 我们之前定过什么"。</p></div>
+  <div class="card"><div class="ic"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8a6 6 0 0 1 0 8.4M7.8 16.2a6 6 0 0 1 0-8.4M19 5a10 10 0 0 1 0 14M5 19A10 10 0 0 1 5 5"/></svg></div><h3><b>上游哨兵</b></h3><p>定时探测 <code>relay</code> 的模型清单，模型静默消失即刻告警并留下审计痕——下架又上架，只有留痕才知道。</p></div>
 </div>
 
 <h2 id="fidelity">迁移保真度，先说诚实的话</h2>
@@ -115,5 +116,15 @@ footer{border-top:1px solid var(--line);margin-top:80px;padding:30px 0 44px;colo
   <div><a href="https://github.com/nghqqa/context-vault">GitHub</a> · <a href="https://github.com/nghqqa/context-vault/releases">Releases</a> · <a href="https://raw.githubusercontent.com/nghqqa/context-vault/main/llms.txt">llms.txt</a></div>
 </footer>
 </div>
+<script>
+/* 复制走 Async Clipboard (GH Pages 恒为 https secure context); 失败也如实反馈, 不做假成功 */
+async function copyCmd(btn){
+  const t='git clone https://github.com/nghqqa/context-vault';
+  const reset=()=>{btn.textContent='⧉';btn.classList.remove('ok','bad')};
+  try{await navigator.clipboard.writeText(t)}catch(e){
+    btn.textContent='✕';btn.classList.remove('ok');btn.classList.add('bad');setTimeout(reset,1600);return}
+  btn.textContent='✓';btn.classList.remove('bad');btn.classList.add('ok');setTimeout(reset,1600);
+}
+</script>
 </body>
 </html>

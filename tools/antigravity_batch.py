@@ -161,25 +161,65 @@ def iso_utc(epoch: int) -> str:
     return dt.fromtimestamp(int(epoch), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S+00:00")
 
 
+def _is_eligible_cap(cap: dict, allowed_agents: set[str],
+                     arch_refs: set[str], sub_refs: set[str]) -> bool:
+    """统一校验来源与归档/子代理守卫；normal 路径与 --recover 共用，杜绝绕过过滤重导已归档或自回环会话。"""
+    cwd = cap.get("cwd") or ""
+    if not eligible_cwd(cwd):
+        return False
+    ag = (cap.get("agent") or "").lower()
+    if ag == "antigravity":
+        return False  # 绝不将 cv sync 回灌的 Antigravity 原生会话再倒回 Antigravity
+    if allowed_agents and ag not in allowed_agents:
+        return False
+    sref = cap.get("session_ref") or ""
+    if ag == "zcode" and sref in (arch_refs | sub_refs):
+        return False
+    orig = str(cap.get("originator") or "")
+    if cap.get("parent_session_ref") or orig.startswith("workflow subagent"):
+        return False
+    return True
+
+
+def _collect_existing_by_ref(vault: Path, have_rows: set[str]) -> set[tuple[str, str]]:
+    """已完整安装（.db 与 summaries 均在位）的 (agent, session_ref) 集合，防止同会话演化/换算法重导生成双份。"""
+    out: set[tuple[str, str]] = set()
+    for cid, entry in cv._collect_antigravity_migrated_dbs(vault).items():
+        if entry["session_ref"] and (CONV_DIR / f"{cid}.db").exists() and cid in have_rows:
+            out.add(((entry["agent"] or "").lower(), entry["session_ref"]))
+    return out
+
+
 # ------------------------------------------------- 主流程
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--vault", default="vault")
     ap.add_argument("--project", default=None)
+    ap.add_argument("--agent", default="zcode",
+                    help="仅导入指定来源 agent（默认 zcode；设 all 可包含 codex/claude-code，仍排除 antigravity 与已归档）")
+    ap.add_argument("--include-archived", action="store_true",
+                    help="显式包含 ZCode 已归档会话（默认跳过）")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--recover", action="store_true",
-                    help="以 migrations.jsonl 为准恢复: 曾导入过但目标端缺失的会话, "
-                         "用其会话当前叶子版本重导 (含 proto upsert; 需先完全退出 Antigravity)")
+                    help="以 migrations.jsonl 为准恢复: 曾导入过但目标端缺失的会话（仍严格应用归档与来源筛选）")
     args = ap.parse_args()
-    vault = Path(args.vault).expanduser().resolve()
+    vault = cv.vault_dir(argparse.Namespace(vault=args.vault, cmd="batch")).resolve()
+    agent_arg = None if str(args.agent or "").strip().lower() in ("", "all") else args.agent
+    allowed_agents = set(cv._parse_agent_filter(agent_arg))
+    arch_refs = set() if args.include_archived else cv._zcode_archived_refs()
+    sub_refs = cv._zcode_subagent_refs()
 
-    items = cv.resolve_top_conversations(vault)
     if args.project:
-        items = cv._resolve_project_items(vault, args.project)
-    items = [it for it in items if eligible_cwd(it.get("cwd") or "")]
+        items = cv._resolve_project_items(
+            vault, args.project, include_archived=args.include_archived, agent=agent_arg)
+    else:
+        items = cv.resolve_top_conversations(
+            vault, agent=agent_arg, include_archived=args.include_archived)
+    items = [it for it in items if eligible_cwd(it.get("cwd") or "")
+             and (it.get("agent") or "").lower() != "antigravity"]
     if args.limit:
         items = items[:args.limit]
 
@@ -216,28 +256,37 @@ def main() -> None:
             if "antigravity" in dest and "conversations" in dest:
                 done_cascades[o.get("source", "")] = Path(dest).stem
 
+    existing_refs = _collect_existing_by_ref(vault, have_rows)
     plan, skipped = [], {"dup": 0, "done": 0}
+    seen_cascades: set[str] = set()
     for it in items:
         sid = it["id"]
-        cwd = it.get("cwd") or ""
-        cascade = done_cascades.get(sid) or det_cascade(sid)
-        if (CONV_DIR / f"{cascade}.db").exists() and cascade in have_rows:
+        ag = (it.get("agent") or "").lower()
+        sref = it.get("session_ref") or ""
+        try:
+            env = cv.load_snapshot(vault, sid)
+        except (ValueError, OSError):
+            continue
+        if not _is_eligible_cap(env.get("capture") or {}, allowed_agents, arch_refs, sub_refs):
+            continue
+        cascade = cv._deterministic_session_id(env)
+        prev_cid = done_cascades.get(sid)
+        if ((CONV_DIR / f"{cascade}.db").exists() and cascade in have_rows) \
+                or (prev_cid and (CONV_DIR / f"{prev_cid}.db").exists() and prev_cid in have_rows) \
+                or (sref and (ag, sref) in existing_refs):
             skipped["done"] += 1
             continue
-        fp = ""
-        try:
-            fp = first_user_text(cv.load_snapshot(vault, sid))
-        except (ValueError, OSError):
-            pass
+        fp = first_user_text(env)
         if fp and fp in existing_fps:
             skipped["dup"] += 1
             continue
+        if cascade in seen_cascades:
+            continue
+        seen_cascades.add(cascade)
         plan.append((it, cascade))
 
     if args.recover:
-        # 恢复: 曾导入过 (migrations 有痕) 但目标端 (db+行) 已缺失的会话 — 原 sid 可能已不是
-        # 叶子 (源工具继续演进, 托盘同步出新版), 用其会话当前叶子重导; cascade 统一用
-        # cv 会话级确定性派生, 与 do_import 链路同位不产生副本。
+        # 恢复: 曾导入过 (migrations 有痕) 但目标端缺失的会话 — 仍严格遵守归档/来源/防自回环守卫
         conn_v = cv.db(vault)
         srows = conn_v.execute(
             "SELECT id, agent, session_ref, created_at FROM snapshots").fetchall()
@@ -249,21 +298,28 @@ def main() -> None:
             if r["id"] in parents:
                 continue
             by_ref.setdefault((r["agent"] or "", r["session_ref"] or ""), []).append(r)
-        seen_cascades = {c for _, c in plan}
         for sid in done_cascades:
             try:
                 env0 = cv.load_snapshot(vault, sid)
             except (ValueError, OSError):
                 continue
-            cap = env0.get("capture") or {}
-            cands = by_ref.get((cap.get("agent") or "", cap.get("session_ref") or ""), [])
-            leaf = max(cands, key=lambda r: r["created_at"] or "")["id"] if cands else sid
-            cwd = cap.get("cwd") or ""
-            if not eligible_cwd(cwd):
+            cap0 = env0.get("capture") or {}
+            if not _is_eligible_cap(cap0, allowed_agents, arch_refs, sub_refs):
                 continue
-            env = cv.load_snapshot(vault, leaf)
+            ag0 = (cap0.get("agent") or "").lower()
+            sref0 = cap0.get("session_ref") or ""
+            cands = by_ref.get((cap0.get("agent") or "", sref0), [])
+            leaf = max(cands, key=lambda r: r["created_at"] or "")["id"] if cands else sid
+            try:
+                env = cv.load_snapshot(vault, leaf)
+            except (ValueError, OSError):
+                continue
+            cap = env.get("capture") or {}
+            if not _is_eligible_cap(cap, allowed_agents, arch_refs, sub_refs):
+                continue
             cascade = cv._deterministic_session_id(env)
-            if (CONV_DIR / f"{cascade}.db").exists() and cascade in have_rows:
+            if ((CONV_DIR / f"{cascade}.db").exists() and cascade in have_rows) \
+                    or (sref0 and (ag0, sref0) in existing_refs):
                 skipped["done"] += 1
                 continue
             fp = first_user_text(env)
@@ -273,8 +329,8 @@ def main() -> None:
             if cascade in seen_cascades:
                 continue
             seen_cascades.add(cascade)
-            plan.append(({"id": leaf, "cwd": cwd, "title": cap.get("originator") or ""},
-                         cascade))
+            plan.append(({"id": leaf, "cwd": cap.get("cwd") or "",
+                          "title": cap.get("originator") or ""}, cascade))
 
     by_proj: dict[str, list] = {}
     for it, cascade in plan:

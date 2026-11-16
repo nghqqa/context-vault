@@ -2080,6 +2080,13 @@ def test_antigravity_fill_steps_payload_and_apply(isolated, tmp_path, monkeypatc
         assert (1, 2) in mf and (12, 2) in mf and (20, 2) in mf and (26, 2) in mf
         if idx == 1:
             assert (6, 2) in mf  # 终步带 completed_at，供 last_modified_time 提取
+            assert (2, 0) in cv._pb_decode(mf[(1, 2)][0])[0]
+            assert (2, 0) in cv._pb_decode(mf[(6, 2)][0])[0]
+            assert mf.get((7, 2)) == mf[(6, 2)] and mf.get((8, 2)) == mf[(6, 2)]
+            pr, ptail_r = cv._pb_decode(pf[(20, 2)][0])
+            assert ptail_r == b""
+            assert (3, 2) in pr and (11, 2) in pr and pr.get((12, 0)) == [2]
+            assert (1, 2) not in pr
 
 
 def test_zcode_tasks_index_archived_filtering(isolated, monkeypatch, tmp_path):
@@ -2613,3 +2620,449 @@ def test_antigravity_proto_upsert(isolated, tmp_path, monkeypatch):
     top, _ = cv._pb_decode(pb.read_bytes())
     entries = [cv._pb_decode(e)[0] for e in top.get((1, 2), [])]
     assert len(entries) == 2 and entries[1].get((2, 2))[0] == b"raw-9-v2"
+
+
+def test_sync_antigravity_dedup_by_session_ref_and_self_loop(isolated, monkeypatch, tmp_path):
+    """验证 --dedup 按 session_ref 对不同 sid 演化快照去重（保留确定性 UUID），并清理 antigravity 自环迁入库。"""
+    import sqlite3 as _s
+    home, vault = isolated
+    conv_dir = home / ".gemini" / "antigravity" / "conversations"
+    conv_dir.mkdir(parents=True, exist_ok=True)
+    agy_root = conv_dir.parent
+    sum_db = agy_root / "conversation_summaries.db"
+    proto_pb = agy_root / "agyhub_summaries_proto.pb"
+
+    tdb = tmp_path / "tasks-index.sqlite"
+    tc = _s.connect(tdb)
+    tc.execute("CREATE TABLE tasks(task_id TEXT, archived INTEGER, deleted INTEGER, cli_deleted INTEGER)")
+    tc.execute("INSERT INTO tasks VALUES('z_evo', 0, 0, 0)")
+    tc.commit()
+    tc.close()
+    monkeypatch.setattr(cv, "ZCODE_TASKS_DB", tdb)
+
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+
+    def reg(ag, sref, text):
+        env = cv.build_envelope({
+            "capture": {"agent": ag, "session_ref": sref, "cwd": "D:\\goai", "originator": text},
+            "conversation": [{"type": "text", "role": "user", "content": text}],
+            "stats": cv.zero_stats(),
+        })
+        sid = cv.snapshot_id(env)
+        sp = vault / "snapshots" / f"{sid}.json"
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(json.dumps(env, ensure_ascii=False), encoding="utf-8")
+        cv.register_snapshot(conn, env, sid, sp)
+        return env, sid
+
+    env_old, sid_old = reg("zcode", "z_evo", "初始提问")
+    env_new, sid_new = reg("zcode", "z_evo", "演化追问")
+    _, sid_self = reg("antigravity", "native_self_1", "自环回流")
+    conn.commit()
+    conn.close()
+    assert sid_old != sid_new
+
+    cid_det = cv._deterministic_session_id(env_new)
+    cid_rand = "99999999-9999-4999-8999-999999999999"
+    cid_self = "88888888-8888-4888-8888-888888888888"
+    cid_nat = "77777777-7777-4777-8777-777777777777"
+    for cid in (cid_det, cid_rand, cid_self, cid_nat):
+        dc = _s.connect(conv_dir / f"{cid}.db")
+        dc.execute("CREATE TABLE steps(step_index INTEGER PRIMARY KEY, step_type INTEGER, metadata BLOB)")
+        dc.execute("INSERT INTO steps VALUES(0, 14, X'')")
+        if cid == cid_det:
+            dc.execute("INSERT INTO steps VALUES(1, 15, X'')")
+        dc.commit()
+        dc.close()
+
+    cv._record_migration(vault, conv_dir / f"{cid_rand}.db", sid_old)
+    cv._record_migration(vault, conv_dir / f"{cid_det}.db", sid_new)
+    cv._record_migration(vault, conv_dir / f"{cid_self}.db", sid_self)
+
+    sc = _s.connect(sum_db)
+    sc.execute("CREATE TABLE conversation_summaries(conversation_id TEXT PRIMARY KEY, title TEXT)")
+    sc.execute("CREATE VIRTUAL TABLE conversations_fts USING fts5(conversation_id UNINDEXED, archived UNINDEXED, title)")
+    for cid in (cid_det, cid_rand, cid_self, cid_nat):
+        sc.execute("INSERT INTO conversation_summaries VALUES(?, ?)", (cid, cid))
+        sc.execute("INSERT INTO conversations_fts VALUES(?, 0, ?)", (cid, cid))
+    sc.commit()
+    sc.close()
+
+    proto_pb.write_bytes(b"".join(
+        cv._pb_len(1, cv._pb_len(1, c.encode("ascii")) + cv._pb_len(2, b"\n\x03tag"))
+        for c in (cid_det, cid_rand, cid_self, cid_nat)
+    ))
+
+    res = cv.sync_antigravity_archived(vault, dedup=True, apply=True)
+    reasons = {t["cid"]: t["reason"] for t in res["targets"]}
+    assert reasons[cid_self] == "self_loop"
+    assert reasons[cid_rand] in ("duplicate", "dup")
+    assert cid_det not in reasons and cid_nat not in reasons
+    assert (conv_dir / f"{cid_det}.db").exists() and (conv_dir / f"{cid_nat}.db").exists()
+    assert not (conv_dir / f"{cid_rand}.db").exists() and not (conv_dir / f"{cid_self}.db").exists()
+
+
+def test_antigravity_batch_strict_agent_and_recover_filters(isolated, monkeypatch, tmp_path, capsys):
+    """验证 antigravity_batch 默认只导未归档 zcode，且 --recover 也绝不复活归档、codex 或 antigravity 自环。"""
+    import sqlite3 as _s
+    import antigravity_batch as ab
+
+    home, vault = isolated
+    conv_dir = home / ".gemini" / "antigravity" / "conversations"
+    conv_dir.mkdir(parents=True, exist_ok=True)
+    agy_root = conv_dir.parent
+    sum_db = agy_root / "conversation_summaries.db"
+    monkeypatch.setattr(ab, "HOME", home)
+    monkeypatch.setattr(ab, "CONV_DIR", conv_dir)
+    monkeypatch.setattr(ab, "SUMMARY_DB", sum_db)
+
+    tdb = tmp_path / "tasks-index.sqlite"
+    tc = _s.connect(tdb)
+    tc.execute("CREATE TABLE tasks(task_id TEXT, archived INTEGER, deleted INTEGER, cli_deleted INTEGER)")
+    tc.execute("INSERT INTO tasks VALUES('z_act_missing', 0, 0, 0)")
+    tc.execute("INSERT INTO tasks VALUES('z_act_evo', 0, 0, 0)")
+    tc.execute("INSERT INTO tasks VALUES('z_arch', 1, 0, 0)")
+    tc.commit()
+    tc.close()
+    monkeypatch.setattr(cv, "ZCODE_TASKS_DB", tdb)
+
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+
+    def reg(ag, sref, title, ts):
+        env = cv.build_envelope({
+            "capture": {"agent": ag, "session_ref": sref, "cwd": "D:\\goai", "originator": title},
+            "conversation": [{"type": "text", "role": "user", "content": title}],
+            "stats": cv.zero_stats(),
+        })
+        env["created_at"] = ts
+        sid = cv.snapshot_id(env)
+        sp = vault / "snapshots" / f"{sid}.json"
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(json.dumps(env, ensure_ascii=False), encoding="utf-8")
+        cv.register_snapshot(conn, env, sid, sp)
+        return env, sid
+
+    env_miss, sid_miss = reg("zcode", "z_act_missing", "ACTIVE_KEEP_MISSING", "2026-11-10T10:00:00Z")
+    env_evo_old, sid_evo_old = reg("zcode", "z_act_evo", "EVO_OLD", "2026-11-10T11:00:00Z")
+    env_evo_new, sid_evo_new = reg("zcode", "z_act_evo", "EVO_NEW_ALREADY_PRESENT", "2026-11-10T12:00:00Z")
+    env_arch, sid_arch = reg("zcode", "z_arch", "ARCHIVED_SKIP", "2026-11-10T13:00:00Z")
+    env_cx, sid_cx = reg("codex", "c_1", "CODEX_SKIP", "2026-11-10T14:00:00Z")
+    env_ag, sid_ag = reg("antigravity", "a_1", "SELF_LOOP_SKIP", "2026-11-10T15:00:00Z")
+    conn.commit()
+    conn.close()
+
+    # z_act_evo 旧版已在摘要库 + .db 存在；其余 4 条曾迁入记录在 migrations.jsonl 但目标端 .db 已删
+    cid_evo_old = "12121212-1212-4121-8121-121212121212"
+    (conv_dir / f"{cid_evo_old}.db").write_bytes(b"SQLite format 3\x00")
+    sc = _s.connect(sum_db)
+    sc.execute("CREATE TABLE conversation_summaries(conversation_id TEXT PRIMARY KEY, title TEXT)")
+    sc.execute("INSERT INTO conversation_summaries VALUES(?, ?)", (cid_evo_old, "EVO_OLD"))
+    sc.commit()
+    sc.close()
+
+    cv._record_migration(vault, conv_dir / f"{cid_evo_old}.db", sid_evo_old)
+    cv._record_migration(vault, conv_dir / f"{cv._deterministic_session_id(env_miss)}.db", sid_miss)
+    cv._record_migration(vault, conv_dir / f"{cv._deterministic_session_id(env_arch)}.db", sid_arch)
+    cv._record_migration(vault, conv_dir / f"{cv._deterministic_session_id(env_cx)}.db", sid_cx)
+    cv._record_migration(vault, conv_dir / f"{cv._deterministic_session_id(env_ag)}.db", sid_ag)
+
+    capsys.readouterr()
+    # 1. --recover --dry-run 默认只认未归档 zcode：仅 sid_miss 缺失待恢复，z_arch / codex / antigravity 均跳过
+    monkeypatch.setattr(sys, "argv", ["antigravity_batch.py", "--vault", str(vault), "--recover", "--dry-run"])
+    ab.main()
+    out_r1 = capsys.readouterr().out
+    assert "待导入 1 条" in out_r1
+
+    # 2. 补齐 sid_miss 后再跑：z_arch / codex / antigravity 仍在 migrations.jsonl 中，但绝不复活
+    cid_miss = cv._deterministic_session_id(env_miss)
+    (conv_dir / f"{cid_miss}.db").write_bytes(b"SQLite format 3\x00")
+    sc = _s.connect(sum_db)
+    sc.execute("INSERT INTO conversation_summaries VALUES(?, ?)", (cid_miss, "ACTIVE_KEEP_MISSING"))
+    sc.commit()
+    sc.close()
+
+    monkeypatch.setattr(sys, "argv", ["antigravity_batch.py", "--vault", str(vault), "--recover", "--dry-run"])
+    ab.main()
+    assert "待导入 0 条" in capsys.readouterr().out
+
+    # 3. 常规与 --recover 加 --agent all：仅释放 codex (1 条)，仍跳过 z_arch / antigravity / 已存在 z_act_evo 新快照
+    monkeypatch.setattr(sys, "argv", ["antigravity_batch.py", "--vault", str(vault), "--dry-run"])
+    ab.main()
+    assert "待导入 0 条" in capsys.readouterr().out
+
+    monkeypatch.setattr(sys, "argv", ["antigravity_batch.py", "--vault", str(vault), "--agent", "all", "--dry-run"])
+    ab.main()
+    assert "待导入 1 条" in capsys.readouterr().out
+
+    monkeypatch.setattr(sys, "argv", ["antigravity_batch.py", "--vault", str(vault), "--recover", "--agent", "all", "--dry-run"])
+    ab.main()
+    assert "待导入 1 条" in capsys.readouterr().out
+
+    # 4. 补齐 codex 并把 sid_evo_new 也写入 migrations.jsonl，--recover --agent all 仍必须为 0
+    cid_cx = cv._deterministic_session_id(env_cx)
+    (conv_dir / f"{cid_cx}.db").write_bytes(b"SQLite format 3\x00")
+    sc = _s.connect(sum_db)
+    sc.execute("INSERT INTO conversation_summaries VALUES(?, ?)", (cid_cx, "CODEX_SKIP"))
+    sc.commit()
+    sc.close()
+    cv._record_migration(vault, conv_dir / f"{cv._deterministic_session_id(env_evo_new)}.db", sid_evo_new)
+
+    monkeypatch.setattr(sys, "argv", ["antigravity_batch.py", "--vault", str(vault), "--recover", "--agent", "all", "--dry-run"])
+    ab.main()
+    assert "待导入 0 条" in capsys.readouterr().out
+
+
+def test_sync_antigravity_deleted_projects_and_empty_project_json_cleanup(isolated, monkeypatch, tmp_path):
+    """验证 ZCode projects.deleted=1 联动清理，及空壳 ~/.gemini/config/projects/*.json 清理与安全守卫。"""
+    import sqlite3 as _s
+    home, vault = isolated
+    conv_dir = home / ".gemini" / "antigravity" / "conversations"
+    conv_dir.mkdir(parents=True, exist_ok=True)
+    agy_root = conv_dir.parent
+    sum_db = agy_root / "conversation_summaries.db"
+    proto_pb = agy_root / "agyhub_summaries_proto.pb"
+    pdir = home / ".gemini" / "config" / "projects"
+    pdir.mkdir(parents=True, exist_ok=True)
+
+    tdb = tmp_path / "tasks-index.sqlite"
+    tc = _s.connect(tdb)
+    tc.execute("CREATE TABLE projects(project_id TEXT PRIMARY KEY, name TEXT, deleted INTEGER)")
+    tc.execute("CREATE TABLE project_roots(project_id TEXT, root_path TEXT)")
+    tc.execute("CREATE TABLE tasks(task_id TEXT, workspace_path TEXT, project_id TEXT, archived INTEGER, deleted INTEGER, cli_deleted INTEGER)")
+    tc.execute("INSERT INTO projects VALUES('p-act', 'goai', 0)")
+    tc.execute("INSERT INTO projects VALUES('p-del', 'changecheck', 1)")
+    tc.execute("INSERT INTO projects VALUES('p-readd-old', 'goai', 1)")
+    tc.execute("INSERT INTO project_roots VALUES('p-act', 'D:\\goai')")
+    tc.execute("INSERT INTO project_roots VALUES('p-del', 'E:\\changecheck')")
+    tc.execute("INSERT INTO project_roots VALUES('p-readd-old', 'D:\\goai')")
+    # t_del 与 t_del_legacy 的 task.archived 均为 0，仅因所属 ZCode 项目已删除而应被清理
+    tc.execute("INSERT INTO tasks VALUES('t_act', 'D:\\goai', 'p-act', 0, 0, 0)")
+    tc.execute("INSERT INTO tasks VALUES('t_readd_legacy', 'D:\\goai', NULL, 0, 0, 0)")
+    tc.execute("INSERT INTO tasks VALUES('t_del', 'E:\\changecheck', 'p-del', 0, 0, 0)")
+    tc.execute("INSERT INTO tasks VALUES('t_del_legacy', 'E:\\changecheck', NULL, 0, 0, 0)")
+    tc.execute("INSERT INTO tasks VALUES('t_huawei', 'D:\\华为杯', NULL, 1, 0, 0)")
+    tc.commit()
+    tc.close()
+    monkeypatch.setattr(cv, "ZCODE_TASKS_DB", tdb)
+
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+
+    def reg(sref, cwd, title):
+        env = cv.build_envelope({
+            "capture": {"agent": "zcode", "session_ref": sref, "cwd": cwd, "originator": title},
+            "conversation": [{"type": "text", "role": "user", "content": title}],
+            "stats": cv.zero_stats(),
+        })
+        sid = cv.snapshot_id(env)
+        sp = vault / "snapshots" / f"{sid}.json"
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(json.dumps(env, ensure_ascii=False), encoding="utf-8")
+        cv.register_snapshot(conn, env, sid, sp)
+        return sid
+
+    s_act = reg("t_act", "D:\\goai", "活跃goai")
+    s_readd = reg("t_readd_legacy", "D:\\goai", "重添后旧任务保留")
+    s_del = reg("t_del", "E:\\changecheck", "已删项目changecheck")
+    s_del_leg = reg("t_del_legacy", "E:\\changecheck", "已删项目无pid旧任务")
+    s_hw = reg("t_huawei", "D:\\华为杯", "华为杯已清对话")
+    conn.commit()
+    conn.close()
+
+    # resolve_top_conversations 默认排除已删项目下任务
+    vis = {it["id"] for it in cv.resolve_top_conversations(vault)}
+    assert vis == {s_act, s_readd}
+
+    cid_act = "11111111-0000-4000-8000-111111111111"
+    cid_del = "22222222-0000-4000-8000-222222222222"
+    cid_del_leg = "33333333-0000-4000-8000-333333333333"
+    cid_hw = "44444444-0000-4000-8000-444444444444"
+    for c_id in (cid_act, cid_del, cid_del_leg):
+        (conv_dir / f"{c_id}.db").write_bytes(b"SQLite format 3\x00")
+    cv._record_migration(vault, conv_dir / f"{cid_act}.db", s_act)
+    cv._record_migration(vault, conv_dir / f"{cid_del}.db", s_del)
+    cv._record_migration(vault, conv_dir / f"{cid_del_leg}.db", s_del_leg)
+    cv._record_migration(vault, conv_dir / f"{cid_hw}.db", s_hw)  # 华为杯 .db 早已删除，只剩空项目壳子
+
+    sc = _s.connect(sum_db)
+    sc.execute("CREATE TABLE conversation_summaries(conversation_id TEXT PRIMARY KEY, project_id TEXT, workspace_uris TEXT)")
+    sc.execute("CREATE VIRTUAL TABLE conversations_fts USING fts5(conversation_id UNINDEXED, archived UNINDEXED, title)")
+    sc.execute("INSERT INTO conversation_summaries VALUES(?, 'pj-goai', '[\"file:///d%3A/goai\"]')", (cid_act,))
+    sc.execute("INSERT INTO conversation_summaries VALUES(?, 'pj-cc', '[\"file:///e%3A/changecheck\"]')", (cid_del,))
+    sc.execute("INSERT INTO conversation_summaries VALUES(?, 'pj-cc', '[\"file:///e%3A/changecheck\"]')", (cid_del_leg,))
+    for cid in (cid_act, cid_del, cid_del_leg):
+        sc.execute("INSERT INTO conversations_fts VALUES(?, 0, ?)", (cid, cid))
+    sc.commit()
+    sc.close()
+    proto_pb.write_bytes(b"".join(
+        cv._pb_len(1, cv._pb_len(1, c.encode("ascii")) + cv._pb_len(2, b"\n\x01x"))
+        for c in (cid_act, cid_del, cid_del_leg)
+    ))
+
+    def mk_pj(pid, name, res=None, **extra):
+        data = {"id": pid, "name": name, "projectResources": {"resources": res or []}, **extra}
+        (pdir / f"{pid}.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    mk_pj("pj-goai", "goai", [{"folderUri": "file:///d%3A/goai"}])
+    mk_pj("pj-cc", "changecheck", [{"folderUri": "file:///e%3A/changecheck"}])
+    mk_pj("pj-hw", "华为杯", [{"folderUri": "file:///d%3A/%E5%8D%8E%E4%B8%BA%E6%9D%AF"}])
+    mk_pj("pj-native-empty", "manual-open", [{"folderUri": "file:///e%3A/manual-open"}])
+    mk_pj("pj-sidecar", "swarm/swarm_board", [], sidecar=True)
+
+    # 1. --project changecheck 仅清 changecheck 对话与空壳，不误碰华为杯/goai/原生空壳/sidecar
+    dry = cv.sync_antigravity_archived(vault, project="changecheck", apply=False)
+    assert {t["cid"] for t in dry["targets"]} == {cid_del, cid_del_leg}
+    assert {e["id"] for e in dry["empty_projects"]} == {"pj-cc"}
+
+    res1 = cv.sync_antigravity_archived(vault, project="changecheck", apply=True)
+    assert res1["removed_dbs"] == 2 and res1["removed_projects"] == 1
+    assert not (pdir / "pj-cc.json").exists()
+    assert (pdir / "pj-hw.json").exists() and (pdir / "pj-goai.json").exists()
+    assert (pdir / "pj-native-empty.json").exists() and (pdir / "pj-sidecar.json").exists()
+
+    # 2. 即使此时已无残留对话 (targets==[])，摘要库被锁时仍中止且不删 pj-hw.json
+    lock = _s.connect(sum_db, timeout=0.1)
+    lock.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(cv.BadMigrateTarget):
+            cv.sync_antigravity_archived(vault, apply=True)
+        assert (pdir / "pj-hw.json").exists()
+    finally:
+        lock.rollback()
+        lock.close()
+
+    # 3. 释放锁后全量执行：targets==[] 时仍清掉早先留下的空壳 华为杯，同时保留 goai / native / sidecar
+    res2 = cv.sync_antigravity_archived(vault, apply=True)
+    assert res2["targets"] == [] and res2["removed_projects"] == 1
+    assert not (pdir / "pj-hw.json").exists()
+    assert (pdir / "pj-goai.json").exists()
+    assert (pdir / "pj-native-empty.json").exists()
+    assert (pdir / "pj-sidecar.json").exists()
+
+
+def test_http_sync_antigravity_and_zcode_migrate_project(isolated, monkeypatch, tmp_path):
+    """验证 /sync 刷新热索引、/migrate_project 支持 zcode apply、/antigravity/sync 与 /antigravity/batch 完整链路。"""
+    import sqlite3 as _s
+    import threading
+    home, vault = isolated
+    conv_dir = home / ".gemini" / "antigravity" / "conversations"
+    conv_dir.mkdir(parents=True, exist_ok=True)
+    agy_root = conv_dir.parent
+    sum_db = agy_root / "conversation_summaries.db"
+    pdir = home / ".gemini" / "config" / "projects"
+    pdir.mkdir(parents=True, exist_ok=True)
+    (pdir / "p1.json").write_text(json.dumps({
+        "id": "p1", "name": "goai",
+        "projectResources": {"resources": [{"folderUri": "file:///d%3A/goai"}]},
+    }), encoding="utf-8")
+
+    zdb = _mk_zcode_db(tmp_path / "zcode.sqlite")
+    monkeypatch.setattr(cv, "ZCODE_DB", zdb)
+
+    tdb = tmp_path / "tasks-index.sqlite"
+    tc = _s.connect(tdb)
+    tc.execute("CREATE TABLE projects(project_id TEXT PRIMARY KEY, name TEXT, deleted INTEGER)")
+    tc.execute("CREATE TABLE tasks(task_id TEXT, project_id TEXT, archived INTEGER, deleted INTEGER, cli_deleted INTEGER)")
+    tc.execute("INSERT INTO projects VALUES('p-act', 'goai', 0)")
+    tc.execute("INSERT INTO tasks VALUES('sess_src', 'p-act', 0, 0, 0)")
+    tc.execute("INSERT INTO tasks VALUES('sess_arch', 'p-act', 1, 0, 0)")
+    tc.commit()
+    tc.close()
+    monkeypatch.setattr(cv, "ZCODE_TASKS_DB", tdb)
+
+    # 先写一个已归档 zcode 快照与其残留在 Antigravity 的 .db + summary
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    env_arch = cv.build_envelope({
+        "capture": {"agent": "zcode", "session_ref": "sess_arch", "cwd": "D:\\goai", "originator": "归档旧对话"},
+        "conversation": [{"type": "text", "role": "user", "content": "arch old"}],
+        "stats": cv.zero_stats(),
+    })
+    sid_arch = cv.snapshot_id(env_arch)
+    sp_arch = vault / "snapshots" / f"{sid_arch}.json"
+    sp_arch.parent.mkdir(parents=True, exist_ok=True)
+    sp_arch.write_text(json.dumps(env_arch, ensure_ascii=False), encoding="utf-8")
+    cv.register_snapshot(conn, env_arch, sid_arch, sp_arch)
+    conn.commit()
+    conn.close()
+
+    cid_arch = "aaaaaaaa-0000-4000-8000-000000000001"
+    (conv_dir / f"{cid_arch}.db").write_bytes(b"SQLite format 3\x00")
+    cv._record_migration(vault, conv_dir / f"{cid_arch}.db", sid_arch)
+    sc = _s.connect(sum_db)
+    sc.execute("CREATE TABLE conversation_summaries(conversation_id TEXT PRIMARY KEY, title TEXT, preview TEXT, "
+               "step_count INTEGER, last_modified_time TEXT, workspace_uris TEXT, status TEXT, source TEXT, "
+               "project_id TEXT, agent_name TEXT, parent_conversation_id TEXT, nesting_depth INTEGER, "
+               "battle_id TEXT, winning_conversation_id TEXT, not_fully_idle INTEGER, killed INTEGER, "
+               "last_user_input_time TEXT, last_user_input_step_index INTEGER, app_data_dir TEXT, "
+               "raw_summary BLOB, group_id TEXT)")
+    sc.execute("INSERT INTO conversation_summaries(conversation_id, title, project_id, workspace_uris) "
+               "VALUES(?, '归档旧对话', 'p1', '[\"file:///d%3A/goai\"]')", (cid_arch,))
+    sc.commit()
+    sc.close()
+
+    # 桩 smigrate 给 /antigravity/batch apply 用
+    monkeypatch.setattr(cv, "find_smigrate", lambda: "fake-smigrate")
+
+    def fake_run(cmd, **kw):
+        out_path = Path(cmd[cmd.index("--output") + 1])
+        casc = cmd[cmd.index("--session-id") + 1] if "--session-id" in cmd else "bbbbbbbb-1111-4111-8111-111111111111"
+        c = _s.connect(out_path)
+        c.execute("CREATE TABLE trajectory_meta(trajectory_id text, cascade_id text, trajectory_type integer, source integer, PRIMARY KEY (trajectory_id))")
+        c.execute("CREATE TABLE steps(idx integer PRIMARY KEY, step_type integer, status integer, has_subtrajectory numeric DEFAULT 0, metadata blob, step_payload blob)")
+        c.execute("CREATE TABLE trajectory_metadata_blob(id text PRIMARY KEY, data blob)")
+        c.execute("INSERT INTO trajectory_meta VALUES(?, ?, 4, 17)", ("traj-1", casc))
+        c.execute("INSERT INTO trajectory_metadata_blob VALUES('main', ?)", (cv._pb_len(6, casc.encode()),))
+        c.execute("INSERT INTO steps(idx, step_type, status, metadata, step_payload) VALUES(0, 14, 3, NULL, ?)",
+                  (cv._pb_var(1, 14) + cv._pb_var(4, 3) + cv._pb_len(19, b"\x12\x02hi"),))
+        c.commit()
+        c.close()
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(cv.subprocess, "run", fake_run)
+
+    srv, _ = cv.build_vault_server(vault, 0)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    hdrs = {"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{port}"}
+    try:
+        # 1. POST /sync 扫入 zcode sess_src 并立即刷新热索引
+        code, sres = _req(port, "POST", "/sync", body="{}", headers=hdrs)
+        assert code == 200 and sres["new"] >= 1
+        code, rec = _req(port, "GET", "/recent?limit=10")
+        assert code == 200 and rec["total"] >= 2
+
+        # 2. POST /migrate_project target=zcode + apply=True 真写入 ZCODE_DB（不再静默降级）
+        code, mz = _req(port, "POST", "/migrate_project",
+                        body=json.dumps({"project": "goai", "target": "zcode", "agent": "zcode", "apply": True}),
+                        headers=hdrs)
+        assert code == 200 and mz["applied"] is True and mz["count"] == 1
+
+        # 3. GET /antigravity/sync 预览待清归档 -> 锁库 400 -> 解锁 POST apply 成功删除
+        code, sprev = _req(port, "GET", "/antigravity/sync?dedup=1&only_agent=zcode")
+        assert code == 200 and sprev["targets_count"] == 1 and sprev["targets"][0]["cid"] == cid_arch
+
+        lck = _s.connect(sum_db, timeout=0.1)
+        lck.execute("BEGIN IMMEDIATE")
+        try:
+            code, serr = _req(port, "POST", "/antigravity/sync", body=json.dumps({"apply": True}), headers=hdrs)
+            assert code == 400 and "Antigravity" in serr["error"]
+        finally:
+            lck.rollback()
+            lck.close()
+
+        code, sapply = _req(port, "POST", "/antigravity/sync", body=json.dumps({"apply": True}), headers=hdrs)
+        assert code == 200 and sapply["removed_dbs"] == 1 and not (conv_dir / f"{cid_arch}.db").exists()
+
+        # 4. GET /antigravity/batch 仅计划活跃 sess_src -> POST apply 导入 -> 二次预览归零
+        code, bprev = _req(port, "GET", "/antigravity/batch?agent=zcode")
+        assert code == 200 and bprev["planned"] == 1
+        code, bapply = _req(port, "POST", "/antigravity/batch", body=json.dumps({"agent": "zcode", "apply": True}), headers=hdrs)
+        assert code == 200 and bapply["imported"] == 1 and bapply["failed"] == 0
+        code, bprev2 = _req(port, "GET", "/antigravity/batch?agent=zcode")
+        assert code == 200 and bprev2["planned"] == 0 and bprev2["skipped_done"] >= 1
+    finally:
+        srv.shutdown()
+        srv.server_close()
