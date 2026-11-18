@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Context Vault · Token 经济面板</title>
+<style>
+:root{
+  color-scheme:light dark;
+  --bg-canvas:light-dark(#f3f5f7,#0d1014);
+  --bg-surface:light-dark(#ffffff,#14191f);
+  --bg-subtle:light-dark(#f8fafb,#1a2028);
+  --bg-inset:light-dark(#eaeef2,#222933);
+  --line:light-dark(#dfe3e8,#27303c);
+  --line-soft:light-dark(#edf0f3,#1e2630);
+  --ink:light-dark(#15191d,#edf1f5);
+  --ink-2:light-dark(#424a52,#b6c0ca);
+  --ink-3:light-dark(#5e6770,#8d98a5);
+  --acc:#0e7568;
+  --acc-ink:light-dark(#0a5a50,#4fd1c5);
+  --warn:light-dark(#9a5b05,#f5b942);
+  --err:light-dark(#b42323,#f87171);
+  --mono:"Cascadia Code",Consolas,"SF Mono",ui-monospace,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:var(--bg-canvas);color:var(--ink);
+  font:13.5px/1.58 "Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI",system-ui,sans-serif;
+  padding:28px 24px 56px;
+}
+.shell{max-width:1280px;margin:0 auto}
+.head{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px;margin-bottom:20px;padding-bottom:14px;border-bottom:1px solid var(--line)}
+h1{font-size:18px;font-weight:650;letter-spacing:-.01em}
+.sub{color:var(--ink-3);font-size:12.5px;font-family:var(--mono);font-variant-numeric:tabular-nums}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin-bottom:24px}
+.card{
+  background:var(--bg-surface);border:1px solid var(--line);border-radius:9px;
+  padding:16px 18px;box-shadow:0 1px 2px light-dark(rgba(16,20,24,.04),rgba(0,0,0,.28));
+}
+.card .v{font:650 23px/1.2 var(--mono);letter-spacing:-.02em;font-variant-numeric:tabular-nums;color:var(--acc-ink);margin-bottom:4px}
+.card.alt .v{color:var(--ink)}
+.card .k{color:var(--ink-3);font-size:12px}
+section.panel{
+  background:var(--bg-surface);border:1px solid var(--line);border-radius:9px;
+  padding:16px 18px;margin-bottom:16px;box-shadow:0 1px 2px light-dark(rgba(16,20,24,.04),rgba(0,0,0,.28));
+}
+h2{font-size:13.5px;font-weight:650;margin-bottom:12px;color:var(--ink);display:flex;align-items:center;gap:8px}
+.bar{display:flex;align-items:center;gap:12px;margin:8px 0}
+.bar .name{width:220px;color:var(--ink-2);font:12px/1.4 var(--mono);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar .track{flex:1;background:var(--bg-inset);border:1px solid var(--line-soft);border-radius:6px;height:16px;overflow:hidden}
+.bar .fill{height:100%;border-radius:5px;background:var(--acc)}
+.bar .val{width:170px;font:12px/1.4 var(--mono);font-variant-numeric:tabular-nums;color:var(--ink-2)}
+.months{display:flex;align-items:flex-end;gap:8px;height:128px;padding-top:8px}
+.mcol{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:5px;height:100%}
+.mcol .stick{width:100%;max-width:44px;background:var(--acc);opacity:.88;border-radius:4px 4px 0 0}
+.mcol .lb{font:11px/1.2 var(--mono);font-variant-numeric:tabular-nums;color:var(--ink-3)}
+.tbl-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line-soft)}
+th{background:var(--bg-subtle);color:var(--ink-3);font-weight:600;font-size:12px;border-bottom:1px solid var(--line)}
+tbody tr:hover{background:var(--bg-subtle)}
+td:first-child{font-family:var(--mono);color:var(--acc-ink)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;vertical-align:middle}
+.ok{background:var(--acc-ink)} .err{background:var(--err)} .warm{background:var(--warn)}
+@media(max-width:700px){
+  body{padding:16px 12px 40px}
+  .bar{flex-wrap:wrap;gap:4px}
+  .bar .name,.bar .val{width:100%;text-align:left}
+}
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="head">
+    <h1>Context Vault · Token 经济面板</h1>
+    <div class="sub">本地优先资产账本 · 生成于 __GENERATED__</div>
+  </div>
+  <div class="cards">__CARDS__</div>
+  <section class="panel">
+    <h2>按模型节省明细</h2>
+    __BYMODEL__
+  </section>
+  <section class="panel">
+    <h2>月度节省走势（__MONTHS__ 个月）</h2>
+    <div class="months">__TIMELINE__</div>
+  </section>
+  <section class="panel">
+    <h2>上游可用性（最近探测 / 切换）</h2>
+    <div class="tbl-wrap"><table><thead><tr><th scope="col">状态灯</th><th scope="col">时间</th><th scope="col">Profile</th><th scope="col">状态</th><th scope="col">详情</th></tr></thead><tbody>__PROBE__</tbody></table></div>
+  </section>
+  <section class="panel">
+    <h2>Vault 快照资产（最近 __NSNAP__ 条）</h2>
+    <div class="tbl-wrap"><table><thead><tr><th scope="col">ID</th><th scope="col">Agent</th><th scope="col">块数</th><th scope="col">输入 Token</th><th scope="col">Cache 读</th><th scope="col">完整性</th><th scope="col">时间</th></tr></thead><tbody>__SNAPS__</tbody></table></div>
+  </section>
+</div>
+</body>
+</html>

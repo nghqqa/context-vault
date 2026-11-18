@@ -17,10 +17,10 @@ Your AI coding sessions are your most valuable work asset — yet they're locked
 
 ## ✨ Features
 
-- **Snapshot vault** — export Codex / Claude Code / 19 bridged harnesses into the vendor-neutral [context-snapshot](docs/snapshot-format.md) format: content-addressed, immutable, idempotent, with automatic lineage (session trees & forks).
+- **Snapshot vault** — export Codex / Claude Code / ZCode / Antigravity / 18 bridged harnesses into the vendor-neutral [context-snapshot](docs/snapshot-format.md) format: content-addressed, immutable, idempotent, with automatic lineage (`parent_snapshot` trees & forks) and daily retention pruning (`cv prune`).
 - **Handoff brief** — `--target markdown` emits a ≤48KB portable brief (where it stopped / recent actions / live-context tail) that any agent can consume.
 - **Vault backup** — `cv backup`: consistent sqlite snapshot + rotated zips; optional `CV_SERVE_TOKEN` auth for the resident console.
-- **Honest migration** — bidirectional Codex ⇄ Claude Code (real-machine verified both ways), dry-run by default, and a per-migration report of exactly what survives and what doesn't.
+- **Honest migration & bidirectional sync** — bidirectional Codex ⇄ Claude Code, native Antigravity `.db`/Proto round-trip & project-tree batch sync/cleanup, experimental ZCode write-back (with auto-backup), dry-run by default, and a per-migration report of exactly what survives and what doesn't.
 - **Token ledger** — per-model costs, cache hit rates aggregated from usage records *inside your own session files*. No proxy required.
 - **Cross-session memory** — decisions, preferences and summaries auto-extracted from history behind a swappable `MemoryEngine` interface; every memory cites its source snapshot.
 - **MCP backend** — 6 tools (`vault_remember` etc.) turn any MCP client (Claude Code / Codex / Cursor) into a remembering agent. One command to install everywhere.
@@ -86,7 +86,7 @@ Two rules that don't bend: **snapshots are immutable** (any derived data lives i
 - 195 MB Codex rollout → 12 MB snapshot in **1.5 s**; 39 compaction boundaries, 224M tokens of usage, 838 tool-call pairs intact.
 - **Bidirectional migration, both directions real-machine verified**: Codex→Claude resumes and continues accurately in Claude 2.1.181; Claude→Codex restores **373,160 tokens of full context** in Codex 0.153.4.
 - Reverse-engineered and dodged the two-generation Codex format trap (numeric vs string `ordinal`, resume reading the SQLite thread-store, misleading "rollout is empty").
-- Test suite: **56 tests** including a hot/cold equivalence test — the resident index and the file-scan fallback must return identical results ("the daemon accelerates; it is never a dependency"). CI also runs a real-browser layout probe (380–2560px × four sections, page-overflow detection).
+- Test suite: **88+ tests** including a hot/cold equivalence test — the resident index and the file-scan fallback must return identical results ("the daemon accelerates; it is never a dependency"). CI also runs JS syntax/runtime/unit checks and a real-browser layout probe (380–2560px × four sections, page-overflow detection).
 
 ## Design principles
 
@@ -115,7 +115,7 @@ Porters are upstream adapters, not competitors — `cv ingest` and `cv export-ha
 
 | Channel | Coverage |
 |---|---|
-| Native read+write (real-machine verified) | Codex · Claude Code · ZCode transcripts (read) |
+| Native read+write (real-machine verified) | Codex · Claude Code · Antigravity `.db`/Proto · ZCode transcripts (read + experimental write-back) |
 | Bridged read (`cv ingest`, 18 formats) | opencode · cursor · qwen · kimi · grok · antigravity · copilot · devin · hermes · kilo · mastracode · muse · omp · pi · vibe · openhands … |
 | Bridged write (`cv export-harness`, 18 targets) | same list |
 | Ledger sources | headroom · relay billing API · ZCode usage audit |

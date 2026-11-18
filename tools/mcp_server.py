@@ -35,7 +35,14 @@ MAX_TEXT_LEN = 2000
 # ---------------- vault 读取 ----------------
 
 def vault_dir(args) -> Path:
-    return Path(args.vault).expanduser()
+    raw = str(getattr(args, "vault", None) or "vault")
+    p = Path(raw).expanduser()
+    default_cwd = str(Path.cwd() / "vault")
+    if raw in ("vault", default_cwd) and not (p / "vault.db").exists():
+        repo_vault = Path(__file__).resolve().parent.parent / "vault"
+        if (repo_vault / "vault.db").exists():
+            return repo_vault
+    return p
 
 
 def load_all_snapshots(vault: Path) -> list:
@@ -53,7 +60,7 @@ def load_all_snapshots(vault: Path) -> list:
             continue  # 可解析但结构不完整: 与热索引一致地跳过, 不让单文件废掉冷路径 (全面测试 M6)
         env["_sid"] = f.stem  # 文件名即快照 id (内容寻址)
         out.append(env)
-        out.sort(key=lambda e: e.get("created_at") or "", reverse=True)
+    out.sort(key=lambda e: e.get("created_at") or "", reverse=True)
     return out
 
 
@@ -204,16 +211,31 @@ def t_snapshot(args_vault, sid: str) -> str:
     return "\n".join(lines)[:8000]
 
 
+def _format_stats_text(s: dict, own: dict | None, via_hot: bool = False) -> str:
+    usd = lambda v: f"${v:,.2f}" if isinstance(v, (int, float)) else "-"
+    hdr = "token 账本 (context-vault, via 热索引):" if via_hot else "token 账本 (context-vault):"
+    own = own or {}
+    snaps = own.get("snapshots") if own.get("snapshots") is not None else s.get("snapshots", 0)
+    sessions = own.get("sessions", 0)
+    in_eff = own.get("input_effective") or own.get("tokens_in") or 0
+    hit_pct = (own.get("cache_hit_rate") or 0.0) * 100
+    return "\n".join([
+        hdr,
+        f"  快照数: {snaps} (独立会话 {sessions})",
+        f"  自有累计输入: {in_eff:,} tokens (缓存命中率 {hit_pct:.1f}%)",
+        f"  压缩节省: {s.get('lifetime_tokens_saved', 0):,} tokens = {usd(s.get('lifetime_compression_saved_usd'))}",
+        f"  缓存节省: {usd(s.get('lifetime_cache_saved_usd'))}",
+        f"  历史总输入: {s.get('lifetime_total_input_tokens', 0):,} tokens",
+    ])
+
+
 def t_stats(args_vault) -> str:
     s = ledger_summary(args_vault)
     if not s:
         return "账本为空。先运行: python tools/cv.py ledger import-headroom"
-    usd = lambda v: f"${v:,.2f}" if isinstance(v, (int, float)) else "-"
-    return ("token 账本 (context-vault):\n"
-            f"  快照数: {s.get('snapshots', 0)}\n"
-            f"  压缩节省: {s.get('lifetime_tokens_saved', 0):,} tokens = {usd(s.get('lifetime_compression_saved_usd'))}\n"
-            f"  缓存节省: {usd(s.get('lifetime_cache_saved_usd'))}\n"
-            f"  历史总输入: {s.get('lifetime_total_input_tokens', 0):,} tokens")
+    sys.path.insert(0, str(Path(__file__).parent))
+    import cv as _cv
+    return _format_stats_text(s, _cv.owned_stats(args_vault), via_hot=False)
 
 
 # ---------------- MCP 工具表 ----------------
@@ -289,15 +311,11 @@ def _via_service(name: str, args_dict: dict):
                              f"入={h.get('tokens_in')} | {str(h.get('created_at', ''))[:19]}")
             return "\n".join(lines)
         if name == "vault_stats":
-            r = _svc_get("/stats")["stats"]
-            usd = lambda v: f"${v:,.2f}" if isinstance(v, (int, float)) else "-"
-            # 行集与冷路径 t_stats 对齐 (曾漏"历史总输入"一行, 同账本两条路径内容不同)
-            return ("token 账本 (context-vault, via 热索引):\n"
-                    f"  快照数: {r.get('snapshots', 0)}\n"
-                    f"  压缩节省: {r.get('lifetime_tokens_saved', 0):,} tokens = "
-                    f"{usd(r.get('lifetime_compression_saved_usd'))}\n"
-                    f"  缓存节省: {usd(r.get('lifetime_cache_saved_usd'))}\n"
-                    f"  历史总输入: {r.get('lifetime_total_input_tokens', 0):,} tokens")
+            full = _svc_get("/stats")
+            r = full.get("stats") or {}
+            if not r:
+                return None  # 空库交冷路径输出一致的"账本为空"提示
+            return _format_stats_text(r, full.get("owned"), via_hot=True)
     except Exception:
         return None
     return None  # vault_snapshot 等复杂工具直接走本地, 避免双实现漂移

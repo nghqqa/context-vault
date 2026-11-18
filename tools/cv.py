@@ -45,6 +45,18 @@ import hmac
 import uuid
 from pathlib import Path
 
+_TOOLS_DIR = str(Path(__file__).resolve().parent)
+if _TOOLS_DIR not in sys.path:
+    sys.path.insert(0, _TOOLS_DIR)
+from cv_ui import load_console_html as _load_console_html, load_dashboard_html as _load_dashboard_html
+from cv_index import (  # noqa: F401 — re-exported as public engine API
+    VaultIndex,
+    block_text,
+    format_snapshot_messages,
+    score_blocks,
+    tokenize,
+)
+
 FORMAT_VERSION = "0.1"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # noconsole 进程 spawn 控制台程序不弹窗   # context-snapshot 格式版本
 VERSION = "0.6.0"          # 工具版本 (发布节奏独立于格式)
@@ -63,7 +75,8 @@ CREATE TABLE IF NOT EXISTS snapshots(
   completeness TEXT, tokens_in INTEGER, tokens_out INTEGER, reasoning_tokens INTEGER,
   cache_read INTEGER, cache_write INTEGER, total_tokens INTEGER, cost_usd REAL,
   usage_events INTEGER, blocks_total INTEGER, blocks_dropped INTEGER, path TEXT,
-  parent_snapshot TEXT, fork_of TEXT, migrated_from TEXT, migration_baseline TEXT);
+  parent_snapshot TEXT, fork_of TEXT, migrated_from TEXT, migration_baseline TEXT,
+  cwd TEXT, parent_session_ref TEXT, summary_title TEXT);
 CREATE TABLE IF NOT EXISTS ledger_events(
   id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, occurred_at TEXT, kind TEXT,
   model TEXT, provider TEXT, client TEXT, tokens_saved INTEGER, cost_usd REAL,
@@ -98,7 +111,8 @@ def db(vault: Path) -> sqlite3.Connection:
     #   parent_snapshot — sync 增量演进的上一版, owned_stats 据此只数每条演进链的叶子
     #   fork_of         — cv fork 的源节点 (原只活在 JSON 里, 树查询/统计要读全文件)
     #   migrated_from / migration_baseline — --apply 迁移副本的源快照与首版复制来的用量基线
-    for col in ("parent_snapshot", "fork_of", "migrated_from", "migration_baseline"):
+    for col in ("parent_snapshot", "fork_of", "migrated_from", "migration_baseline",
+                "cwd", "parent_session_ref", "summary_title"):
         try:
             conn.execute(f"ALTER TABLE snapshots ADD COLUMN {col} TEXT")
             conn.commit()
@@ -374,7 +388,24 @@ def build_envelope(exported: dict) -> dict:
 SNAP_COLS = ("id,created_at,agent,source_format,provider,model,session_ref,originator,"
              "completeness,tokens_in,tokens_out,reasoning_tokens,cache_read,cache_write,"
              "total_tokens,cost_usd,usage_events,blocks_total,blocks_dropped,path,parent_snapshot,"
-             "fork_of,migrated_from,migration_baseline")
+             "fork_of,migrated_from,migration_baseline,cwd,parent_session_ref,summary_title")
+
+_GENERIC_ORIGINATORS = {"codex_cli_rs", "codex_vscode", "claude-code", "antigravity"}
+
+
+def _derive_summary_title(envelope: dict) -> str:
+    c = envelope.get("capture") or {}
+    orig = str(c.get("originator") or "").strip()
+    if orig and orig.lower() not in _GENERIC_ORIGINATORS:
+        return orig[:100]
+    for b in envelope.get("conversation") or []:
+        if not isinstance(b, dict) or b.get("role") != "user":
+            continue
+        txt = str(b.get("content") or b.get("summary") or "").strip()
+        if not txt or txt.startswith(("<environment_context>", "<permissions instructions>")):
+            continue
+        return " ".join(txt.split())[:100]
+    return orig[:100]
 
 
 def register_snapshot(conn, envelope: dict, sid: str, path: Path):
@@ -382,13 +413,16 @@ def register_snapshot(conn, envelope: dict, sid: str, path: Path):
     lin = envelope.get("lineage") or {}
     base = lin.get("migration_baseline")
     conn.execute(
-        f"INSERT OR REPLACE INTO snapshots({SNAP_COLS}) VALUES({','.join('?' * 24)})",
+        f"INSERT OR REPLACE INTO snapshots({SNAP_COLS}) VALUES({','.join('?' * 27)})",
         (sid, envelope["created_at"], c.get("agent"), c.get("source_format"), c.get("provider"),
          c.get("model"), c.get("session_ref"), c.get("originator"), c.get("completeness"),
          s["tokens_in"], s["tokens_out"], s["reasoning_tokens"], s["cache_read"], s["cache_write"],
          s["total_tokens"], s["cost_usd"], s["usage_events"], s["blocks_total"], s["blocks_dropped"],
          str(path), lin.get("parent_snapshot"), lin.get("fork_of"), lin.get("migrated_from"),
-         json.dumps(base) if base else None))
+         json.dumps(base) if base else None,
+         str(c.get("cwd") or ""),
+         str(c.get("parent_session_ref") or ""),
+         _derive_summary_title(envelope)))
 
 
 LINEAGE_TAIL = 4096  # envelope 的 lineage 是 JSON 最后一个键 (json.dumps 保序): 读尾部即可, 免解析数 MB 全文
@@ -635,13 +669,15 @@ def resolve_top_conversations(
     limit: int = 0,
     include_archived: bool = False,
 ) -> list[dict]:
-    """解析 vault 中每个会话最新的顶层主对话（叶子去重 + 过滤 ZCode 子代理与归档会话）。"""
+    """解析 vault 中每个会话最新的顶层主对话（叶子去重 + 过滤 ZCode 子代理与归档会话）。
+    索引加速: cwd / parent_session_ref / summary_title 缓存在 snapshots 索引列, 老行首扫懒回填后免解析大 JSON。"""
     conn = db(vault)
     try:
         try:
             parents = {r[0] for r in conn.execute(
                 "SELECT parent_snapshot FROM snapshots WHERE parent_snapshot IS NOT NULL")}
-            q = "SELECT id, agent, session_ref, originator, blocks_total, created_at, path FROM snapshots"
+            q = ("SELECT id, agent, session_ref, originator, blocks_total, created_at, path,"
+                 " cwd, parent_session_ref, summary_title FROM snapshots")
             params = []
             agents = _parse_agent_filter(agent)
             if agents:
@@ -672,6 +708,7 @@ def resolve_top_conversations(
         hidden_zcode_refs |= _zcode_archived_refs()
 
     items = []
+    backfill_rows = []
     for _, r in best_by_sess.values():
         sid = r["id"]
         ag = r["agent"] or ""
@@ -684,15 +721,24 @@ def resolve_top_conversations(
             if not alt.exists():
                 continue
             p = alt
-        try:
-            env = json.loads(p.read_text(encoding="utf-8"))
-        except (ValueError, OSError):
-            continue
-        cap = env.get("capture") or {}
-        cwd = cap.get("cwd") or ""
-        title = str(cap.get("originator") or r["originator"] or "")
+        if r["cwd"] is not None and r["parent_session_ref"] is not None and r["summary_title"] is not None:
+            cwd = r["cwd"]
+            parent_sref = r["parent_session_ref"]
+            raw_orig = str(r["originator"] or "")
+            title = r["summary_title"] or raw_orig
+        else:
+            try:
+                env = json.loads(p.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                continue
+            cap = env.get("capture") or {}
+            cwd = str(cap.get("cwd") or "")
+            parent_sref = str(cap.get("parent_session_ref") or "")
+            raw_orig = str(cap.get("originator") or r["originator"] or "")
+            title = _derive_summary_title(env) or raw_orig
+            backfill_rows.append((cwd, parent_sref, title, sid))
         if not include_subagents:
-            if cap.get("parent_session_ref") or title.startswith("workflow subagent"):
+            if parent_sref or raw_orig.startswith("workflow subagent"):
                 continue
         if project and not _norm_project_match(cwd, project):
             continue
@@ -705,6 +751,20 @@ def resolve_top_conversations(
             "blocks_total": r["blocks_total"] or 0,
             "created_at": r["created_at"] or "",
         })
+
+    if backfill_rows:
+        try:
+            wconn = db(vault)
+            try:
+                wconn.executemany(
+                    "UPDATE snapshots SET cwd=?, parent_session_ref=?, summary_title=? WHERE id=?",
+                    backfill_rows,
+                )
+                wconn.commit()
+            finally:
+                wconn.close()
+        except sqlite3.Error:
+            pass
 
     items.sort(key=lambda x: (x["created_at"], x["id"]), reverse=True)
     if limit and limit > 0:
@@ -1671,21 +1731,31 @@ def owned_stats(vault: Path) -> dict:
     if not (vault / "vault.db").exists():
         # 无库: 直接返回零口径, 不在读取路径上凭空建库 — 曾让冷路径"账本为空。先运行…"的
         # 诚实指引被空表 vault.db 永久替换 (二轮 mcp-3)
-        return {"snapshots": 0, "sessions": 0, "tokens_in": 0, "tokens_out": 0,
+        return {"snapshots": 0, "disk_snapshots": 0, "sessions": 0, "tokens_in": 0, "tokens_out": 0,
                 "cache_read": 0, "cache_write": 0, "total_tokens": 0, "input_effective": 0,
                 "cache_hit_rate": 0.0, "by_agent": [],
                 "source": "vault-owned (no vault.db yet)"}
+    snap_dir = vault / "snapshots"
+    try:
+        disk_snaps = sum(1 for e in os.scandir(snap_dir)
+                         if e.is_file() and e.name.startswith("cv_") and e.name.endswith(".json")) \
+            if snap_dir.is_dir() else 0
+    except OSError:
+        disk_snaps = 0
     conn = db(vault)
-    try:  # 只 connect 不建表的调用路径 (如 /stats 直查) 曾留下零表空库毒化冷路径 — 这里兜底建表
-        conn.executescript(SCHEMA)
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass
-    leaf = ("id NOT IN (SELECT parent_snapshot FROM snapshots"
-            " WHERE parent_snapshot IS NOT NULL)")
-    versions = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
-    rows = conn.execute(f"SELECT agent, source_format, tokens_in, tokens_out, cache_read, cache_write,"
-                        f" total_tokens, migration_baseline FROM snapshots WHERE {leaf}").fetchall()
+    try:
+        try:  # 只 connect 不建表的调用路径 (如 /stats 直查) 曾留下零表空库毒化冷路径 — 这里兜底建表
+            conn.executescript(SCHEMA)
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        leaf = ("id NOT IN (SELECT parent_snapshot FROM snapshots"
+                " WHERE parent_snapshot IS NOT NULL)")
+        versions = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+        rows = conn.execute(f"SELECT agent, source_format, tokens_in, tokens_out, cache_read, cache_write,"
+                            f" total_tokens, migration_baseline FROM snapshots WHERE {leaf}").fetchall()
+    finally:
+        conn.close()
     ti = to = cr = cw = tt = denom = 0
     agg = {}
     for r in rows:
@@ -1713,7 +1783,8 @@ def owned_stats(vault: Path) -> dict:
         a[0] += 1
         a[1] += i
     hit = (cr / denom) if denom else 0.0
-    return {"snapshots": versions, "sessions": len(rows), "tokens_in": ti, "tokens_out": to,
+    return {"snapshots": versions, "disk_snapshots": disk_snaps, "sessions": len(rows),
+            "tokens_in": ti, "tokens_out": to,
             "cache_read": cr, "cache_write": cw, "total_tokens": tt,
             "input_effective": denom,  # 规范化总输入 (各来源语义归一后可相加), 概览累计输入用它
             "cache_hit_rate": round(hit, 3),
@@ -2498,6 +2569,9 @@ CREATE TABLE IF NOT EXISTS memory_items(
   hits INTEGER DEFAULT 0, last_used TEXT);
 CREATE INDEX IF NOT EXISTS idx_memory_snap ON memory_items(snapshot_id);
 CREATE INDEX IF NOT EXISTS idx_memory_kind ON memory_items(kind);
+CREATE TABLE IF NOT EXISTS memory_extracted(
+  snapshot_id TEXT, engine TEXT, extracted_at TEXT,
+  PRIMARY KEY (snapshot_id, engine));
 """
 
 # 提取规则 v0: 诚实规则式, 不假装语义理解; 外部引擎 (Supermemory/Graphiti) 走
@@ -2581,58 +2655,108 @@ def load_memory_engine(name: str):
     return getattr(mod, cls_name or "Engine")()
 
 
-def cmd_memory(args):
-    if not hasattr(args, "engine"):
-        args.engine = None  # search/list 子命令未注册 --engine, 统一兜底
-    vault = vault_dir(args)
+def extract_memories_incremental(
+    vault: Path,
+    engine_name: str | None = None,
+    force: bool = False,
+    snapshot_id: str | None = None,
+) -> dict:
+    """增量记忆提取核心函数 (CLI cmd_memory / HTTP POST /memory/extract / POST /sync 共用)。"""
+    eng_name = engine_name or os.environ.get("CV_MEMORY_ENGINE", "rule")
+    engine = load_memory_engine(eng_name)
     conn = db(vault)
-    conn.executescript(SCHEMA + MEMORY_TABLE)
-    engine_name = args.engine or os.environ.get("CV_MEMORY_ENGINE", "rule")
-    engine = load_memory_engine(engine_name)
-    if args.memory_cmd == "extract":
-        snaps = load_all_snapshots_pub(vault)
-        if args.snapshot:
-            snaps = [e for e in snaps if e["_sid"] == args.snapshot]
-        total = 0
-        for env in snaps:
-            conn.execute("DELETE FROM memory_items WHERE snapshot_id=?", (env["_sid"],))
+    try:
+        conn.executescript(SCHEMA + MEMORY_TABLE)
+        done_sids = set()
+        if not force and not snapshot_id:
+            done_sids = {r[0] for r in conn.execute(
+                "SELECT snapshot_id FROM memory_extracted WHERE engine=?", (engine.name,))}
+        snap_dir = vault / "snapshots"
+        files = ([snap_dir / f"{snapshot_id}.json"] if snapshot_id
+                 else sorted(snap_dir.glob("cv_*.json")) if snap_dir.exists() else [])
+        added = 0
+        scanned = 0
+        for f in files:
+            if not f.exists():
+                continue
+            sid = f.stem
+            if sid in done_sids:
+                continue
+            try:
+                env = json.loads(f.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                continue
+            if not isinstance(env, dict) or not isinstance(env.get("capture"), dict) \
+                    or not isinstance(env.get("conversation"), list):
+                continue
+            env["_sid"] = sid
+            scanned += 1
+            conn.execute("DELETE FROM memory_items WHERE snapshot_id=?", (sid,))
             for it in engine.extract(env):
                 conn.execute("INSERT INTO memory_items(created_at,snapshot_id,kind,content,project)"
                              " VALUES(?,?,?,?,?)",
                              (now_iso(), it["snapshot_id"], it["kind"], it["content"], it["project"]))
-                total += 1
+                added += 1
+            conn.execute("INSERT OR REPLACE INTO memory_extracted(snapshot_id,engine,extracted_at)"
+                         " VALUES(?,?,?)", (sid, engine.name, now_iso()))
         conn.commit()
-        by = conn.execute("SELECT kind, COUNT(*) FROM memory_items GROUP BY kind").fetchall()
-        print(f"记忆提取完成: {total} 条 (来自 {len(snaps)} 快照, engine={engine.name}) · "
-              + " · ".join(f"{r[0]}×{r[1]}" for r in by))
-    elif args.memory_cmd == "search":
-        if engine_name != "rule":
-            for m in engine.search(vault, args.query, args.limit):
-                print(f"[{m['kind']:<10}] {m['content'][:100]}  ({m.get('project') or '?'})")
-            return
-        terms = tokenize(args.query)
-        rows = conn.execute("SELECT * FROM memory_items").fetchall()
-        scored = []
-        for r in rows:
-            low = r["content"].lower()
-            n = sum(low.count(t) for t in terms)
-            if n:
-                scored.append((n + (3 if r["kind"] == "summary" else 0), r))
-        scored.sort(key=lambda x: -x[0])
-        if not scored:
-            print(f"无相关记忆: {args.query}")
-            return
-        for n, r in scored[:args.limit]:
-            print(f"[{r['kind']:<10}] {r['content'][:100]}  ({r['project'] or '?'})")
-            conn.execute("UPDATE memory_items SET hits=hits+1, last_used=? WHERE id=?",
-                         (now_iso(), r["id"]))
-        conn.commit()
-    elif args.memory_cmd == "list":
-        q = "SELECT kind, COUNT(*) n FROM memory_items GROUP BY kind"
-        for r in conn.execute(q):
-            print(f"  {r[0]:<10} ×{r[1]}")
-        for r in conn.execute("SELECT * FROM memory_items ORDER BY id DESC LIMIT ?", (args.limit,)):
-            print(f"[{r['kind']:<10}] {r['content'][:90]}  ({r['project'] or '?'})")
+        total = conn.execute("SELECT COUNT(*) FROM memory_items").fetchone()[0]
+        by = {r[0]: r[1] for r in conn.execute("SELECT kind, COUNT(*) FROM memory_items GROUP BY kind")}
+    finally:
+        conn.close()
+    return {"engine": engine.name, "scanned": scanned, "added": added, "total": total, "by_kind": by}
+
+
+def cmd_memory(args):
+    if not hasattr(args, "engine"):
+        args.engine = None  # search/list 子命令未注册 --engine, 统一兜底
+    vault = vault_dir(args)
+    engine_name = args.engine or os.environ.get("CV_MEMORY_ENGINE", "rule")
+    if args.memory_cmd == "extract":
+        res = extract_memories_incremental(
+            vault,
+            engine_name=engine_name,
+            force=bool(getattr(args, "force", False)),
+            snapshot_id=getattr(args, "snapshot", None),
+        )
+        print(f"记忆提取完成: {res['total']} 条 (新增处理 {res['scanned']} 快照 / +{res['added']} 条,"
+              f" engine={res['engine']}) · "
+              + " · ".join(f"{k}×{v}" for k, v in sorted(res["by_kind"].items())))
+        return
+    conn = db(vault)
+    try:
+        conn.executescript(SCHEMA + MEMORY_TABLE)
+        engine = load_memory_engine(engine_name)
+        if args.memory_cmd == "search":
+            if engine_name != "rule":
+                for m in engine.search(vault, args.query, args.limit):
+                    print(f"[{m['kind']:<10}] {m['content'][:100]}  ({m.get('project') or '?'})")
+                return
+            terms = tokenize(args.query)
+            rows = conn.execute("SELECT * FROM memory_items").fetchall()
+            scored = []
+            for r in rows:
+                low = r["content"].lower()
+                n = sum(low.count(t) for t in terms)
+                if n:
+                    scored.append((n + (3 if r["kind"] == "summary" else 0), r))
+            scored.sort(key=lambda x: -x[0])
+            if not scored:
+                print(f"无相关记忆: {args.query}")
+                return
+            for n, r in scored[:args.limit]:
+                print(f"[{r['kind']:<10}] {r['content'][:100]}  ({r['project'] or '?'})")
+                conn.execute("UPDATE memory_items SET hits=hits+1, last_used=? WHERE id=?",
+                             (now_iso(), r["id"]))
+            conn.commit()
+        elif args.memory_cmd == "list":
+            q = "SELECT kind, COUNT(*) n FROM memory_items GROUP BY kind"
+            for r in conn.execute(q):
+                print(f"  {r[0]:<10} ×{r[1]}")
+            for r in conn.execute("SELECT * FROM memory_items ORDER BY id DESC LIMIT ?", (args.limit,)):
+                print(f"[{r['kind']:<10}] {r['content'][:90]}  ({r['project'] or '?'})")
+    finally:
+        conn.close()
 
 
 def load_all_snapshots_pub(vault: Path) -> list:
@@ -2647,31 +2771,68 @@ def load_all_snapshots_pub(vault: Path) -> list:
     return out
 
 
-def memory_search_api(vault: Path, query: str, limit: int = 8) -> list:
-    """serve /memory 与 MCP vault_remember 共用。query 为空 = 返回最新 N 条 (概览速览)。"""
+def memory_counts_api(vault: Path) -> dict:
+    """统计各类型跨会话记忆数量 (无库时不建库)。"""
+    if not (vault / "vault.db").exists():
+        return {"total": 0, "by_kind": {}}
     conn = db(vault)
-    conn.executescript(SCHEMA + MEMORY_TABLE)
-    terms = tokenize(query)
-    rows = conn.execute("SELECT * FROM memory_items").fetchall()
-    if not terms:  # 速览模式: 按 id 倒序取最新, 不计命中 (浏览不污染 last_used 统计)
-        rows.sort(key=lambda r: r["id"], reverse=True)
-        return [{"kind": r["kind"], "content": r["content"], "project": r["project"],
-                 "snapshot": r["snapshot_id"], "score": 0} for r in rows[:limit]]
-    scored = []
-    for r in rows:
-        low = r["content"].lower()
-        n = sum(low.count(t) for t in terms)
-        if n:
-            scored.append((n + (3 if r["kind"] == "summary" else 0), r))
-    scored.sort(key=lambda x: -x[0])
-    out = []
-    for n, r in scored[:limit]:
-        out.append({"kind": r["kind"], "content": r["content"], "project": r["project"],
-                    "snapshot": r["snapshot_id"], "score": n})
-        conn.execute("UPDATE memory_items SET hits=hits+1, last_used=? WHERE id=?",
-                     (now_iso(), r["id"]))
-    conn.commit()
-    return out
+    try:
+        try:
+            by = {r[0]: r[1] for r in conn.execute("SELECT kind, COUNT(*) FROM memory_items GROUP BY kind")}
+        except sqlite3.OperationalError:
+            by = {}
+    finally:
+        conn.close()
+    return {"total": sum(by.values()), "by_kind": by}
+
+
+def memory_search_api(vault: Path, query: str, limit: int = 8, kind: str | None = None) -> list:
+    """serve /memory 与 MCP vault_remember 共用。query 为空 = 返回最新 N 条 (去重速览)。"""
+    conn = db(vault)
+    try:
+        conn.executescript(SCHEMA + MEMORY_TABLE)
+        terms = tokenize(query)
+        k_norm = (kind or "").strip().lower()
+        if k_norm and k_norm != "all":
+            rows = conn.execute("SELECT * FROM memory_items WHERE kind=?", (k_norm,)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM memory_items").fetchall()
+        if not terms:  # 速览模式: 按 id 倒序取最新且按 (kind, content) 去重, 消除多版本快照重复刷屏
+            rows.sort(key=lambda r: r["id"], reverse=True)
+            out, seen = [], set()
+            for r in rows:
+                key = (r["kind"], (r["content"] or "").strip())
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append({"kind": r["kind"], "content": r["content"], "project": r["project"],
+                            "snapshot": r["snapshot_id"], "hits": r["hits"] or 0, "score": 0})
+                if len(out) >= limit:
+                    break
+            return out
+        scored = []
+        for r in rows:
+            low = r["content"].lower()
+            n = sum(low.count(t) for t in terms)
+            if n:
+                scored.append((n + (3 if r["kind"] == "summary" else 0), r["id"], r))
+        scored.sort(key=lambda x: (-x[0], -x[1]))
+        out, seen = [], set()
+        for n, _, r in scored:
+            key = (r["kind"], (r["content"] or "").strip())
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"kind": r["kind"], "content": r["content"], "project": r["project"],
+                        "snapshot": r["snapshot_id"], "hits": (r["hits"] or 0) + 1, "score": n})
+            conn.execute("UPDATE memory_items SET hits=hits+1, last_used=? WHERE id=?",
+                         (now_iso(), r["id"]))
+            if len(out) >= limit:
+                break
+        conn.commit()
+        return out
+    finally:
+        conn.close()
 
 
 # ------------------------------------------------- fork: 快照分叉 (M3)
@@ -2760,40 +2921,49 @@ def cmd_export_harness(args):
     raise SystemExit("请指定 snapshot_id 或 --project <项目名/路径>")
 
 
-def cmd_fork(args):
-    """在历史节点开分支: 复制快照为新内容寻址实体, lineage.fork_of 指向原快照。
-    原快照不可变; fork 的事实 (fork_of) 写在新实体自己的 lineage 里 (spec §7)。
-    fork 后可 cv import <new-id> 把该节点写入 agent 从此续写。"""
-    vault = vault_dir(args)
-    env = load_snapshot(vault, args.snapshot_id)
-    env["lineage"]["fork_of"] = args.snapshot_id
-    if args.message:
-        env["capture"]["fork_note"] = args.message
+def fork_snapshot(vault: Path, source_sid: str, message: str | None = None) -> dict:
+    """在历史节点开分支: 复制快照为新内容寻址实体, lineage.fork_of 指向原快照 (CLI 与 POST /fork 共用)。"""
+    env = load_snapshot(vault, source_sid)
+    env["lineage"]["fork_of"] = source_sid
+    if message:
+        env["capture"]["fork_note"] = message
     sid = snapshot_id(env)
+    (vault / "snapshots").mkdir(parents=True, exist_ok=True)
     out = vault / "snapshots" / f"{sid}.json"
     if out.exists():
         try:
             existing_fork_of = (json.loads(out.read_text(encoding="utf-8")).get("lineage") or {}).get("fork_of")
         except (ValueError, OSError):
             existing_fork_of = None
-        if existing_fork_of != args.snapshot_id:
-            # lineage (含 fork_of) 不参与内容哈希 (spec §7): 同内容 fork 会撞祖先或其他 fork,
-            # fork 的 fork 曾被"已存在"静默吞掉 (全面测试 M4)。fork 的身份 = 内容 + fork_of,
-            # 撞到非本源实体就确定性派生; 重复 fork 同源仍幂等
+        if existing_fork_of != source_sid:
             sid = "cv_" + hashlib.sha256(
-                canonical_bytes(env) + b"|fork_of:" + str(args.snapshot_id).encode()
+                canonical_bytes(env) + b"|fork_of:" + str(source_sid).encode()
             ).hexdigest()[:16]
             out = vault / "snapshots" / f"{sid}.json"
-    if out.exists():
-        print(f"该分叉已存在 (幂等): {out.name}")
-    else:
+    existed = out.exists()
+    if not existed:
         atomic_write_text(out, json.dumps(env, ensure_ascii=False, indent=1))
-        print(f"已分叉: {args.snapshot_id} → {sid}"
-              + (f" · 备注: {args.message}" if args.message else ""))
     conn = db(vault)
-    conn.executescript(SCHEMA)
-    register_snapshot(conn, env, sid, out)
-    conn.commit()
+    try:
+        conn.executescript(SCHEMA)
+        register_snapshot(conn, env, sid, out)
+        conn.commit()
+    finally:
+        conn.close()
+    return {"fork_sid": sid, "source_sid": source_sid, "existed": existed,
+            "message": message or "", "path": str(out)}
+
+
+def cmd_fork(args):
+    """在历史节点开分支: 复制快照为新内容寻址实体, lineage.fork_of 指向原快照。"""
+    vault = vault_dir(args)
+    res = fork_snapshot(vault, args.snapshot_id, getattr(args, "message", None))
+    sid = res["fork_sid"]
+    if res["existed"]:
+        print(f"该分叉已存在 (幂等): {sid}.json")
+    else:
+        print(f"已分叉: {args.snapshot_id} → {sid}"
+              + (f" · 备注: {args.message}" if getattr(args, "message", None) else ""))
     print(f"  续写: python tools/cv.py import {sid} --target codex|claude --apply")
 
 
@@ -2857,9 +3027,11 @@ def audit_summary_and_timeline(vault: Path, since: str, kind: str, limit: int = 
         ok_probes = conn.execute("SELECT COUNT(*) FROM probe_events WHERE status='ok'").fetchone()[0]
         prune_n = conn.execute("SELECT COUNT(*) FROM probe_events WHERE status='prune'").fetchone()[0]
     except sqlite3.OperationalError:
+        conn.close()
         return {"since": since or "(全部)", "total_events": 0,
                 "summary": {"ok_probes": 0, "abnormal": 0, "switches": 0, "model_missing_events": 0},
                 "timeline": []}  # 零表空库: 诚实空态 (M5 同族, 二轮 serve-7)
+    conn.close()
     err_probes = total - ok_probes - switches - prune_n  # prune=GC 留痕, 非探测异常
     # 按天聚合可读时间线
     by_day = {}
@@ -4329,42 +4501,7 @@ def cmd_warm(args):
 # ==== M2 IMPL (dashboard/watch/serve) ====
 # ------------------------------------------------- dashboard: 账本可视化 (M2)
 
-DASH_TMPL = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Context Vault · token 经济面板</title>
-<style>
-:root{--bg:#fafafa;--card:#ffffff;--ink:#09090b;--dim:#a1a1aa;--acc:#18181b;--good:#16a34a;--warn:#d97706}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--ink);font:14px/1.6 "Segoe UI",system-ui,sans-serif;padding:28px}
-h1{font-size:20px;margin-bottom:2px} .sub{color:var(--dim);font-size:12px;margin-bottom:22px}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:26px}
-.card{background:var(--card);border-radius:12px;padding:16px 18px}
-.card .v{font-size:24px;font-weight:700;color:var(--good)} .card .k{color:var(--dim);font-size:12px}
-.card.alt .v{color:var(--acc)}
-h2{font-size:15px;margin:24px 0 12px;color:var(--ink)}
-.bar{display:flex;align-items:center;gap:10px;margin:7px 0}
-.bar .name{width:220px;color:var(--dim);font-size:12px;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.bar .track{flex:1;background:#1d2430;border-radius:6px;height:18px;position:relative}
-.bar .fill{height:100%;border-radius:6px;background:linear-gradient(90deg,#16a34a,var(--good))}
-.bar .val{width:130px;font-size:12px;color:var(--ink)}
-table{width:100%;border-collapse:collapse;font-size:12.5px}
-th,td{text-align:left;padding:7px 10px;border-bottom:1px solid #202836}
-th{color:var(--dim);font-weight:500}
-.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
-.ok{background:var(--good)} .err{background:#ef4444} .warm{background:var(--warn)}
-.months{display:flex;align-items:flex-end;gap:6px;height:120px}
-.mcol{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:4px}
-.mcol .stick{width:100%;max-width:46px;background:linear-gradient(180deg,var(--acc),#e4e4e7);border-radius:4px 4px 0 0}
-.mcol .lb{font-size:10px;color:var(--dim)}
-</style></head><body>
-<h1>Context Vault · token 经济面板</h1>
-<div class="sub">本地优先的信任货币账本 · __GENERATED__</div>
-<div class="cards">__CARDS__</div>
-<h2>按模型节省 (明细账)</h2>__BYMODEL__
-<h2>月度节省走势 (__MONTHS__ 个月)</h2><div class="months">__TIMELINE__</div>
-<h2>上游可用性 (最近探测/切换)</h2><table><tr><th scope="col"></th><th scope="col">时间</th><th scope="col">profile</th><th scope="col">状态</th><th scope="col">详情</th></tr>__PROBE__</table>
-<h2>vault 快照资产 (__NSNAP__)</h2><table><tr><th scope="col">id</th><th scope="col">agent</th><th scope="col">块</th><th scope="col">入 token</th><th scope="col">cache 读</th><th scope="col">完整性</th><th scope="col">时间</th></tr>__SNAPS__</table>
-</body></html>"""
+DASH_TMPL = _load_dashboard_html()
 
 
 def cmd_dashboard(args):
@@ -4511,2314 +4648,9 @@ def cmd_watch(args):
 
 
 # ------------------------------------------------- serve: 常驻服务 + 热索引 (M2)
+# 索引实现已解耦至 tools/cv_index.py, 前端模板解耦至 tools/ui/ (经 cv_ui 组装)
 
-def tokenize(text: str) -> list:
-    """英文词 + CJK 单字及 bigram (中英混合检索够用)."""
-    out, cur = [], []
-    for ch in text.lower():
-        if ch.isascii() and (ch.isalnum() or ch == "_"):
-            cur.append(ch)
-        else:
-            if cur:
-                out.append("".join(cur))
-                cur = []
-            if "\u4e00" <= ch <= "\u9fff":
-                out.append(ch)
-    if cur:
-        out.append("".join(cur))
-    words = [t for t in out if len(t) >= 2]
-    cjk = [out[i] + out[i + 1] for i in range(len(out) - 1)
-           if len(out[i]) == 1 and len(out[i + 1]) == 1]
-    return words + cjk
-
-
-def block_text(b: dict) -> str:
-    """块的检索文本。热索引 (VaultIndex) 与冷回退 (mcp_server) 共用同一实现 —
-    两侧命中集必须一致, 不允许各自维护副本 (2026-11-02 审查 #7)。"""
-    if b["type"] in ("text", "agent_message"):
-        return b.get("content", "") or ""
-    if b["type"] == "thinking":
-        return b.get("summary", "") or ""
-    if b["type"] == "tool_call":
-        return b.get("name", "") + " " + json.dumps(b.get("arguments", {}), ensure_ascii=False)[:200]
-    if b["type"] == "tool_result":
-        return (b.get("content", "") or "")[:500]
-    return ""
-
-
-def score_blocks(env: dict, terms: list) -> list:
-    """块级检索评分, 与热索引同语义: 词项 ∈ set(tokenize(块文本)) 计 1 分/词项/块
-    (索引侧 postings 即按 set(tokenize) 落键)。冷回退必须经此函数, 不得自写匹配。"""
-    tset = set(terms)
-    if not tset:
-        return []
-    hits = []
-    for i, b in enumerate(env["conversation"]):
-        if not isinstance(b, dict):
-            continue
-        try:
-            text = block_text(b)
-        except (AttributeError, TypeError, KeyError, ValueError):
-            continue
-        if not text:
-            continue
-        n = len(tset & set(tokenize(text)))
-        if n:
-            hits.append((n, i, text))
-    return hits
-
-
-class VaultIndex:
-    """内存倒排索引: term -> [(sid, block_idx)]; 指纹失效自动重建。"""
-
-    def __init__(self, vault: Path, block_text_fn):
-        self.vault = vault
-        self.block_text = block_text_fn
-        self.fingerprint = None
-        # 唯一状态句柄: (index, meta, sids, mtimes) 整体换装, 并发读者一次读取永远自洽
-        self._state = ({}, {}, [], {})
-        self._env_cache = OrderedDict()  # sid -> env, 小 LRU (快照内容寻址不可变, 无失效问题)
-        self._rebuild_lock = threading.Lock()  # 单飞: 重建期间其他请求拿现态秒回, 不排队不并发重建
-        self._rebuild_pending = False          # 后台重建已在排队/执行中
-        self._last_rebuild = 0.0               # monotonic; 节流基线 (库在增长时指纹永远追不上, 必须节流)
-        self._last_persist = 0.0               # 缓存落盘节流 (0.4GB 写盘, 增量后 ≥PERSIST_MIN_SEC 才重写)
-        self.stats = {"full": 0, "incr": 0, "cache_load": 0}  # 重建方式计数 (诊断 + 测试断言)
-        if self._load_cache():
-            self._last_rebuild = time.monotonic()
-            self.rebuild()  # 追赶: 缓存之后的新增走增量 (毫秒级), 删除/变更自动转全量
-        else:
-            self.rebuild(force=True)
-
-    # 只读视图 (兼容外部/测试); 需要多字段一致性的代码请一次读 _state
-    @property
-    def index(self): return self._state[0]
-    @property
-    def meta(self): return self._state[1]
-    @property
-    def _sids(self): return self._state[2]
-    @property
-    def _mtimes(self): return self._state[3]
-
-    # postings 位编码: q = (sid 序号 << 24) | 块号。tuple 存 4900 万条 ≈ 4.5GB, 位编码 ≈ 0.4GB。
-    # 块号 < 2**24 (单快照 1670 万块, 实际最大 ~3000), sid 序号 < 2**39 (容量充足)。
-    _BLOCK_BITS = 24
-    _BLOCK_MASK = (1 << 24) - 1
-
-    ENV_CACHE_MAX = 64  # ≈64 × 数 MB 解析对象, 上限半 GB 级; 全量常驻曾是 12GB+ 内存的根源
-    PERSIST_MIN_SEC = 300  # 增量后缓存重写最小间隔 (0.4GB 写盘, 别跟着 2 分钟 sync 跑)
-
-    def load_env(self, sid):
-        """按需读快照全文 (磁盘 JSON -> 解析), LRU 缓存; 不存在/损坏返回 None。"""
-        env = self._env_cache.pop(sid, None)
-        if env is None:
-            try:
-                env = json.loads((self.vault / "snapshots" / f"{sid}.json").read_text(encoding="utf-8"))
-            except (ValueError, OSError):
-                return None
-            env["_sid"] = sid
-        self._env_cache[sid] = env  # 重插入 = LRU 触碰
-        while len(self._env_cache) > self.ENV_CACHE_MAX:
-            self._env_cache.popitem(last=False)
-        return env
-
-    def _scan(self):
-        """(指纹, {stem: file}, {stem: mtime}) — 一次 glob 供指纹与差分共用。"""
-        files = {f.stem: f for f in sorted((self.vault / "snapshots").glob("cv_*.json"))}
-        mtimes = {}
-        for sid, f in files.items():
-            try:
-                mtimes[sid] = int(f.stat().st_mtime)
-            except OSError:
-                continue  # glob 与 stat 之间被删: 本轮按不存在处理, 存活即下轮增量追赶 (全面测试 M9)
-        fp = hashlib.sha256("|".join(f"{sid}:{m}" for sid, m in sorted(mtimes.items())).encode()).hexdigest()
-        return fp, files, mtimes
-
-    def _index_one(self, f, meta, index, sids, mtimes):
-        """解析并索引单个快照。可见顺序是硬约束: 先 meta (healthz/recent 口径),
-        再 sids (postings 解码表), 最后 postings — 并发读者任何时刻都只见完整条目。
-        结构不完整 (缺 capture/conversation/stats) 或类型异常的快照整体跳过, 不拖垮重建。"""
-        try:
-            env = json.loads(f.read_text(encoding="utf-8"))
-            capture, conv, stats = env["capture"], env["conversation"], env["stats"]
-            if not isinstance(capture, dict) or not isinstance(conv, list) or not isinstance(stats, dict):
-                return False  # 合法 JSON 但类型不对: 与冷路径 load_all_snapshots 一致地整体跳过
-            meta_row = {"agent": capture.get("agent"),
-                        "first": next(((b.get("content") or b.get("summary") or "")[:64]
-                                       for b in conv if isinstance(b, dict)
-                                       and b.get("role") == "user"
-                                       and (b.get("content") or b.get("summary"))), ""),
-                        "created_at": env.get("created_at"),
-                        "cwd": capture.get("cwd"),
-                        "blocks": stats["blocks_total"],
-                        "tokens_in": stats["tokens_in"],
-                        "completeness": capture.get("completeness")}
-        except (ValueError, OSError, KeyError, TypeError, AttributeError):
-            return False
-        sid = f.stem
-        meta[sid] = meta_row
-        sid_code = len(sids) << self._BLOCK_BITS
-        sids.append(sid)
-        try:
-            mtimes[sid] = int(f.stat().st_mtime)
-        except OSError:
-            mtimes[sid] = 0  # 解析期间被删: 内容已读入照常入索引, 下轮指纹自然剔除 (M9 同族)
-        for i, b in enumerate(conv):
-            if not isinstance(b, dict):
-                continue
-            try:
-                text = self.block_text(b)
-            except (AttributeError, TypeError, KeyError, ValueError):
-                continue
-            for t in set(tokenize(text)):
-                arr = index.get(t)
-                if arr is None:
-                    arr = index[t] = array("q")
-                arr.append(sid_code | i)
-        return True
-
-    _CACHE_VER = 1
-
-    def _persist(self, force=False):
-        """索引缓存落盘: 启动秒级加载 + 增量追赶, 免 3-4 分钟冷建。失败静默 (纯加速件),
-        但要清掉半截 tmp、且失败不白吃 300s 节流 (30s 后即可重试)。"""
-        now = time.monotonic()
-        if not force and now - self._last_persist < self.PERSIST_MIN_SEC:
-            return
-        tmp = None
-        try:
-            import pickle
-            index, meta, sids, mtimes = self._state  # 一次读取, 与换装原子对齐
-            p = self.vault / "index_cache.pkl"
-            tmp = p.parent / (p.name + f".{os.getpid()}.tmp")
-            with open(tmp, "wb") as fh:
-                pickle.dump({"ver": self._CACHE_VER, "fp": self.fingerprint,
-                             "meta": meta, "index": index,
-                             "sids": sids, "mtimes": mtimes}, fh, protocol=4)
-            os.replace(tmp, p)  # 原子换文件, 并发读者 (其他实例) 不见半截
-            self._last_persist = now
-        except OSError:
-            if tmp is not None:
-                try:
-                    os.unlink(tmp)  # 失败不留半截残骸
-                except OSError:
-                    pass
-            self._last_persist = now - self.PERSIST_MIN_SEC + 30  # 30s 后即可重试, 不白吃整个节流窗
-
-    def _load_cache(self):
-        """启动加载索引缓存。只做结构与版本校验, 指纹可以落后 —— 落后部分由随后的
-        rebuild() 增量追赶 (纯新增毫秒级); 任何加载失败 (含损坏/截断的 pkl) 一律回退全量。"""
-        try:
-            import pickle
-            p = self.vault / "index_cache.pkl"
-            if not p.exists():
-                return False
-            with open(p, "rb") as fh:
-                d = pickle.load(fh)
-            if d.get("ver") != self._CACHE_VER or not isinstance(d.get("index"), dict):
-                return False
-            if not isinstance(d.get("meta"), dict) or len(d.get("sids") or []) != len(d["meta"]):
-                return False
-            self._state = (d["index"], d["meta"], d["sids"], d["mtimes"])
-            self.fingerprint = d["fp"]  # 缓存时刻的指纹; rebuild() 以此差分追赶
-            self.stats["cache_load"] += 1
-            return True
-        except Exception:  # 纯加速件: 损坏/截断 pkl (UnpicklingError) 等任何意外都回退全量重建
-            return False
-
-    def rebuild(self, force=False, stale_after=0.0):
-        """stale_after>0: 距上次重建不足该秒数时直接返回现态 (热路径防重建风暴);
-        已有重建在跑时非阻塞跳过。快照内容寻址只增不改 → 指纹变化若纯为新增,
-        走增量追加 (毫秒级); 删除/变更才全量重建。"""
-        now = time.monotonic()
-        if not force and stale_after and now - self._last_rebuild < stale_after:
-            return
-        if not self._rebuild_lock.acquire(blocking=False):
-            return
-        try:
-            fp, files, mtimes = self._scan()
-            if not force and fp == self.fingerprint:
-                return
-            index, meta, sids, mtimes_known = self._state  # 一次读取: 增量在现容器上只追加 (单调, 无撕裂)
-            added = [f for sid, f in files.items() if sid not in mtimes_known]
-            dirty = (set(mtimes_known) - files.keys()) or \
-                    any(mtimes[s] != mtimes_known[s] for s in mtimes_known if s in mtimes)
-            if not force and self.fingerprint is not None and not dirty and added:
-                for f in added:  # 增量: 只解析新文件, 原地追加 (快照不可变, 老条目永不失效)
-                    self._index_one(f, meta, index, sids, mtimes_known)
-                self.fingerprint = fp
-                self.stats["incr"] += 1
-                self._persist()
-                return
-            # 全量: staging 建好后对 _state 单赋值换装 — 读者一次读 _state, 任何时刻自洽不撕裂
-            new_index, new_meta, new_sids, new_mtimes = {}, {}, [], {}
-            for f in files.values():
-                self._index_one(f, new_meta, new_index, new_sids, new_mtimes)
-            self._state = (new_index, new_meta, new_sids, new_mtimes)
-            self.fingerprint = fp
-            self.stats["full"] += 1
-            self._persist(force=True)
-        finally:
-            self._last_rebuild = time.monotonic()  # 失败也计时, 别让坏请求反复触发
-            self._rebuild_lock.release()
-
-    def request_rebuild(self, stale_after=60.0):
-        """热路径 (/healthz, /recent) 专用: 节流 + 后台单飞重建, 本请求立即返回现态。
-        库在持续增长 (托盘每 2 分钟 sync) 时指纹永远追不上, 同步重建会让请求线程挂死数分钟。"""
-        now = time.monotonic()
-        if now - self._last_rebuild < stale_after:
-            return
-        self._last_rebuild = now  # 排队即计时, 防 N 个请求同时排满
-        if self._rebuild_pending:
-            return
-        self._rebuild_pending = True
-        def _bg():
-            try:
-                self.rebuild()  # 指纹门控; 已有重建在跑则单飞锁直接跳过
-            finally:
-                self._rebuild_pending = False
-        threading.Thread(target=_bg, daemon=True).start()
-
-    def search(self, query: str, limit: int) -> dict:
-        from collections import Counter
-        terms = tokenize(query)
-        index, meta, sids = self._state[:3]  # 单次读取, 全量换装期间不见撕裂
-        sc = Counter()
-        for t in set(terms):  # 与冷回退 score_blocks 同语义: 每词项每块只计 1 分
-            for v in index.get(t, ()):
-                sc[sids[v >> self._BLOCK_BITS]] += 1
-        # 并列得分必须与冷回退同序 (冷: created_at 倒序稳定, 同 created_at 按文件序) —
-        # most_common 的插入序受哈希种子影响, limit 截断边界曾冷热命中不同 (全面测试 M7)
-        pairs = sorted(sc.items())
-        pairs.sort(key=lambda kv: meta[kv[0]].get("created_at") or "", reverse=True)
-        pairs.sort(key=lambda kv: -kv[1])
-        return {"query": query, "terms": terms, "total": len(pairs),
-                "hits": [{"sid": sid, "score": n, **meta[sid]}
-                         for sid, n in pairs[:limit]]}
-
-    def context(self, query: str, limit: int) -> dict:
-        from collections import Counter
-        terms = tokenize(query)
-        index, meta, sids = self._state[:3]  # 单次读取, 全量换装期间不见撕裂
-        pairs = Counter()
-        for t in set(terms):  # 与冷回退 score_blocks 同语义: 每 (词项, 块) 计 1 分
-            for v in index.get(t, ()):
-                pairs[(sids[v >> self._BLOCK_BITS], v & self._BLOCK_MASK)] += 1
-        ordered = sorted(pairs.items(), key=lambda kv: kv[0])            # (sid, 块号) 升序兜底
-        ordered.sort(key=lambda kv: meta[kv[0][0]].get("created_at") or "", reverse=True)
-        ordered.sort(key=lambda kv: -kv[1])                              # 得分降序 (稳定)
-        out, seen = [], set()
-        for (sid, i), n in ordered:
-            if len(out) >= limit:
-                break
-            if sid in seen:
-                continue
-            seen.add(sid)
-            env = self.load_env(sid)
-            if env is None:
-                continue
-            b = env["conversation"][i]
-            text = self.block_text(b)
-            pos = text.lower().find(terms[0]) if terms else 0
-            start = max(0, pos - 200)
-            out.append({"sid": sid, "block": i, "role": b.get("role") or b["type"],
-                        "score": n, "excerpt": text[start:start + 400],
-                        "cwd": meta[sid].get("cwd")})
-        return {"query": query, "terms": terms, "total": len(pairs), "results": out}
-
-
-CONSOLE_HTML = r"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="light dark">
-<title>Context Vault 控制台</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect x='2.5' y='2.5' width='15' height='15' rx='3.5' fill='none' stroke='%230e7568' stroke-width='1.7'/%3E%3Crect x='6.5' y='8' width='7' height='6' rx='1' fill='%230e7568'/%3E%3Cpath d='M7.5 8V6.5a2.5 2.5 0 0 1 5 0V8' fill='none' stroke='%230e7568' stroke-width='1.7' stroke-linecap='round'/%3E%3C/svg%3E">
-<style>
-/* ================= 设计 tokens: Mineral Slate × Forest Teal (Adaptive Light / Dark) ================= */
-:root{
-  color-scheme:light dark;
-  --bg-canvas:light-dark(#f3f5f7,#0d1014);
-  --bg-surface:light-dark(#ffffff,#14191f);
-  --bg-subtle:light-dark(#f8fafb,#1a2028);
-  --bg-inset:light-dark(#eaeef2,#222933);
-  --line:light-dark(#dfe3e8,#27303c);
-  --line-soft:light-dark(#edf0f3,#1e2630);
-  --line-strong:light-dark(#c6cdd5,#3a4656);
-  --ink:light-dark(#15191d,#edf1f5);
-  --ink-2:light-dark(#424a52,#b6c0ca);
-  --ink-3:light-dark(#5e6770,#8d98a5);
-  --acc:#0e7568;
-  --acc-strong:light-dark(#0a5a50,#4fd1c5);
-  --acc-soft:light-dark(#e6f3f0,rgba(79,209,197,.14));
-  --acc-line:light-dark(#b7dcd4,rgba(79,209,197,.32));
-  --acc-ink:#ffffff;
-  --warn:light-dark(#9a5b05,#f5b942);
-  --warn-bg:light-dark(#fdf6e7,rgba(245,185,66,.12));
-  --warn-line:light-dark(#ead5a3,rgba(245,185,66,.32));
-  --err:light-dark(#b42323,#f87171);
-  --err-bg:light-dark(#fdf0ef,rgba(248,113,113,.13));
-  --err-line:light-dark(#eec4c1,rgba(248,113,113,.32));
-  --sans:"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI",system-ui,sans-serif;
-  --mono:"Cascadia Code",Consolas,"SF Mono",ui-monospace,monospace;
-  --fs-xs:12px; --fs-sm:12.5px; --fs-md:13.5px; --fs-lg:15px; --fs-xl:18px;
-  --rad-s:6px; --rad-m:9px; --rad-l:13px;
-  --ctl-h:34px;
-  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:24px; --sp-6:32px;
-  --shadow-1:0 1px 2px light-dark(rgba(16,20,24,.04),rgba(0,0,0,.28));
-  --shadow-2:0 14px 36px light-dark(rgba(16,20,24,.15),rgba(0,0,0,.55));
-  --scrollbar-thumb:light-dark(#8b939c,#55606e); --scrollbar-track:transparent;
-  --sidebar-w:216px; --topbar-h:52px;
-}
-:root:has(> head > meta[name="color-scheme"][content="dark"]){color-scheme:dark}
-:root:has(> head > meta[name="color-scheme"][content="light"]){color-scheme:light}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg-canvas);color:var(--ink);font:var(--fs-md)/1.58 var(--sans);
-  font-feature-settings:"tnum";-webkit-font-smoothing:antialiased;
-  display:grid;grid-template-columns:var(--sidebar-w) minmax(0,1fr);height:100dvh;overflow:hidden}
-::selection{background:var(--acc-soft)}
-*{scrollbar-width:thin;scrollbar-color:var(--scrollbar-thumb) var(--scrollbar-track)}
-@supports not (scrollbar-color:auto){
-  ::-webkit-scrollbar{width:10px;height:10px}
-  ::-webkit-scrollbar-thumb{background:var(--scrollbar-thumb);border-radius:5px;border:2px solid var(--bg-canvas)}
-  ::-webkit-scrollbar-thumb:hover{background:var(--ink-3)}
-}
-:focus-visible{outline:2px solid var(--acc-strong);outline-offset:2px;border-radius:4px}
-button,input,select{font:inherit;color:inherit}
-input,textarea{caret-color:var(--acc-strong)}
-svg{flex:none;display:block}
-
-/* ================= 左侧导航 ================= */
-.sidebar{background:var(--bg-surface);border-right:1px solid var(--line);
-  display:flex;flex-direction:column;min-height:0}
-.brand{display:flex;align-items:center;gap:10px;padding:0 16px;height:var(--topbar-h);
-  border-bottom:1px solid var(--line-soft);font-weight:650;font-size:var(--fs-lg);letter-spacing:.01em}
-.brand .brand-tag{margin-left:auto;font-family:var(--mono);font-size:11px;font-weight:600;
-  color:var(--ink-3);background:var(--bg-subtle);border:1px solid var(--line);border-radius:4px;padding:1px 5px}
-.side-nav{padding:12px 10px;display:flex;flex-direction:column;gap:2px}
-.side-nav button{display:flex;align-items:center;gap:10px;width:100%;background:none;border:none;
-  color:var(--ink-2);padding:8px 11px;border-radius:var(--rad-s);cursor:pointer;font-size:13.5px;
-  text-align:left;position:relative;transition:background .12s ease,color .12s ease}
-.side-nav button:hover{background:var(--bg-subtle);color:var(--ink)}
-.side-nav button.on{background:var(--acc-soft);color:var(--acc-strong);font-weight:600}
-.side-nav button.on::before{content:"";position:absolute;left:0;top:7px;bottom:7px;width:3px;
-  border-radius:0 3px 3px 0;background:var(--acc)}
-.side-nav .kbd{margin-left:auto;font-family:var(--mono);font-size:11.5px;color:var(--ink-3);
-  border:1px solid var(--line);border-radius:4px;padding:0 5px;line-height:17px;background:var(--bg-subtle)}
-.side-foot{margin-top:auto;padding:12px 14px 14px;border-top:1px solid var(--line-soft);
-  font-size:var(--fs-xs);color:var(--ink-3);display:flex;flex-direction:column;gap:10px}
-.privacy{display:flex;align-items:center;gap:6px;line-height:1.45;color:var(--ink-2)}
-.theme-sw{display:grid;grid-template-columns:repeat(3,1fr);gap:2px;background:var(--bg-subtle);
-  border:1px solid var(--line);border-radius:var(--rad-s);padding:2px}
-.theme-sw button{background:none;border:none;color:var(--ink-3);font-size:11.5px;padding:3px 0;
-  border-radius:4px;cursor:pointer;transition:background .12s ease,color .12s ease}
-.theme-sw button:hover{color:var(--ink)}
-.theme-sw button[aria-pressed="true"]{background:var(--bg-surface);color:var(--ink);font-weight:600;box-shadow:var(--shadow-1)}
-
-/* ================= 顶栏: 当前分区 / 命令式检索 / 同步与服务状态 ================= */
-.workspace{display:flex;flex-direction:column;min-width:0;min-height:0}
-.topbar{height:var(--topbar-h);flex:none;display:flex;align-items:center;gap:12px;
-  padding:0 22px;background:var(--bg-surface);border-bottom:1px solid var(--line)}
-.topbar h1{font-size:var(--fs-lg);font-weight:650;white-space:nowrap;min-width:74px}
-.gsearch{flex:1;max-width:500px;margin-right:auto;position:relative;display:flex;align-items:center}
-.gsearch input[type=search]{width:100%;height:var(--ctl-h);background:var(--bg-subtle);border:1px solid var(--line);
-  border-radius:var(--rad-s);padding:0 74px 0 32px;font-size:13px;
-  transition:border-color .12s ease,background .12s ease}
-.gsearch input[type=search]:focus{border-color:var(--acc);background:var(--bg-surface)}
-.gsearch .gs-ic{position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--ink-3);pointer-events:none}
-.gsearch kbd{position:absolute;right:8px;top:50%;transform:translateY(-50%);font-family:var(--mono);
-  font-size:11px;color:var(--ink-3);border:1px solid var(--line);border-radius:4px;
-  padding:0 5px;line-height:18px;background:var(--bg-surface);pointer-events:none}
-.top-actions{display:flex;align-items:center;gap:8px;flex:none}
-.status-pill{display:inline-flex;align-items:center;gap:7px;font-size:var(--fs-xs);color:var(--ink-2);
-  border:1px solid var(--line);border-radius:999px;padding:4px 12px;background:var(--bg-subtle);white-space:nowrap}
-.status-pill .pulse{width:7px;height:7px;border-radius:50%;background:var(--acc);
-  box-shadow:0 0 0 0 rgba(14,117,104,.4);animation:pulse 2.4s ease-out infinite}
-@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(14,117,104,.35)}70%{box-shadow:0 0 0 6px rgba(14,117,104,0)}100%{box-shadow:0 0 0 0 rgba(14,117,104,0)}}
-.status-pill.err{color:var(--err);border-color:var(--err-line);background:var(--err-bg)}
-.status-pill.err .pulse{background:var(--err);animation:none}
-.status-pill.auth{color:var(--warn);border-color:var(--warn-line);background:var(--warn-bg)}
-.status-pill.auth .pulse{background:var(--warn);animation:none}
-
-.content{flex:1;overflow-y:auto;padding:20px 26px 56px}
-.content-inner{max-width:1420px;margin:0 auto}
-section{animation:fadein .14s ease-out}
-@keyframes fadein{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
-
-/* ================= 通用架构元素 ================= */
-.card{background:var(--bg-surface);border:1px solid var(--line);border-radius:var(--rad-m);
-  box-shadow:var(--shadow-1)}
-.card>.card-h,.mig-step>.card-h{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 16px;
-  font-size:var(--fs-xs);font-weight:650;color:var(--ink-2);letter-spacing:.03em;
-  border-bottom:1px solid var(--line-soft);min-height:40px}
-.card>.card-h .ch-l,.mig-step>.card-h .ch-l{display:flex;align-items:center;gap:8px;min-width:0}
-.card>.card-h .sub,.mig-step>.card-h .sub{font-weight:400;letter-spacing:0;color:var(--ink-3);white-space:nowrap}
-.card>.card-h .ch-link{font-weight:500;color:var(--acc-strong);background:none;border:none;cursor:pointer;font-size:var(--fs-xs);padding:2px 4px;border-radius:4px;white-space:nowrap}
-.card>.card-h .ch-link:hover{background:var(--acc-soft)}
-.card>.card-b{padding:8px 12px}
-.src{font-size:var(--fs-xs);color:var(--ink-3)}
-.hint{color:var(--ink-3);font-size:var(--fs-sm)}
-.mono{font-family:var(--mono);font-size:var(--fs-sm)}
-.nowr{white-space:nowrap}
-.num{font-variant-numeric:tabular-nums}
-
-/* ================= 响应式零横向溢出表格 (@container) ================= */
-.tbl-wrap{width:100%;max-inline-size:100%;overflow-x:auto;container:tbl / inline-size}
-table{width:100%;border-collapse:collapse;font-size:13px}
-table.fixed-cols{table-layout:fixed}
-th{font-size:var(--fs-xs);font-weight:600;color:var(--ink-2);text-align:left;letter-spacing:.02em;
-  padding:8px 12px;border-bottom:1px solid var(--line);background:var(--bg-subtle);white-space:nowrap;
-  position:sticky;top:0;z-index:1}
-td{padding:8px 12px;border-bottom:1px solid var(--line-soft);vertical-align:middle;min-width:0}
-tr:last-child td{border-bottom:none}
-td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
-td.mono{font-family:var(--mono);font-size:var(--fs-sm)}
-.tbl-44 td{height:44px}
-/* 列宽预算: 保证 1440px 与 900px 桌面视口零横向溢出 */
-table.tbl-ov col.c-src{width:96px}
-table.tbl-ov col.c-dir{width:196px}
-table.tbl-ov col.c-time{width:84px}
-table.tbl-snap col.c-sid{width:204px}
-table.tbl-snap col.c-src{width:94px}
-table.tbl-snap col.c-num{width:80px}
-table.tbl-snap col.c-time{width:116px}
-table.tbl-snap col.c-dir{width:186px}
-table.tbl-snap col.c-act{width:80px}
-table.tbl-probe col.c-time{width:136px}
-table.tbl-probe col.c-node{width:146px}
-table.tbl-probe col.c-http{width:96px}
-table.tbl-probe col.c-lat{width:128px}
-.sid-wrap{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;max-width:100%}
-@container tbl (inline-size < 740px){
-  table.tbl-snap col.c-sid{width:160px}
-  table.tbl-snap col.c-dir{width:124px}
-  table.tbl-ov col.c-dir{width:140px}
-}
-@container tbl (inline-size < 560px){
-  table.fixed-cols{table-layout:auto}
-  table.fixed-cols colgroup{display:none}
-  .tbl-wrap table,.tbl-wrap tbody,.tbl-wrap tr,.tbl-wrap td{display:block;width:100%}
-  .tbl-wrap thead{display:none}
-  .tbl-wrap tr{border-bottom:1px solid var(--line);padding:8px 12px}
-  .tbl-wrap tr:last-child{border-bottom:none}
-  .tbl-wrap td{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;
-    border-bottom:none;padding:3px 0;height:auto!important;text-align:right}
-  .tbl-wrap td::before{content:attr(data-label);font-size:var(--fs-xs);color:var(--ink-3);
-    font-weight:600;flex:none;text-align:left;padding-top:1px}
-  .tbl-wrap td[data-label=""]::before{display:none}
-  .tbl-wrap td .sumbtn{max-width:100%;text-align:right;overflow:visible}
-  .tbl-wrap td .sum-line{max-width:100%;white-space:normal;flex-wrap:wrap;justify-content:flex-end;gap:4px}
-  .tbl-wrap td .sum-main{white-space:normal;overflow:visible;text-overflow:unset;word-break:break-word;flex:1 1 100%;text-align:right}
-}
-
-.linklike{background:none;border:none;padding:0;cursor:pointer;text-align:left}
-.sid{color:var(--acc-strong);font-family:var(--mono);font-size:12.5px}
-.sid:hover{text-decoration:underline;text-underline-offset:3px}
-.sumbtn{display:block;width:100%;max-width:100%;font-size:13px;color:var(--ink);overflow:hidden}
-.sumbtn:hover .sum-main{color:var(--acc-strong);text-decoration:underline;text-underline-offset:3px}
-.chip{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;padding:1px 7px;border-radius:5px;
-  background:var(--bg-subtle);color:var(--ink-2);border:1px solid var(--line);white-space:nowrap;line-height:1.45}
-.chip.warn{color:var(--warn);border-color:var(--warn-line);background:var(--warn-bg)}
-.chip.ok{color:var(--acc-strong);background:var(--acc-soft);border-color:var(--acc-line)}
-.chip.err{color:var(--err);background:var(--err-bg);border-color:var(--err-line)}
-.dot{display:inline-block;width:7px;height:7px;border-radius:50%;flex:none}
-.dot.ok{background:var(--acc)} .dot.err{background:var(--err)} .dot.warn{background:var(--warn)} .dot.sw{background:var(--warn)} .dot.off{background:var(--line-strong)}
-.pill{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;padding:1px 8px;border-radius:999px;font-weight:600;white-space:nowrap}
-.pill.ok{color:var(--acc-strong);background:var(--acc-soft)}
-.pill.err{color:var(--err);background:var(--err-bg)}
-.pill.warn{color:var(--warn);background:var(--warn-bg)}
-.empty{padding:30px 20px;text-align:center;color:var(--ink-3);font-size:13px;line-height:1.85;
-  display:flex;flex-direction:column;align-items:center;gap:8px}
-.empty code,.hint code{font-family:var(--mono);font-size:var(--fs-xs);color:var(--ink-2);
-  background:var(--bg-subtle);border:1px solid var(--line-soft);padding:1px 6px;border-radius:5px;overflow-wrap:anywhere}
-.skel{height:13px;border-radius:5px;background:linear-gradient(90deg,var(--bg-inset) 25%,var(--line-soft) 50%,var(--bg-inset) 75%);
-  background-size:200% 100%;animation:shimmer 1.3s linear infinite;margin:10px 0}
-@keyframes shimmer{to{background-position:-200% 0}}
-.dir{font-family:var(--mono);font-size:var(--fs-xs);color:var(--ink-3);white-space:nowrap;
-  display:inline-flex;align-items:center;gap:5px;max-width:100%;overflow:hidden}
-.dir span{overflow:hidden;text-overflow:ellipsis}
-
-/* 按钮 / 表单 */
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;background:var(--bg-surface);
-  border:1px solid var(--line-strong);border-radius:var(--rad-s);padding:0 13px;height:var(--ctl-h);
-  font-size:13px;font-weight:500;cursor:pointer;transition:border-color .12s ease,background .12s ease,transform .08s ease;white-space:nowrap}
-.btn:hover{border-color:var(--ink-3);background:var(--bg-subtle)}
-.btn:active{transform:translateY(1px)}
-.btn.primary{background:var(--acc);border-color:var(--acc);color:var(--acc-ink);font-weight:600}
-.btn.primary:hover{background:#0b5d53;border-color:#0b5d53}
-.btn.danger{background:var(--bg-surface);border-color:var(--err-line);color:var(--err)}
-.btn.danger:hover{background:var(--err-bg);border-color:var(--err)}
-.btn.sm{height:27px;padding:0 9px;font-size:12px}
-.btn:disabled{opacity:.48;cursor:not-allowed;transform:none}
-.btn.on,.btn[aria-pressed="true"]{border-color:var(--acc);background:var(--acc-soft);color:var(--acc-strong);font-weight:600}
-input[type=search],select{background:var(--bg-surface);border:1px solid var(--line-strong);color:var(--ink);
-  border-radius:var(--rad-s);height:var(--ctl-h);padding:0 12px;font-size:13px;transition:border-color .12s ease}
-input[type=search]::placeholder{color:var(--ink-3)}
-input[type=search]:focus,select:focus{border-color:var(--acc)}
-select{appearance:none;-webkit-appearance:none;padding-right:28px;cursor:pointer;min-width:0;width:100%;max-width:100%;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2378828d' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-  background-repeat:no-repeat;background-position:right 9px center}
-
-/* ================= 集成式 KPI 台账带 (极简发丝线分割, 无冗余快捷卡片) ================= */
-.kpi-band{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));
-  background:var(--bg-surface);border:1px solid var(--line);border-radius:var(--rad-m);
-  box-shadow:var(--shadow-1);overflow:hidden}
-.kpi{padding:14px 18px;min-width:0;border-right:1px solid var(--line-soft);display:flex;flex-direction:column;gap:4px}
-.kpi:last-child{border-right:none}
-.kpi .k{font-size:var(--fs-xs);color:var(--ink-3);font-weight:500;cursor:help;display:flex;align-items:center;justify-content:space-between;gap:6px}
-.kpi .v{font-family:var(--mono);font-size:23px;font-weight:650;letter-spacing:-.02em;line-height:1.2;
-  font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ink)}
-.kpi .v small{font-size:12.5px;font-weight:500;color:var(--ink-3);margin-left:4px}
-.kpi .exact{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.kpi-bad{color:var(--err)}
-tr.rowlink{cursor:pointer;transition:background .08s ease}
-tr.rowlink:hover{background:var(--bg-subtle)}
-
-/* ================= 概览双栏栅格 ================= */
-.ov-grid{display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);gap:14px;margin-top:14px;align-items:start}
-.ov-side{display:flex;flex-direction:column;gap:12px;min-width:0}
-.feed-row{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:12.5px;
-  padding:8px 14px;border-bottom:1px solid var(--line-soft);min-width:0}
-.feed-row:last-child{border-bottom:none}
-.feed-main{display:flex;align-items:center;gap:8px;min-width:0;flex:1;overflow:hidden}
-.feed-txt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink);min-width:0}
-.feed-r{display:flex;align-items:center;gap:8px;flex:none;font-size:var(--fs-xs);color:var(--ink-3);font-family:var(--mono)}
-.audit-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;background:var(--line-soft)}
-.audit-cell{background:var(--bg-surface);padding:9px 14px;display:flex;flex-direction:column;gap:2px}
-.audit-cell .al{font-size:11.5px;color:var(--ink-3)}
-.audit-cell .av{font-family:var(--mono);font-size:15px;font-weight:650;font-variant-numeric:tabular-nums;color:var(--ink)}
-
-details.card>summary{list-style:none;display:flex;align-items:center;gap:8px;padding:11px 16px;cursor:pointer;
-  font-size:var(--fs-xs);font-weight:650;color:var(--ink-2);letter-spacing:.03em;user-select:none}
-details.card>summary::-webkit-details-marker{display:none}
-details.card>summary .sub{font-weight:400;color:var(--ink-3)}
-details.card>summary .tw{transition:transform .15s ease;color:var(--ink-3);font-size:10px}
-details.card[open]>summary .tw{transform:rotate(90deg)}
-details.card .card-b{border-top:1px solid var(--line-soft)}
-.foot{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px 12px;padding:9px 16px;
-  border-top:1px solid var(--line-soft);font-size:var(--fs-xs);color:var(--ink-3)}
-.foot button.linklike,.foot a{cursor:pointer;color:var(--acc-strong);font-size:var(--fs-xs);font-weight:500;white-space:nowrap;flex:none}
-.foot button.linklike:hover,.foot a:hover{text-decoration:underline;text-underline-offset:3px}
-.kv{display:grid;grid-template-columns:130px minmax(0,1fr);gap:6px 12px;font-size:12.5px}
-.kv b{color:var(--ink-3);font-weight:500;white-space:nowrap}
-.kv span{font-variant-numeric:tabular-nums;min-width:0;overflow-wrap:anywhere}
-.section-note{font-size:var(--fs-xs);color:var(--ink-3);line-height:1.65;margin-top:10px}
-
-/* 月度走势 */
-.months{display:flex;gap:10px;height:142px;padding:24px 4px 0;max-width:680px}
-.yax{width:52px;flex:none;display:flex;flex-direction:column;justify-content:space-between;align-items:flex-end;
-  font-family:var(--mono);font-size:var(--fs-xs);color:var(--ink-3);font-variant-numeric:tabular-nums;padding-bottom:18px}
-.bars{flex:1;display:flex;gap:6px;height:100%;
-  background:repeating-linear-gradient(to top,transparent 0 34px,var(--line-soft) 34px 35px)}
-.mcol{flex:1;position:relative;min-width:0}
-.mcol .val{position:absolute;left:50%;transform:translateX(-50%);
-  bottom:min(calc(22px + var(--h,50)*.96%),calc(100% - 4px));
-  font-family:var(--mono);font-size:11.5px;color:var(--ink-2);white-space:nowrap;font-variant-numeric:tabular-nums}
-.mcol .stick{position:absolute;left:50%;bottom:22px;width:30px;max-width:60%;height:3%;
-  max-height:calc(100% - 26px);background:var(--acc);border-radius:4px 4px 0 0;transform:translateX(-50%);
-  transform-origin:bottom;animation:grow .45s cubic-bezier(.2,.7,.3,1) backwards;animation-delay:calc(var(--i,0)*35ms)}
-@keyframes grow{from{transform:translateX(-50%) scaleY(0)}}
-.mcol .lb{position:absolute;left:0;right:0;bottom:0;text-align:center;font-size:11.5px;color:var(--ink-3);font-variant-numeric:tabular-nums}
-
-/* 表格卡片 */
-.cardbox{border:1px solid var(--line);border-radius:var(--rad-m);background:var(--bg-surface);
-  box-shadow:var(--shadow-1);overflow:clip}
-.sum-line{display:flex;align-items:center;gap:6px;overflow:hidden;white-space:nowrap;min-width:0;max-width:100%}
-.sum-main{overflow:hidden;text-overflow:ellipsis;min-width:0;flex:0 1 auto}
-.mini-tag{flex:none;font-family:var(--mono);font-size:11px;color:var(--ink-3);
-  background:var(--bg-subtle);border:1px solid var(--line);border-radius:4px;padding:0 5px;line-height:16px}
-.relay-badge{display:inline-flex;align-items:center;gap:5px;background:var(--bg-subtle);
-  border:1px solid var(--line);border-radius:5px;padding:1px 7px;line-height:1.45;vertical-align:middle}
-.relay-badge .rl{color:var(--ink-3);font-size:11.5px}
-.relay-badge .rn{font-family:var(--mono);color:var(--ink);font-weight:600;font-size:11.5px}
-.lat{font-family:var(--mono);font-size:12.5px;white-space:nowrap}
-.lat.good{color:var(--acc-strong)}.lat.mid{color:var(--ink-2)}.lat.warm{color:var(--warn)}.lat.muted{color:var(--ink-3)}
-.latbar{width:44px;height:3px;background:var(--bg-inset);border-radius:2px;overflow:hidden;
-  display:inline-block;vertical-align:middle;margin-left:7px}
-.latbar i{display:block;height:100%;background:currentColor;border-radius:2px}
-
-/* ================= 快照工具栏 & 视图切换 ================= */
-.controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
-.seg{display:inline-flex;background:var(--bg-subtle);border:1px solid var(--line);border-radius:var(--rad-s);padding:2px;gap:2px}
-.seg .btn{height:28px;border:none;background:none;padding:0 11px;box-shadow:none;font-size:12.5px}
-.seg .btn.on,.seg .btn[aria-pressed="true"]{background:var(--bg-surface);color:var(--acc-strong);box-shadow:var(--shadow-1)}
-.ctl-search{position:relative;flex:1;min-width:210px;display:flex;align-items:center}
-.ctl-search svg{position:absolute;left:10px;color:var(--ink-3);pointer-events:none}
-.ctl-search input[type=search]{width:100%;padding-left:32px}
-.meta-line{font-size:var(--fs-xs);color:var(--ink-3);margin:0 2px 10px}
-.meta-line .xbtn{background:none;border:none;color:var(--acc-strong);cursor:pointer;font-size:var(--fs-xs);padding:2px 6px;border-radius:4px}
-.meta-line .xbtn:hover{background:var(--acc-soft)}
-.pager{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 2px;font-size:var(--fs-sm);color:var(--ink-2)}
-.pager .btn{height:28px;padding:0 11px;font-size:12px}
-
-/* ================= 迁移工作台: 左右双栏 (全库搜索 + 目标格子 + 右侧实时预览/一屏执行) ================= */
-.mig-shell{display:grid;grid-template-columns:minmax(0,440px) minmax(0,1fr);gap:14px;align-items:start}
-.mig-col{display:flex;flex-direction:column;gap:12px;min-width:0}
-.mig-step{background:var(--bg-surface);border:1px solid var(--line);border-radius:var(--rad-m);box-shadow:var(--shadow-1)}
-.mig-step>.card-h .stepno{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;
-  border-radius:50%;background:var(--acc);color:var(--acc-ink);font-size:11px;font-weight:700;font-family:var(--mono)}
-.mig-step .card-b{padding:12px 14px}
-.mig-src-search{display:flex;gap:6px;margin-bottom:8px}
-.mig-src-search .ctl-search{min-width:0}
-.tgt-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}
-.tgt-card{display:flex;gap:8px;align-items:flex-start;border:1px solid var(--line);border-radius:var(--rad-s);
-  padding:8px 10px;cursor:pointer;transition:border-color .12s ease,background .12s ease;background:var(--bg-surface)}
-.tgt-card.wide{grid-column:1 / -1}
-.tgt-card:hover{border-color:var(--line-strong)}
-.tgt-card.on{border-color:var(--acc);background:var(--acc-soft)}
-.tgt-card input{margin-top:3px;accent-color:var(--acc)}
-.tgt-card .tt{font-weight:600;font-size:13px;line-height:1.3}
-.tgt-card .td{font-size:11.5px;color:var(--ink-3);margin-top:2px;line-height:1.4}
-.apply-toggle{display:flex;gap:7px;margin-top:10px}
-.apply-toggle button{flex:1;display:flex;flex-direction:column;align-items:flex-start;gap:2px;
-  border:1px solid var(--line);background:var(--bg-surface);border-radius:var(--rad-s);padding:7px 10px;cursor:pointer;text-align:left}
-.apply-toggle button .at-t{font-size:12.5px;font-weight:600}
-.apply-toggle button .at-d{font-size:11px;color:var(--ink-3);line-height:1.35}
-.apply-toggle button.on{border-color:var(--acc);background:var(--acc-soft)}
-.apply-toggle button.on.risky{border-color:var(--err);background:var(--err-bg)}
-.apply-toggle button.on.risky .at-t{color:var(--err)}
-.sel-meta{margin-top:8px;font-size:var(--fs-xs);color:var(--ink-2);line-height:1.55}
-.sel-meta .mono{font-size:11.5px}
-.immlist{list-style:none;padding:2px 0}
-.immlist li{display:flex;gap:8px;font-size:12.5px;color:var(--ink-2);padding:3.5px 0;line-height:1.5}
-.immlist li svg{flex:none;margin-top:3px}
-.immlist li.good{color:var(--acc-strong)}
-.tl-day{padding:4px 0;border-bottom:1px solid var(--line-soft)}
-.tl-day:last-child{border-bottom:none}
-.tl-d{font-family:var(--mono);font-size:var(--fs-xs);color:var(--ink-3)}
-.tl-row{display:flex;align-items:center;gap:8px;font-size:var(--fs-sm);padding:3px 0;color:var(--ink-2)}
-.tl-row.cur{color:var(--ink);font-weight:600}
-.term{background:#0f1419;color:#dfe5ea;border:1px solid #242e3a;border-radius:var(--rad-s);padding:10px 13px;
-  font-family:var(--mono);font-size:12.5px;margin-top:10px;line-height:1.65;overflow-x:auto;white-space:nowrap}
-.term .tp{display:block;color:#93a0b0;font-size:11.5px;margin-bottom:3px;font-family:var(--sans);white-space:normal}
-.term code{color:#6ee7b7}
-.exec-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.mig-idle{border:1px dashed var(--line-strong);border-radius:var(--rad-s);padding:22px 18px;text-align:center;
-  color:var(--ink-3);font-size:13px;line-height:1.85;background:var(--bg-subtle)}
-.mig-idle code{font-family:var(--mono);font-size:var(--fs-xs);color:var(--ink-2);background:var(--bg-surface);padding:2px 6px;border-radius:4px}
-.pv-stats{display:flex;flex-wrap:wrap;gap:6px 18px;padding:10px 14px;border:1px solid var(--line-soft);
-  border-radius:var(--rad-s);background:var(--bg-subtle);margin-bottom:12px}
-.pv-cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px 24px;align-items:start}
-.pv-cols .sec{margin:0 0 4px;font-size:var(--fs-xs);color:var(--ink-3);font-weight:650}
-.mig-profile{margin-top:10px;padding-top:10px;border-top:1px solid var(--line-soft)}
-.mig-profile .chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
-.result-card{border:1px solid var(--acc-line);background:var(--acc-soft);border-radius:var(--rad-m);padding:12px 14px}
-.result-card.err{border-color:var(--err-line);background:var(--err-bg)}
-.result-card .rt{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13.5px;margin-bottom:5px}
-.result-card .path-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:6px 0}
-
-/* ================= 哨兵 ================= */
-.probe-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px}
-.probe-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));background:var(--bg-surface);
-  border:1px solid var(--line);border-radius:var(--rad-m);margin-bottom:12px;box-shadow:var(--shadow-1);overflow:hidden}
-.probe-kpis .kpi{padding:11px 16px}
-.probe-kpis .kpi .v{font-size:18px}
-.stat-inline{display:inline-flex;align-items:baseline;gap:6px;font-size:12.5px;color:var(--ink-2)}
-.stat-inline b{font-family:var(--mono);font-weight:650;font-variant-numeric:tabular-nums;color:var(--ink)}
-.probe-state{display:inline-flex;align-items:center;gap:8px;padding:5px 13px;border-radius:999px;
-  font-size:13px;font-weight:600;border:1px solid var(--line)}
-.probe-state.off{color:var(--ink-3);background:var(--bg-subtle)}
-.probe-state.ok{color:var(--acc-strong);background:var(--acc-soft);border-color:var(--acc-line)}
-.probe-state.err{color:var(--err);background:var(--err-bg);border-color:var(--err-line)}
-.probe-state.warn{color:var(--warn);background:var(--warn-bg);border-color:var(--warn-line)}
-
-/* ================= 原生 <dialog> 抽屉 & Confirm & Popover Toast ================= */
-.drawer,#confirm-dlg{overscroll-behavior:contain}
-.drawer{position:fixed;inset:0;margin:0 0 0 auto;width:min(490px,94vw);max-width:none;max-height:none;
-  background:var(--bg-surface);color:var(--ink);border:0;border-left:1px solid var(--line);overflow-y:auto;padding:20px 22px 28px;
-  box-shadow:var(--shadow-2);height:auto;transform:translateX(28px);opacity:0;
-  transition:transform .2s cubic-bezier(.2,.7,.3,1),opacity .16s ease,overlay .2s allow-discrete,display .2s allow-discrete}
-.drawer[open]{transform:none;opacity:1}
-@starting-style{.drawer[open]{transform:translateX(28px);opacity:0}}
-.drawer::backdrop{background:rgba(12,16,20,.38);overflow:hidden;overscroll-behavior:contain;
-  opacity:1;transition:opacity .18s ease,overlay .2s allow-discrete,display .2s allow-discrete}
-@starting-style{.drawer[open]::backdrop{opacity:0}}
-.dw-head{display:flex;align-items:flex-start;gap:12px}
-.dw-head h3{font-size:var(--fs-lg);font-weight:650;margin-top:2px}
-.dw-sub{font-family:var(--mono);font-size:var(--fs-xs);color:var(--ink-3);word-break:break-all;margin:2px 0 0}
-.dw-close{margin-left:auto;flex:none;background:none;border:1px solid transparent;border-radius:6px;
-  color:var(--ink-3);cursor:pointer;padding:5px;display:inline-flex}
-.dw-close:hover{color:var(--ink);border-color:var(--line);background:var(--bg-inset)}
-.dw-chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:14px 0 2px}
-.drawer h3.sec{font-size:var(--fs-xs);font-weight:650;color:var(--ink-3);letter-spacing:.04em;margin:18px 0 8px}
-.dw-actions{display:flex;gap:10px;margin-top:22px;padding-top:16px;border-top:1px solid var(--line-soft)}
-.dw-actions .btn{flex:1;justify-content:center}
-
-#toast{position:fixed;inset:auto;bottom:22px;right:22px;margin:0;width:auto;height:auto;overflow:visible;
-  background:var(--bg-surface);color:var(--ink);border:1px solid var(--line);border-radius:var(--rad-m);
-  padding:11px 16px;max-width:420px;font-size:13px;line-height:1.55;box-shadow:var(--shadow-2);
-  transform:translateY(8px);opacity:0;pointer-events:none;
-  transition:transform .16s ease,opacity .16s ease,overlay .16s allow-discrete,display .16s allow-discrete}
-#toast:popover-open{transform:none;opacity:1}
-@starting-style{#toast:popover-open{transform:translateY(8px);opacity:0}}
-#toast.err{border-color:var(--err-line)}
-
-#confirm-dlg{border:1px solid var(--line);border-radius:var(--rad-l);background:var(--bg-surface);color:var(--ink);
-  padding:20px 22px 18px;width:min(430px,92vw);max-width:92vw;box-shadow:var(--shadow-2)}
-#confirm-dlg::backdrop{background:rgba(12,16,20,.4);overflow:hidden}
-#confirm-dlg h3{font-size:var(--fs-lg);font-weight:650;margin-bottom:8px}
-#confirm-msg{font-size:13px;line-height:1.68;color:var(--ink-2);white-space:pre-line;overflow-wrap:anywhere}
-#confirm-dlg form{display:flex;gap:10px;justify-content:flex-end;margin-top:18px}
-
-@media(prefers-reduced-motion:reduce){
-  *,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important}
-}
-
-/* ================= 项目树整合面板 ================= */
-.proj-dock{background:var(--bg-surface);border:1px solid var(--line);border-radius:var(--rad-m);
-  box-shadow:var(--shadow-1);margin-bottom:12px;overflow:hidden}
-.proj-toolbar,.proj-batch-row{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line-soft)}
-.proj-toolbar label,.proj-batch-row label{font-size:var(--fs-xs);color:var(--ink-3);font-weight:600;white-space:nowrap}
-.proj-toolbar select{flex:0 1 200px;min-width:150px}
-.proj-batch-row select{flex:0 1 230px;min-width:170px}
-.proj-toolbar .pt-end{margin-left:auto;display:flex;gap:6px;align-items:center}
-.proj-sync{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;padding:9px 14px;background:var(--bg-subtle)}
-.proj-sync .ps-lbl{font-size:var(--fs-xs);color:var(--ink-2);font-weight:600;white-space:nowrap}
-.proj-sync .ps-right{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.proj-tree{display:flex;flex-direction:column;gap:9px}
-.proj-card{overflow:hidden}
-details.proj-card>summary.proj-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 14px;
-  cursor:pointer;list-style:none;user-select:none;min-width:0}
-details.proj-card>summary.proj-head::-webkit-details-marker{display:none}
-details.proj-card>summary.proj-head:hover{background:var(--bg-subtle)}
-.proj-icon{display:inline-flex;align-items:center;color:var(--acc-strong);flex:none}
-details>.proj-head .tw,details.card>summary .tw{transition:transform .15s ease;color:var(--ink-3);flex:none}
-details[open]>.proj-head .tw,details.card[open]>summary .tw{transform:rotate(90deg)}
-.proj-meta{flex:1;min-width:140px;display:flex;flex-direction:column;overflow:hidden}
-.proj-name{font-size:13.5px;font-weight:650;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.proj-cwd{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.proj-time{font-size:var(--fs-xs);color:var(--ink-3);font-family:var(--mono)}
-.proj-body{border-top:1px solid var(--line-soft);background:var(--bg-surface)}
-.proj-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 14px;
-  border-top:1px solid var(--line-soft);cursor:pointer;flex-wrap:wrap;transition:background .1s ease}
-.proj-row:first-child{border-top:none}
-.proj-row:hover{background:var(--bg-subtle)}
-.proj-row-main{flex:1;min-width:180px;overflow:hidden}
-.proj-row-t{font-size:13px;font-weight:500;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.proj-row-sub{display:flex;flex-wrap:wrap;gap:6px 10px;font-size:var(--fs-xs);color:var(--ink-3);margin-top:2px;align-items:center}
-.proj-row-act{display:flex;gap:6px;flex:none}
-#tree-export-res{margin-bottom:12px}
-
-/* ================= 响应式断点 ================= */
-@media(max-width:1100px){
-  .mig-shell{grid-template-columns:minmax(0,1fr)}
-}
-@media(max-width:1200px) and (min-width:901px){
-  .kpi-band{grid-template-columns:repeat(2,minmax(0,1fr))}
-  .kpi:nth-child(2){border-right:none}
-  .kpi:nth-child(1),.kpi:nth-child(2){border-bottom:1px solid var(--line-soft)}
-  .ov-grid{grid-template-columns:minmax(0,1fr)}
-}
-@media(max-width:900px){
-  body{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);height:auto;min-height:100dvh;overflow:auto}
-  .sidebar{display:grid;grid-template-columns:1fr auto;grid-template-rows:auto auto;align-items:center;
-    border-right:none;border-bottom:1px solid var(--line);overflow:visible;padding:0}
-  .brand{grid-column:1;grid-row:1;border-bottom:none;padding:0 12px;height:44px}
-  .brand .brand-tag,.side-nav .kbd,.privacy{display:none}
-  .side-foot{grid-column:2;grid-row:1;margin:0;border-top:none;padding:0 12px;flex-direction:row;align-items:center;gap:0}
-  .theme-sw button{padding:3px 7px}
-  .side-nav{grid-column:1 / -1;grid-row:2;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));
-    gap:2px;padding:4px 8px 6px;border-top:1px solid var(--line-soft)}
-  .side-nav button{justify-content:center;width:100%;padding:7px 4px;font-size:12.5px;white-space:nowrap}
-  .side-nav button.on::before{left:12px;right:12px;top:auto;bottom:0;width:auto;height:3px;border-radius:3px 3px 0 0}
-  .content{overflow:visible;padding:14px 14px 52px}
-  .topbar{height:auto;min-height:var(--topbar-h);padding:8px 12px;gap:8px;flex-wrap:wrap}
-  .topbar h1{display:none}
-  .gsearch{flex:1 1 200px;min-width:0;max-width:none}
-  .gsearch input[type=search]{padding-right:12px}
-  .gsearch kbd{display:none}
-  .top-actions{flex:0 1 auto;max-width:100%;min-width:0;margin-left:auto}
-  .status-pill{max-width:100%;overflow:hidden;text-overflow:ellipsis}
-  .ctl-search{min-width:160px}
-  .kpi-band{grid-template-columns:minmax(0,1fr)}
-  .kpi{border-right:none;border-bottom:1px solid var(--line-soft)}
-  .kpi:last-child{border-bottom:none}
-  .ov-grid,.pv-cols,.tgt-cards,.probe-kpis{grid-template-columns:minmax(0,1fr)}
-  .proj-toolbar .pt-end,.proj-sync .ps-right{margin-left:0}
-  .kv{grid-template-columns:110px minmax(0,1fr)}
-}
-@media(max-width:600px){
-  .gsearch{flex:1 1 100%}
-  .top-actions{width:100%;justify-content:space-between}
-}
-</style></head><body>
-<!--
-THESIS: Archival Specimen Ledger — crisp 1px hairline-ruled mineral slate sheets anchored by one deep forest-teal seal, removing stacked chrome so sessions, projects, and migration tools sit immediately in reach.
-OWN-WORLD: Mineral canvas (#f3f5f7 / #0d1014 dark), white elevated panes bounded by hairline dividers, deep graphite ink, tabular monospace IDs, semantic status indicators, zero shadow stacks.
-STORY: Operators verify real vault tallies in one top ledger bar, inspect clean session headlines without horizontal overflow, expand projects/sync Antigravity in one consolidated dock, and filter-search any snapshot into a single-screen dual-pane migration workbench.
-FIRST VIEWPORT: Topbar houses section heading, `/` global search, quick sync, and service health pill; Overview puts the 4-cell KPI ledger directly above the 7:5 session table and clean right rail (probe health, formatted memory highlights, audit grid).
-FORM: Candidate 4 (Archival Specimen Ledger), seed d55f1135, raised via hairline grid clarity, explicit wayfinding junctions, dual-leg migration coupon preview, and zero-clipping @container tables.
-FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
--->
-
-<aside class="sidebar">
-  <div class="brand">
-    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-      <rect x="2.5" y="2.5" width="15" height="15" rx="3.5" stroke="#0e7568" stroke-width="1.7"/>
-      <rect x="6.5" y="8" width="7" height="6" rx="1" fill="#0e7568"/>
-      <path d="M7.5 8V6.5a2.5 2.5 0 0 1 5 0V8" stroke="#0e7568" stroke-width="1.7" stroke-linecap="round"/>
-    </svg>
-    <span>Context Vault</span>
-    <span class="brand-tag">LOCAL</span>
-  </div>
-  <nav class="side-nav" aria-label="控制台分区">
-    <button data-t="ov" class="on" aria-current="page">
-      <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M2 13.5h12M4 13.5V8m4 5.5V3.5m4 10V6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-      概览<span class="kbd">1</span></button>
-    <button data-t="snap">
-      <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><ellipse cx="7" cy="7" rx="4.5" ry="4.5" stroke="currentColor" stroke-width="1.6"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-      快照资产<span class="kbd">2</span></button>
-    <button data-t="mig">
-      <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M2 8h11m0 0-3.5-3.5M13 8l-3.5 3.5M14 2.5v11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity=".4"/><path d="M2 8h9m0 0-3-3M11 8l-3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      迁移<span class="kbd">3</span></button>
-    <button data-t="probe">
-      <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" opacity=".45"/><circle cx="8" cy="8" r="2.6" stroke="currentColor" stroke-width="1.6"/><path d="M8 1.6V4M8 12v2.4M1.6 8H4M12 8h2.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
-      哨兵<span class="kbd">4</span></button>
-  </nav>
-  <div class="side-foot">
-    <span class="privacy">
-      <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-        <rect x="3" y="7" width="10" height="7" rx="1.5" stroke="currentColor" stroke-width="1.4"/>
-        <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" stroke="currentColor" stroke-width="1.4"/>
-      </svg>
-      本地回环 · 数据不出机器
-    </span>
-    <div class="theme-sw" role="group" aria-label="界面主题">
-      <button type="button" data-theme="light dark" aria-pressed="true" onclick="setTheme('light dark')">跟随</button>
-      <button type="button" data-theme="light" aria-pressed="false" onclick="setTheme('light')">浅色</button>
-      <button type="button" data-theme="dark" aria-pressed="false" onclick="setTheme('dark')">深色</button>
-    </div>
-  </div>
-</aside>
-
-<div class="workspace">
-  <header class="topbar">
-    <h1 id="sec-title">概览</h1>
-    <div class="gsearch">
-      <span class="gs-ic"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></span>
-      <input type="search" id="g-q" placeholder="全局检索历史会话 — 项目名、模型或关键词" aria-label="全局搜索历史会话">
-      <kbd>/ · Enter</kbd>
-    </div>
-    <div class="top-actions">
-      <button class="btn sm" id="top-sync-btn" onclick="syncVaultNow()" title="扫描 ZCode / Codex / Claude / Antigravity 最新会话入库"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.3-3.55M13.5 2.5v2.4h-2.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span>同步</span></button>
-      <span class="status-pill" id="status" role="status"><span class="pulse"></span>连接中</span>
-    </div>
-  </header>
-
-  <div class="content"><div class="content-inner">
-
-  <!-- ============ 概览 ============ -->
-  <section id="t-ov" aria-label="概览">
-    <div class="kpi-band" id="ov-band">
-      <div class="kpi"><div class="skel" style="width:70%"></div></div>
-      <div class="kpi"><div class="skel" style="width:65%"></div></div>
-      <div class="kpi"><div class="skel" style="width:75%"></div></div>
-      <div class="kpi"><div class="skel" style="width:60%"></div></div>
-    </div>
-
-    <div class="ov-grid">
-      <div class="card">
-        <div class="card-h">
-          <span class="ch-l">最近入库会话 <span class="sub">（每会话仅列最新版本）</span></span>
-          <button class="ch-link" onclick="setTab('snap')">全部快照 →</button>
-        </div>
-        <div id="ov-latest"><div style="padding:14px"><div class="skel" style="height:120px"></div></div></div>
-      </div>
-      <div class="ov-side">
-        <div class="card">
-          <div class="card-h">
-            <span class="ch-l">哨兵 · 最近探测</span>
-            <button class="ch-link" onclick="setTab('probe')">节点状态 →</button>
-          </div>
-          <div id="ov-probe"><div class="hint" style="padding:10px 14px">加载中…</div></div>
-        </div>
-        <div class="card">
-          <div class="card-h">
-            <span class="ch-l">最新记忆摘要</span>
-            <button class="ch-link" onclick="setTab('snap');snapTreeMode=false;loadSnaps()">按关键词检索 →</button>
-          </div>
-          <div id="ov-mem"><div class="hint" style="padding:10px 14px">加载中…</div></div>
-        </div>
-        <div class="card">
-          <div class="card-h">
-            <span class="ch-l">库内事件审计</span>
-            <button class="ch-link" onclick="setTab('probe')">事件详情 →</button>
-          </div>
-          <div id="ov-audit"><div class="hint" style="padding:10px 14px">加载中…</div></div>
-        </div>
-      </div>
-    </div>
-
-    <details class="card" id="ov-usage-card" style="margin-top:14px">
-      <summary><svg class="tw" width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>模型与节省用量明细<span class="sub" id="ov-usage-sum">（点击展开 · 按真实数据源口径展示）</span></summary>
-      <div class="card-b" id="ov-usage" style="padding:12px 16px 16px"><div class="skel" style="width:40%"></div></div>
-    </details>
-  </section>
-
-  <!-- ============ 快照资产 ============ -->
-  <section id="t-snap" style="display:none" aria-label="快照资产">
-    <div class="controls">
-      <div class="seg" role="group" aria-label="浏览视图">
-        <button class="btn on" id="snap-list-btn" onclick="loadSnaps()">最近列表</button>
-        <button class="btn" id="snap-tree-btn" onclick="snapTreeToggle()" aria-pressed="false"
-          title="按项目文件夹折叠浏览全部顶层主对话（自动过滤子代理碎片）"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 4.5a1.3 1.3 0 0 1 1.3-1.3h2.8l1.3 1.3h5.3a1.3 1.3 0 0 1 1.3 1.3v6.2a1.3 1.3 0 0 1-1.3 1.3H3.3A1.3 1.3 0 0 1 2 12V4.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg><span>项目树</span></button>
-      </div>
-      <div class="ctl-search">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-        <input type="search" id="snap-q" placeholder="在当前视图筛选项目名、路径或关键词…" aria-label="筛选快照"
-          onkeydown="if(event.key==='Enter')snapSearch()">
-      </div>
-      <button class="btn primary" onclick="snapSearch()">筛选</button>
-      <button class="btn" id="snap-sort" onclick="snapSort()">时间 ↓</button>
-      <button class="btn" id="snap-leaves" onclick="snapLeavesToggle()" aria-pressed="true"
-        title="每个会话只列演进链的最新版本; 再点显示全部历史版本">仅最新版本</button>
-      <button class="btn" id="sync-now-btn" onclick="syncVaultNow()"
-        title="立即扫描 ZCode / Codex / Claude / Antigravity 最新会话入库"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.3-3.55M13.5 2.5v2.4h-2.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span>立即同步</span></button>
-    </div>
-    <div class="meta-line" id="snap-meta"></div>
-    <div id="snap-list" aria-live="polite"><div class="skel" style="width:50%"></div><div class="skel" style="width:72%"></div><div class="skel" style="width:60%"></div></div>
-  </section>
-
-  <!-- ============ 迁移工作台 ============ -->
-  <section id="t-mig" style="display:none" aria-label="迁移工作台">
-    <div class="mig-shell">
-      <div class="mig-col">
-        <div class="mig-step">
-          <div class="card-h"><span class="ch-l"><span class="stepno">1</span>选择源快照</span><span class="sub" id="mig-pool-hint">支持全库检索</span></div>
-          <div class="card-b">
-            <div class="mig-src-search">
-              <div class="ctl-search">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-                <input type="search" id="mig-search" placeholder="搜全库会话：关键词、项目名或 cv_ ID…" aria-label="搜索迁移源快照"
-                  oninput="onMigFilterInput()" onkeydown="if(event.key==='Enter'){event.preventDefault();migSearchPool(true)}">
-              </div>
-              <button class="btn sm" type="button" onclick="clearMigFilter()" id="mig-filter-clr" hidden>重置</button>
-            </div>
-            <select id="mig-sid" aria-label="源快照列表" onchange="onMigSource()"><option value="">加载中…</option></select>
-            <div class="sel-meta" id="mig-src-meta"></div>
-            <div class="mig-profile" id="mig-src-profile"></div>
-          </div>
-        </div>
-
-        <div class="mig-step">
-          <div class="card-h"><span class="ch-l"><span class="stepno">2</span>目标格式</span><span class="sub">写入去向在右侧第 4 步抉择</span></div>
-          <div class="card-b">
-            <div class="tgt-cards" id="tgt-cards" role="radiogroup" aria-label="迁移目标">
-              <label class="tgt-card on"><input type="radio" name="tgt" value="codex" checked onchange="onMigTarget()">
-                <span><span class="tt">Codex</span><br><span class="td">rollout 文件 · codex resume</span></span></label>
-              <label class="tgt-card"><input type="radio" name="tgt" value="claude" onchange="onMigTarget()">
-                <span><span class="tt">Claude Code</span><br><span class="td">projects jsonl · --resume</span></span></label>
-              <label class="tgt-card"><input type="radio" name="tgt" value="antigravity" onchange="onMigTarget()">
-                <span><span class="tt">Antigravity</span><br><span class="td">原生 .db（重启 app 生效）</span></span></label>
-              <label class="tgt-card"><input type="radio" name="tgt" value="zcode" onchange="onMigTarget()">
-                <span><span class="tt">ZCode 写回</span><br><span class="td">实验性 · 先备份后写主库</span></span></label>
-              <label class="tgt-card wide"><input type="radio" name="tgt" value="markdown" onchange="onMigTarget()">
-                <span><span class="tt">Markdown 交接简报 · 任意 agent</span><br><span class="td">≤48KB 结构化交接简报（停点 / 最近动作 / 活上下文尾部）</span></span></label>
-            </div>
-            <div class="hint" id="mig-md-note" style="display:none;margin-top:8px">
-              Markdown 目标始终导出到 outbox，无写入会话目录语义。</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="mig-col">
-        <div class="mig-step">
-          <div class="card-h"><span class="ch-l"><span class="stepno">3</span>迁移保真度预演</span><span class="sub">按当前源与目标实时测算</span></div>
-          <div class="card-b"><div id="mig-preview">
-            <div class="mig-idle">在左侧选中或检索源快照后，这里展示<b>保真度预演</b>：活上下文块数、tokens 估算、损失说明与恢复命令。<br>
-              采用 stateless replay —— 压缩边界之后为活上下文，摘要注入为新会话首条消息。</div>
-          </div></div>
-        </div>
-
-        <div class="mig-step">
-          <div class="card-h"><span class="ch-l"><span class="stepno">4</span>执行并查看产物</span></div>
-          <div class="card-b">
-            <div class="exec-bar">
-              <button class="btn primary" id="mig-outbox" onclick="migGo(false)">生成到 outbox（安全）</button>
-              <button class="btn danger" id="mig-apply" onclick="migGo(true)">写入目标会话目录</button>
-              <span class="hint" id="mig-exec-hint"></span>
-            </div>
-            <div id="mig-result" style="margin-top:12px" aria-live="polite"></div>
-            <div class="section-note">写入真实目录后，对应 agent 重启或使用恢复命令即可续写；默认写入 <code>vault/outbox/</code> 零副作用。</div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ============ 哨兵 ============ -->
-  <section id="t-probe" style="display:none" aria-label="哨兵">
-    <div class="probe-head">
-      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-        <span class="probe-state off" id="probe-state"><span class="dot off"></span>读取中…</span>
-        <span class="hint" id="probe-last"></span>
-      </div>
-      <button class="btn primary" id="probe-btn" onclick="probeNow()">立即探测上游</button>
-    </div>
-    <div class="probe-kpis">
-      <div class="kpi"><div class="k"><span>监控节点</span></div><div class="v" id="sn-nodes">—</div></div>
-      <div class="kpi" id="sn-avail-wrap"><div class="k"><span>最近样本通过率</span></div><div class="v" id="sn-avail">—</div></div>
-      <div class="kpi"><div class="k"><span>平均延迟（正常样本）</span></div><div class="v" id="sn-lat">—</div></div>
-    </div>
-    <div id="probe-detail" style="margin-bottom:12px"></div>
-    <div id="probe-list" aria-live="polite"><div class="skel" style="width:55%"></div><div class="skel" style="width:42%"></div></div>
-    <div class="section-note" id="probe-caliber">样本口径：<span id="sn-note">最近 200 条事件</span>，不代表全天可用率；未配置节点时保持空态，不虚报正常。</div>
-  </section>
-
-  </div></div>
-</div>
-
-<div id="toast" popover="manual" role="status" aria-live="polite"></div>
-<dialog class="drawer" id="drawer" aria-labelledby="dw-title" closedby="any">
-  <div class="dw-head">
-    <div style="min-width:0">
-      <h3 id="dw-title">快照详情</h3>
-      <p class="dw-sub" id="dw-sub"></p>
-    </div>
-    <button class="dw-close" id="dw-close" aria-label="关闭详情" autofocus onclick="closeDrawer()">
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3.5 3.5l9 9m0-9-9 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-    </button>
-  </div>
-  <div id="dw-body"></div>
-</dialog>
-<dialog id="confirm-dlg" aria-labelledby="confirm-t">
-  <h3 id="confirm-t">确认写入真实会话目录</h3>
-  <p id="confirm-msg"></p>
-  <form method="dialog">
-    <button class="btn" value="cancel" autofocus>取消</button>
-    <button class="btn danger" id="confirm-ok" value="ok">确认写入</button>
-  </form>
-</dialog>
-<script>
-/* ================= 主题与基础工具 ================= */
-const $=s=>document.querySelector(s);
-const $$=s=>document.querySelectorAll(s);
-function applyThemeMeta(v){
-  const val=(v==="light"||v==="dark")?v:"light dark";
-  try{const m=document.querySelector('meta[name="color-scheme"]');if(m)m.content=val}catch(e){}
-  $$(".theme-sw button").forEach(b=>b.setAttribute("aria-pressed",(b.dataset.theme===val)?"true":"false"));
-}
-function setTheme(v){
-  const val=(v==="light"||v==="dark")?v:"light dark";
-  try{if(typeof localStorage!=="undefined"){val==="light dark"?localStorage.removeItem("cv-theme"):localStorage.setItem("cv-theme",val)}}catch(e){}
-  applyThemeMeta(val);
-}
-(()=>{
-  let saved="light dark";
-  try{if(typeof localStorage!=="undefined"){const s=localStorage.getItem("cv-theme");if(s==="light"||s==="dark")saved=s}}catch(e){}
-  applyThemeMeta(saved);
-  try{window.addEventListener("storage",e=>{if(e&&e.key==="cv-theme")applyThemeMeta(e.newValue||"light dark")})}catch(e){}
-})();
-
-const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-const num=v=>(+v||0).toLocaleString("en-US");
-const bn=v=>{v=+v||0;return v>=1e9?(v/1e9).toFixed(2)+"B":v>=1e6?(v/1e6).toFixed(1)+"M":v>=1e4?(v/1e3).toFixed(1)+"k":num(v)};
-const numT=v=>'<span class="num" title="'+num(v)+'">'+bn(v)+"</span>";
-const usd=v=>v==null?"—":"$"+(+v).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
-const ftime=s=>{if(!s)return"—";const d=new Date(s);return isNaN(d)?String(s).slice(0,19)
-  :d.toLocaleString("zh-CN",{year:"2-digit",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false})};
-const frel=s=>{if(!s)return"";const d=new Date(s);if(isNaN(d))return String(s).slice(0,19);
-  const m=Math.round((Date.now()-d.getTime())/6e4);
-  return m<1?"刚刚":m<60?m+" 分钟前":m<1440?Math.round(m/60)+" 小时前":Math.round(m/1440)+" 天前"};
-const shortSid=s=>{s=String(s||"");return s.length>22?s.slice(0,14)+"…"+s.slice(-5):s};
-const truncPath=(p,n)=>{
-  p=String(p||"—");
-  const lim=n||32;
-  if(p.length<=lim)return p;
-  const parts=p.split(/[\\/]/).filter(Boolean);
-  if(parts.length>=2){
-    const last=parts[parts.length-1],head=parts[0];
-    if(head.length+last.length+3<=lim)return head+"\\…\\"+last;
-    if(last.length+2<=lim)return "…\\"+last;
-    return "…\\"+last.slice(-(lim-2));
-  }
-  return p.slice(0,lim-1)+"…";
-};
-
-let toastTimer;
-function toast(m,err){const t=$("#toast");t.textContent=m;t.classList.toggle("err",!!err);
-  if(!t.matches(":popover-open"))t.showPopover();
-  clearTimeout(toastTimer);toastTimer=setTimeout(()=>{if(t.matches(":popover-open"))t.hidePopover()},5200)}
-
-class ApiError extends Error{constructor(msg,code){super(msg);this.code=code}}
-let bootRetry=null;
-function scheduleBoot(){if(bootRetry)return;bootRetry=setTimeout(()=>{bootRetry=null;boot()},4000)}
-function markSvcBad(){
-  const s=$("#status");
-  if(!s.classList.contains("err")){s.classList.add("err");
-    s.innerHTML="<span class='pulse'></span>服务异常 · 4s 后重试";}
-  scheduleBoot();
-}
-async function api(p,opt){
-  let r;
-  try{r=await fetch(p,opt)}catch(e){markSvcBad();throw e}
-  if(!r.ok){
-    const j=await r.json().catch(()=>({}));
-    throw new ApiError(j.error||("HTTP "+r.status),r.status);
-  }
-  return r.json();
-}
-function seqGuard(){
-  const box={seq:0};
-  return async fn=>{
-    const my=++box.seq;
-    const r=await fn();
-    if(my!==box.seq)throw{stale:true};
-    return r;
-  };
-}
-
-const WARN='<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 2L15 14H1L8 2Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" style="color:var(--warn)"/><path d="M8 6.5v3.5M8 12v.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" style="color:var(--warn)"/></svg>';
-const GOOD='<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.3" stroke="currentColor" stroke-width="1.5" style="color:var(--acc-strong)"/><path d="M5.4 8.2l1.8 1.8 3.4-3.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="color:var(--acc-strong)"/></svg>';
-const ERRIC='<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.3" stroke="currentColor" stroke-width="1.5" style="color:var(--err)"/><path d="M8 4.8v4M8 11.2v.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" style="color:var(--err)"/></svg>';
-const errEmpty=(msg,retry)=>'<div class="empty">'+ERRIC+'<div>'+esc(msg)+"</div>"+
-  (retry?'<button class="btn sm" onclick="'+retry+'">重试</button>':"")+"</div>";
-
-const TBL_COLS={
-  "tbl-ov":'<colgroup><col class="c-src"><col><col class="c-dir"><col class="c-time"></colgroup>',
-  "tbl-snap":'<colgroup><col class="c-sid"><col><col class="c-src"><col class="c-num"><col class="c-time"><col class="c-dir"><col class="c-act"></colgroup>',
-  "tbl-probe":'<colgroup><col class="c-time"><col class="c-node"><col class="c-http"><col class="c-lat"><col></colgroup>'
-};
-const cell=c=>(c&&typeof c==="object")?c:{t:c};
-const table=(heads,rows,cls)=>{if(!rows||!rows.length)return"";
-  const lbls=heads.map(h=>String(h).replace(/<[^>]*>/g,"").trim());
-  const hs=heads.map((h,i)=>{const c=cell(rows[0][i]);return '<th scope="col"'+(c.num?' class="num"':"")+">"+h+"</th>"}).join("");
-  const bs=rows.map(r=>{const open="<tr"+(r.__tr?" "+r.__tr:"")+">";
-    return open+r.map((c0,i)=>{const c=cell(c0);return "<td data-label=\""+esc(lbls[i]||"")+"\""+(c.num?' class="num"':"")+">"+c.t+"</td>"}).join("")+"</tr>"}).join("");
-  const ckey=(cls||"").split(/\s+/).find(k=>k in TBL_COLS);
-  const cg=ckey?TBL_COLS[ckey]:"";
-  return '<div class="tbl-wrap"><table'+(cls?' class="'+cls+'"':"")+">"+cg+
-    "<thead><tr>"+hs+"</tr></thead><tbody>"+bs+"</tbody></table></div>"};
-
-/* 清洗会话摘要 & 记忆正文的 Markdown/URL/路径残留 */
-const stripMd=s=>String(s||"")
-  .replace(/```[\s\S]*?```/g," ")
-  .replace(/`([^`\n]+)`/g,"$1")
-  .replace(/\*\*([^*\n]+)\*\*/g,"$1")
-  .replace(/__([^_\n]+)__/g,"$1")
-  .replace(/^[#>*\s]+/gm,"");
-const cleanSummary=s=>{let t=stripMd(s);const tags=[];
-  t=t.replace(/https?:\/\/\S+/g," ");
-  t=t.replace(/\[([^\]\n]{1,24})\]\([^)\n]{0,60}\)?/g,(m,g)=>{tags.push(g);return " "});
-  t=t.replace(/\(([A-Za-z]:\\?[^)\n]{0,36})\)?/g,(m,g)=>{tags.push(g);return " "});
-  t=t.replace(/\b[A-Za-z]:\\[^\s",;)]+/g,(m)=>{tags.push(m);return " "});
-  t=t.replace(/\s+/g," ").trim();
-  return {text:t||"(无文本)",tags:[...new Set(tags)].slice(0,2)}};
-const sumCell=s=>{const c=cleanSummary(s);
-  return '<span class="sum-line" title="'+esc(stripMd(s)||"")+'"><span class="sum-main">'+esc(c.text)+"</span>"+
-    c.tags.map(t=>'<span class="mini-tag">'+esc(truncPath(t,18))+"</span>").join("")+"</span>"};
-const dirCell=(p,max)=>'<span class="dir" title="'+esc(p||"—")+'"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6Z"/></svg><span>'+esc(truncPath(p||"—",max||26))+"</span></span>";
-const agentCell=a=>"<span class='chip'>"+esc(a||"?")+"</span>";
-const memKindMeta=k=>{
-  if(k==="preference")return{t:"偏好",cls:"ok"};
-  if(k==="decision")return{t:"决策",cls:"warn"};
-  if(k==="summary")return{t:"摘要",cls:""};
-  if(k==="fact")return{t:"事实",cls:""};
-  return{t:k||"记忆",cls:""};
-};
-const formatNodeId=p=>{
-  const s=String(p||"").trim();
-  if(!s)return"—";
-  return /^\d+$/.test(s)?("节点 #"+s):s;
-};
-const relayBadge=p=>'<span class="relay-badge" title="上游节点 '+esc(p||"")+'">'+
-  '<span class="rn">'+esc(formatNodeId(p))+"</span></span>";
-
-const copyText=async(t,msg)=>{
-  try{await navigator.clipboard.writeText(t)}
-  catch(e){toast("复制失败: "+String(e&&e.message||e),1);return}
-  toast(msg||"已复制")};
-
-/* ================= 分区导航 + 快捷键 ================= */
-const TABS=["ov","snap","mig","probe"];
-const TAB_TITLE={ov:"概览",snap:"快照资产",mig:"迁移工作台",probe:"上游哨兵"};
-function setTab(t){
-  if(!TABS.includes(t))t="ov";
-  $$("nav.side-nav button").forEach(x=>{const on=x.dataset.t===t;
-    x.classList.toggle("on",on);on?x.setAttribute("aria-current","page"):x.removeAttribute("aria-current")});
-  TABS.forEach(k=>{$("#t-"+k).style.display=k===t?"":"none"});
-  $("#sec-title").textContent=TAB_TITLE[t];
-  if(t==="mig"&&!$("#mig-sid").dataset.filled)fillMig();
-  if(t==="probe"&&!$("#probe-list").dataset.loaded)loadProbe();
-  if(window.history)history.replaceState(null,"","#"+t);
-}
-$$("nav.side-nav button").forEach(b=>b.onclick=()=>setTab(b.dataset.t));
-document.addEventListener("keydown",e=>{
-  const t=e.target,tag=t&&t.tagName;
-  if(tag&&/^(INPUT|SELECT|TEXTAREA)$/.test(tag)){
-    if(e.key==="Escape"&&t.blur)t.blur();
-    return;
-  }
-  if(drawerIsOpen())return;
-  if(e.key==="/"){e.preventDefault();const g=$("#g-q");if(g&&g.focus)g.focus();return}
-  const n=+e.key;
-  if(n>=1&&n<=TABS.length){setTab(TABS[n-1]);e.preventDefault()}
-});
-$("#g-q").addEventListener("keydown",e=>{
-  if(e.key!=="Enter")return;
-  const q=e.target.value.trim();
-  snapTreeMode=false;updateSnapTreeBtn();
-  setTab("snap");
-  $("#snap-q").value=q;
-  q?snapSearch():loadSnaps();
-});
-
-/* ================= 服务健康 ================= */
-function stripToken(){
-  if(/[?&]token=/.test(location.search||"")&&window.history)
-    history.replaceState(null,"",location.pathname+(location.hash||""));
-}
-async function checkHealth(){
-  const h=await api("/healthz");
-  const s=$("#status");s.classList.remove("err","auth");
-  s.innerHTML='<span class="pulse"></span>服务正常 · '+num(h.snapshots)+" 快照 · "+num(h.terms)+" 索引词项";
-  return h;
-}
-let healthSeq=seqGuard();
-async function boot(){
-  try{
-    await healthSeq(async()=>checkHealth());
-    stripToken();
-    loadOv();refreshSnaps();
-  }catch(e){
-    const s=$("#status");
-    if(e&&e.code===401){s.classList.remove("err");s.classList.add("auth");
-      s.innerHTML='<span class="pulse"></span>需要鉴权 — 请用带 token 的链接重新打开 (凭据不入页面)';}
-    else{s.classList.add("err");
-      s.innerHTML="<span class='pulse'></span>服务异常 · 4s 后重试";}
-    scheduleBoot();
-  }
-}
-
-/* ================= 概览 ================= */
-const ovSeq=seqGuard();
-async function loadOv(){
-  $("#ov-band").innerHTML='<div class="kpi"><div class="skel" style="width:70%"></div></div>'.repeat(4);
-  try{
-    const d=await ovSeq(()=>api("/ledger"));
-    const ow=d.owned||{};
-    const zu=d.zcode_usage||{};
-    const sessions=(ow.sessions!=null)?ow.sessions:null;
-    const hit=(ow.cache_hit_rate!=null)?ow.cache_hit_rate:null;
-    const hitSem=ow.semantics||"cache 读 / 全部输入 (按来源口径规范化的分母)";
-    const inEff=(ow.input_effective!=null)?ow.input_effective:(ow.tokens_in||0);
-    const ztIn=Object.values(zu).reduce((s,a)=>s+(a.tin||0),0);
-    const zOwned=(((ow.by_agent||[]).find(a=>a.agent==="zcode"))||{}).tokens_in||0;
-    const totalIn=(inEff||0)-(ztIn>0?zOwned:0)+ztIn;
-    const band=
-      kpi(num(ow.snapshots||0),"快照版本","vault/snapshots 内容寻址快照 · 含被演进替代的历史版本","不可变内容寻址")+
-      kpi(sessions==null?"—":num(sessions),"独立会话",sessions==null?"后端未提供独立会话口径":"按 lineage 演进链去重后的会话数","按演进链去重")+
-      kpi('<span title="'+num(totalIn)+'">'+bn(totalIn)+'</span><small>tokens</small>',
-        '累计输入 tokens',
-        "口径: 快照内嵌 usage 规范化总输入 ("+num(inEff||0)+", Claude 语义补回 cache 读/写) · zcode 以 model_usage 全量调用 ("+num(ztIn)+") 替换快照内的 zcode 部分 · 均含 cache 读",
-        '精确 '+num(totalIn)+(ztIn>0?' · 含 zcode 全量':''))+
-      kpi(hit==null?"—":'<span class="'+(hit>1?"kpi-bad":"")+'">'+(hit*100).toFixed(1)+"%</span>",
-        "缓存命中率",
-        "口径: "+hitSem+" · 数据源: vault 快照内嵌 usage",
-        hit==null?"尚无缓存样本":"近库加权命中");
-    $("#ov-band").innerHTML=band;
-
-    let rc=null;try{rc=await api("/recent?limit=10&leaves=1")}catch(e){}
-    const total=(rc&&rc.total)||0;
-    const arr=(rc&&rc.rows)||[];
-    $("#ov-latest").innerHTML=(arr.length?table(["来源","会话摘要","位置","入库时间"],
-      arr.map(s=>{const tr=[agentCell(s.agent),
-        '<button class="linklike sumbtn" title="打开快照详情" onclick="event.stopPropagation();snapDetail(\''+s.sid+'\',\''+(s.created_at||"")+'\')">'+sumCell(s.first)+"</button>",
-        dirCell(s.cwd,22),
-        '<span class="nowr hint" title="'+esc(s.created_at||"")+'">'+frel(s.created_at)+"</span>"];
-        tr.__tr='class="rowlink" onclick="snapDetail(\''+s.sid+'\',\''+(s.created_at||"")+'\')"';
-        return tr}),"tbl-44 fixed-cols tbl-ov")
-      :'<div class="empty">还没有会话入库<br>先点右上角 <b>↻ 立即同步</b> 或运行 <code>python tools/cv.py sync</code>'+
-       '<br><button class="btn sm" onclick="loadOv()">重试</button></div>')+
-      '<div class="foot"><span>显示最近 '+arr.length+" 个独立会话 · 共 "+num(total)+" 个会话 / "+
-        num((rc&&rc.versions_total)||total)+" 个版本</span>"+
-      '<button class="linklike" onclick="setTab(\'snap\')">浏览全部 →</button></div>';
-
-    let pv=[];try{pv=(await api("/probe_events?limit=4")).filter(e=>e.status!=="prune")}catch(e){}
-    $("#ov-probe").innerHTML=Array.isArray(pv)&&pv.length?pv.map(e=>{
-      const st=e.status||"?";const cls=st==="ok"?"ok":(st==="http_error"||st==="error")?"err":"warn";
-      const lbl=st==="ok"?((e.http_code||200)+" 正常"):(st==="http_error"||st==="error")?(e.http_code?(e.http_code+" 异常"):"无响应"):st==="switch"?"切换":esc(st);
-      const latTxt=(st==="ok"&&e.latency_ms)?('<span class="hint">'+e.latency_ms+'ms</span>'):"";
-      return '<div class="feed-row"><span class="feed-main"><span class="dot '+cls+'"></span>'+
-        '<span class="mono">'+esc(formatNodeId(e.profile))+'</span>'+
-        '<span class="pill '+cls+'">'+esc(lbl)+'</span>'+latTxt+
-        '</span><span class="feed-r">'+frel(e.ts)+"</span></div>"}).join("")
-      :'<div class="hint" style="padding:10px 14px">暂无探测记录 · 到哨兵页点击「立即探测上游」</div>';
-
-    let mr=[];try{mr=await api("/memory?q=&limit=4");mr=(mr&&mr.memories)||[]}catch(e){mr=[]}
-    $("#ov-mem").innerHTML=mr.length?mr.map(m=>{
-      const km=memKindMeta(m.kind);
-      const txt=stripMd(m.content).replace(/\s+/g," ").trim();
-      return '<div class="feed-row"><span class="feed-main">'+
-        '<span class="chip '+km.cls+'">'+esc(km.t)+'</span>'+
-        '<span class="feed-txt" title="'+esc(txt)+'">'+esc(txt)+'</span></span>'+
-        '<span class="feed-r"><span class="chip">'+esc(m.project||"全局")+"</span></span></div>";
-    }).join("")
-      :'<div class="hint" style="padding:10px 14px">暂无记忆 · <code>cv memory extract</code> 提取</div>';
-
-    let au=null;try{au=await api("/audit")}catch(e){}
-    $("#ov-audit").innerHTML=au?
-      '<div class="audit-grid">'+
-      '<div class="audit-cell"><span class="al">累计事件</span><span class="av">'+num(au.total_events||0)+'</span></div>'+
-      '<div class="audit-cell"><span class="al">探测正常</span><span class="av" style="color:var(--acc-strong)">'+num((au.summary||{}).ok_probes||0)+'</span></div>'+
-      '<div class="audit-cell"><span class="al">异常告警</span><span class="av" style="color:'+(((au.summary||{}).abnormal||0)>0?'var(--err)':'var(--ink)')+'">'+num((au.summary||{}).abnormal||0)+'</span></div>'+
-      '<div class="audit-cell"><span class="al">切换 / 缺失</span><span class="av">'+num((au.summary||{}).switches||0)+' / '+num((au.summary||{}).model_missing_events||0)+'</span></div>'+
-      '</div>'
-      :'<div class="hint" style="padding:10px 14px">—</div>';
-
-    renderUsage(d);
-  }catch(e){
-    if(e&&e.stale)return;
-    $("#ov-band").innerHTML=errEmpty("概览加载失败："+e.message,"loadOv()");
-    $("#ov-latest").innerHTML="";$("#ov-usage").innerHTML="";
-  }
-}
-const kpi=(v,k,tip,sub)=>'<div class="kpi"'+(tip?' title="'+esc(tip)+'"':"")+'>'+
-  '<div class="k"><span>'+k+'</span></div>'+
-  '<div class="v">'+v+'</div>'+
-  (sub?'<div class="exact">'+sub+'</div>':'')+'</div>';
-
-function renderUsage(d){
-  const lt=d.lifetime||{};
-  const zu=d.zcode_usage||{};
-  const zrows=Object.entries(zu);
-  const anyPrice=zrows.some(([,a])=>a.cost!=null);
-  let h="";
-  h+='<div class="hint" style="margin-bottom:8px"><b>ZCode 用量</b> — 数据源: ZCode 主库 model_usage 全量调用记录；无价目模型按订阅制不计成本</div>';
-  h+=zrows.length?table(anyPrice?["模型","调用次数","输入 tok","cache 读","成本 (按价目)"]:["模型","调用次数","输入 tok","cache 读"],
-    zrows.map(([m,a])=>{const r=['<span class="mono">'+esc(m)+"</span>",{t:num(a.n),num:1},
-      {t:'<span title="'+num(a.tin)+'">'+bn(a.tin)+"</span>",num:1},
-      {t:'<span title="'+num(a.cr)+'">'+bn(a.cr)+"</span>",num:1}];
-      if(anyPrice)r.push({t:a.cost==null?"未提供价目":'<span title="$'+a.cost+'">'+usd(a.cost)+"</span>",num:1});
-      return r;}))
-    :'<div class="hint" style="padding:4px 0">未接入 ZCode model_usage 记录；有活动会话后自动统计。</div>';
-  const hasLt=(lt.saved_usd||0)+(lt.cache_savings_usd||0)>0;
-  const ms=d.monthly||[];
-  h+='<div class="hint" style="margin:14px 0 6px"><b>headroom 通路节省</b> — 仅在导入 headroom 账本时展示</div>';
-  if(!hasLt&&!ms.length){
-    h+='<div class="hint" style="padding:2px 0">未接入 — 运行 <code>cv ledger import-headroom</code> 导入；未连接时不虚构金额。</div>';
-  }else{
-    if(ms.length){
-      const mx=Math.max(...ms.map(m=>m.c||0),1);
-      const fmt=v=>"$"+(v>=1000?(v/1000).toFixed(1)+"k":v.toFixed(0));
-      const mw=Math.min(680,ms.length*90+120);
-      h+='<div class="months" style="max-width:'+mw+'px"><div class="yax"><span>'+fmt(mx)+'</span><span>'+fmt(mx/2)+
-        '</span><span>$0</span></div><div class="bars">'+ms.map((m,i)=>{const hh=Math.max(100*(m.c||0)/mx,3);
-        return '<div class="mcol"><div class="val" style="--h:'+hh.toFixed(1)+'">'+usd(m.c||0)+
-        '</div><div class="stick" style="height:'+hh.toFixed(2)+'%;--i:'+i+'" title="'+
-        esc(m.m+" · "+usd(m.c))+'"></div><div class="lb">'+esc(String(m.m).slice(2))+"</div></div>"}).join("")+"</div></div>";
-    }
-    const bym=d.by_model||[];
-    h+=bym.length?table(["模型","事件","节省 tokens","节省金额 (估算, 非账单)"],
-      bym.map(m=>['<span class="mono">'+esc(m.model||"未知模型")+"</span>",
-        {t:num(m.n),num:1},{t:'<span title="'+num(m.t)+'">'+bn(m.t)+"</span>",num:1},{t:usd(m.c),num:1}])):"";
-    if(hasLt)h+='<div class="section-note">lifetime 汇总: 压缩节省 '+num(lt.tokens_saved||0)+
-      " tokens ≈ "+usd(lt.saved_usd)+" · 缓存节省 "+usd(lt.cache_savings_usd)+
-      " — 按官方价目折算 (估算, 非账单)。</div>";
-  }
-  $("#ov-usage").innerHTML=h;
-  try{
-    const sumEl=$("#ov-usage-sum");
-    if(sumEl){
-      const pts=[];
-      if(zrows.length){
-        const zCalls=zrows.reduce((s,[,a])=>s+(a.n||0),0);
-        pts.push("ZCode "+num(zrows.length)+" 模型 · "+num(zCalls)+" 次调用");
-      }
-      if(hasLt)pts.push("headroom 压缩省 "+usd(lt.saved_usd||0)+" · 缓存省 "+usd(lt.cache_savings_usd||0));
-      sumEl.textContent=pts.length?("（"+pts.join(" · ")+" · 点击展开明细）"):"（暂未接入计费明细 · 点击查看接入说明）";
-    }
-  }catch(e){}
-}
-
-/* ================= 快照资产 & 项目树 ================= */
-const snapsSeq=seqGuard();
-let snapPage=0,snapAsc=false,snapMode="recent",snapQuery="",snapLeaves=true,snapTreeMode=false,treeTarget="antigravity",treeApply=false,treeAgent="zcode",treeArchived=false;
-const projOpenState={};
-
-function updateSnapTreeBtn(){
-  const b=$("#snap-tree-btn"),lbBtn=$("#snap-list-btn");
-  if(b){b.setAttribute("aria-pressed",snapTreeMode?"true":"false");b.classList.toggle("on",snapTreeMode)}
-  if(lbBtn){lbBtn.setAttribute("aria-pressed",snapTreeMode?"false":"true");lbBtn.classList.toggle("on",!snapTreeMode)}
-  const sb=$("#snap-sort"),lb=$("#snap-leaves");
-  if(sb)sb.style.display=snapTreeMode?"none":"";
-  if(lb)lb.style.display=snapTreeMode?"none":"";
-}
-function snapTreeToggle(){
-  snapTreeMode=!snapTreeMode;
-  updateSnapTreeBtn();
-  if(snapTreeMode){loadProjectTree()}else{snapMode==="search"?snapSearch(true):renderSnaps()}
-}
-function snapLeavesToggle(){
-  snapLeaves=!snapLeaves;snapPage=0;
-  const b=$("#snap-leaves");b.textContent=snapLeaves?"仅最新版本":"全部版本";
-  b.setAttribute("aria-pressed",snapLeaves?"true":"false");
-  if(snapTreeMode){snapTreeMode=false;updateSnapTreeBtn()}
-  if(snapMode==="search"){snapSearch();return}
-  renderSnaps();
-}
-async function refreshSnaps(){
-  if(snapTreeMode){try{await loadProjectTree()}catch(e){}return}
-  if(snapMode==="search"){try{await snapSearch()}catch(e){}return}
-  await renderSnaps();
-}
-const LIM=30;
-
-async function loadSnaps(page){
-  snapTreeMode=false;updateSnapTreeBtn();
-  if(typeof page==="number")snapPage=Math.max(0,page);else snapPage=0;
-  snapMode="recent";snapQuery="";
-  $("#snap-q").value="";
-  await renderSnaps();
-}
-function snapSort(){
-  snapAsc=!snapAsc;snapPage=0;
-  $("#snap-sort").textContent=snapAsc?"时间 ↑":"时间 ↓";
-  if(snapMode==="search")snapSearch(true);else renderSnaps();
-}
-async function snapSearch(keepPage){
-  const q=$("#snap-q").value.trim();
-  if(!q)return loadSnaps();
-  if(snapTreeMode){return loadProjectTree()}
-  if(!keepPage)snapPage=0;
-  snapMode="search";snapQuery=q;
-  $("#snap-list").innerHTML='<div class="skel" style="width:40%"></div><div class="skel" style="width:70%"></div>';
-  try{
-    const d=await snapsSeq(()=>api("/search?q="+encodeURIComponent(q)+"&limit=20"));
-    renderSnapTable(d.hits||[],{search:q,hits:d.hits?d.hits.length:0});
-  }catch(e){
-    if(e&&e.stale)return;
-    $("#snap-list").innerHTML=errEmpty("搜索失败："+e.message,"snapSearch(true)");
-    $("#snap-meta").textContent="";
-  }
-}
-async function syncVaultNow(){
-  const btns=[$("#sync-now-btn"),$("#top-sync-btn")].filter(Boolean);
-  const olds=btns.map(b=>b.innerHTML);
-  btns.forEach(b=>{b.disabled=true;b.textContent="同步中…"});
-  try{
-    const r=await api("/sync",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
-    await checkHealth();
-    loadOv();
-    await refreshSnaps();
-    toast("入库同步完成：新增 "+num(r.new||0)+" · 更新 "+num(r.updated||0)+" · 总快照 "+num(r.total||0));
-  }catch(e){
-    toast("同步失败："+e.message,1);
-  }
-  btns.forEach((b,i)=>{b.disabled=false;b.innerHTML=olds[i]});
-}
-async function loadProjectTree(){
-  snapTreeMode=true;updateSnapTreeBtn();
-  const q=($("#snap-q")&&$("#snap-q").value||"").trim();
-  $("#snap-list").innerHTML='<div class="skel" style="width:45%"></div><div class="skel" style="width:72%"></div><div class="skel" style="width:60%"></div>';
-  try{
-    const qs=[];
-    if(q)qs.push("project="+encodeURIComponent(q));
-    if(treeAgent)qs.push("agent="+encodeURIComponent(treeAgent));
-    if(treeArchived)qs.push("archived=1");
-    const url="/projects"+(qs.length?("?"+qs.join("&")):"");
-    const d=await snapsSeq(()=>api(url));
-    renderProjectTree(d,q);
-  }catch(e){
-    if(e&&e.stale)return;
-    $("#snap-list").innerHTML=errEmpty("项目树加载失败："+e.message,"loadProjectTree()");
-    $("#snap-meta").textContent="";
-  }
-}
-function toggleAllProjects(open){
-  $$("#snap-list details.proj-card").forEach(el=>{
-    el.open=!!open;
-    if(el.dataset&&el.dataset.cwd)projOpenState[el.dataset.cwd]=!!open;
-  });
-}
-function onProjCardToggle(el){
-  if(el&&el.dataset&&el.dataset.cwd)projOpenState[el.dataset.cwd]=!!el.open;
-}
-const CHEV_IC='<svg class="tw" width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-const PROJ_FOLD_IC='<svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 4.5a1.3 1.3 0 0 1 1.3-1.3h2.8l1.3 1.3h5.3a1.3 1.3 0 0 1 1.3 1.3v6.2a1.3 1.3 0 0 1-1.3 1.3H3.3A1.3 1.3 0 0 1 2 12V4.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>';
-const PROJ_CHAT_IC='<svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 3.5h10a1 1 0 0 1 1 1v6.2a1 1 0 0 1-1 1H6.5L3.5 14v-2.3H3a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>';
-const treeCanApply=t=>t==="codex"||t==="claude"||t==="antigravity"||t==="zcode";
-function onTreeTgtChange(val){
-  treeTarget=val;
-  const ok=treeCanApply(val);
-  const cb=$("#tree-apply"),lbl=$("#tree-apply-wrap"),hint=$("#tree-apply-hint");
-  if(!ok){
-    treeApply=false;
-    if(cb){cb.checked=false;cb.disabled=true}
-  }else{
-    if(cb)cb.disabled=false;
-  }
-  if(lbl)lbl.style.opacity=ok?"1":".5";
-  if(hint)hint.textContent=ok?"":"（该目标仅导出至 vault/outbox/）";
-}
-function renderProjectTree(d,q){
-  const projs=(d&&d.projects)||[];
-  const tp=d.total_projects||projs.length,tc=d.total_conversations||0;
-  const applyOk=treeCanApply(treeTarget);
-  if(!applyOk)treeApply=false;
-  $("#snap-meta").innerHTML=(q?('项目筛选「'+esc(q)+'」· '):'按项目树折叠浏览 · ')+
-    "共 <b class='num'>"+num(tp)+"</b> 个项目文件夹 · <b class='num'>"+num(tc)+
-    "</b> 条顶层主对话（已过滤历史版本与子代理碎片"+(treeArchived?"；含已归档":"")+"）"+
-    (q?' <button class="xbtn" onclick="$(\'#snap-q\').value=\'\';loadProjectTree()">查看全部项目 ×</button>':"");
-  const bar='<div class="proj-dock">'+
-    '<div class="proj-toolbar">'+
-      '<label for="tree-agent">来源筛选</label>'+
-      '<select id="tree-agent" onchange="treeAgent=this.value;loadProjectTree()">'+
-        '<option value="zcode"'+(treeAgent==="zcode"?" selected":"")+'>仅 ZCode（默认）</option>'+
-        '<option value=""'+(treeAgent===""?" selected":"")+'>全部来源（含 Codex / Claude）</option>'+
-        '<option value="codex"'+(treeAgent==="codex"?" selected":"")+'>仅 Codex</option>'+
-        '<option value="claude-code"'+(treeAgent==="claude-code"?" selected":"")+'>仅 Claude Code</option>'+
-      '</select>'+
-      '<label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer">'+
-        '<input type="checkbox" id="tree-arch"'+(treeArchived?' checked':'')+' style="accent-color:var(--acc)" onchange="treeArchived=this.checked;loadProjectTree()">包含已归档</label>'+
-      '<div class="pt-end">'+
-        '<button class="btn sm" onclick="toggleAllProjects(true)">全部展开</button>'+
-        '<button class="btn sm" onclick="toggleAllProjects(false)">全部收起</button>'+
-      '</div>'+
-    '</div>'+
-    '<div class="proj-batch-row">'+
-      '<label for="tree-tgt">单条 / 整项导出目标</label>'+
-      '<select id="tree-tgt" onchange="onTreeTgtChange(this.value)">'+
-        '<option value="antigravity"'+(treeTarget==="antigravity"?" selected":"")+'>Antigravity（原生 .db 会话）</option>'+
-        '<option value="claude"'+(treeTarget==="claude"?" selected":"")+'>Claude Code</option>'+
-        '<option value="codex"'+(treeTarget==="codex"?" selected":"")+'>Codex</option>'+
-        '<option value="markdown"'+(treeTarget==="markdown"?" selected":"")+'>Markdown 简报（outbox）</option>'+
-        '<option value="zcode"'+(treeTarget==="zcode"?" selected":"")+'>ZCode 写回（实验性）</option>'+
-        '<option value="cursor"'+(treeTarget==="cursor"?" selected":"")+'>Cursor</option>'+
-        '<option value="opencode"'+(treeTarget==="opencode"?" selected":"")+'>OpenCode</option>'+
-        '<option value="qwen"'+(treeTarget==="qwen"?" selected":"")+'>Qwen Code</option>'+
-        '<option value="kimi"'+(treeTarget==="kimi"?" selected":"")+'>Kimi CLI</option>'+
-        '<option value="copilot"'+(treeTarget==="copilot"?" selected":"")+'>Copilot</option>'+
-      '</select>'+
-      '<label id="tree-apply-wrap" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;opacity:'+(applyOk?"1":".5")+'">'+
-        '<input type="checkbox" id="tree-apply"'+(treeApply&&applyOk?' checked':'')+(applyOk?'':' disabled')+' style="accent-color:var(--acc)" onchange="treeApply=this.checked">同时写入真实目录</label>'+
-      '<span class="hint" id="tree-apply-hint">'+(applyOk?'':'（该目标仅导出至 vault/outbox/）')+'</span>'+
-    '</div>'+
-    '<div class="proj-sync">'+
-      '<span class="ps-lbl">Antigravity 免命令行双向维护</span>'+
-      '<span class="hint">清理归档/已删/重复 · 按当前来源一键补齐活跃会话</span>'+
-      '<div class="ps-right">'+
-        '<button class="btn sm" id="agy-sync-btn" onclick="agySyncPreview()">清理 Antigravity</button>'+
-        '<button class="btn sm primary" id="agy-batch-btn" onclick="agyBatchPreview()">一键补齐导入 → Antigravity</button>'+
-      '</div>'+
-    '</div>'+
-  '</div>'+
-  '<div id="tree-export-res" hidden></div>';
-  if(!projs.length){
-    $("#snap-list").innerHTML=bar+'<div class="empty">'+WARN+'<div>没有匹配「'+esc(q||"")+'」的项目或主对话</div>'+
-      (q?'<button class="btn" onclick="$(\'#snap-q\').value=\'\';loadProjectTree()">显示全部项目</button>'
-        :'<button class="btn" onclick="loadSnaps()">返回列表</button>')+'</div>';
-    return;
-  }
-  const cards=projs.map((g,i)=>{
-    const cwdKey=String(g.cwd||g.name||i);
-    const isOpen=(cwdKey in projOpenState)?projOpenState[cwdKey]:(i<2);
-    const open=isOpen?" open":"";
-    const cwdDisp=g.is_ungrouped?"ZCode / 默认工作区未分组任务":g.cwd;
-    const rows=(g.conversations||[]).map(c=>{
-      const cleaned=cleanSummary(c.title||"(无标题)");
-      const sid=c.id;
-      return '<div class="proj-row" onclick="snapDetail(\''+sid+'\',\''+esc(c.created_at||"")+'\')">'+
-        '<div class="proj-row-main">'+
-          '<div class="proj-row-t" title="'+esc(c.title||"")+'">'+esc(cleaned.text)+'</div>'+
-          '<div class="proj-row-sub">'+
-            agentCell(c.agent)+
-            '<span class="mono">'+esc(shortSid(sid))+'</span>'+
-            '<span>'+num(c.blocks_total)+' 块</span>'+
-            '<span title="'+esc(c.created_at||"")+'">'+ftime(c.created_at)+'</span>'+
-          '</div>'+
-        '</div>'+
-        '<div class="proj-row-act">'+
-          '<button class="btn sm" data-sid="'+esc(sid)+'" data-title="'+esc(cleaned.text)+'" onclick="event.stopPropagation();quickExportConv(this)">导出</button>'+
-          '<button class="btn sm" onclick="event.stopPropagation();snapDetail(\''+sid+'\',\''+esc(c.created_at||"")+'\')">详情</button>'+
-        '</div>'+
-      '</div>';
-    }).join("");
-    return '<details class="card proj-card" data-cwd="'+esc(cwdKey)+'"'+open+' ontoggle="onProjCardToggle(this)">'+
-      '<summary class="proj-head">'+
-        CHEV_IC+
-        '<span class="proj-icon">'+(g.is_ungrouped?PROJ_CHAT_IC:PROJ_FOLD_IC)+'</span>'+
-        '<span class="proj-meta">'+
-          '<span class="proj-name">'+esc(g.name)+'</span>'+
-          '<span class="proj-cwd" title="'+esc(cwdDisp)+'">'+esc(cwdDisp)+'</span>'+
-        '</span>'+
-        '<span class="chip">'+num(g.count)+' 条</span>'+
-        '<span class="proj-time nowr" title="'+esc(g.latest||"")+'">'+frel(g.latest)+'</span>'+
-        '<button class="btn sm primary" data-proj="'+esc(g.cwd)+'" data-name="'+esc(g.name)+'" data-count="'+num(g.count)+'" onclick="event.preventDefault();event.stopPropagation();quickExportProj(this)">导出整项 ('+num(g.count)+')</button>'+
-      '</summary>'+
-      '<div class="proj-body">'+rows+'</div>'+
-    '</details>';
-  }).join("");
-  $("#snap-list").innerHTML=bar+'<div class="proj-tree">'+cards+'</div>';
-}
-function showTreeExportRes(html,isErr){
-  const box=$("#tree-export-res");
-  if(!box)return;
-  box.hidden=false;
-  box.className=isErr?"result-card err":"result-card";
-  box.innerHTML=html;
-}
-function agyTargetLabel(t){
-  if(t==="antigravity")return "Antigravity conversations 目录（需重启 Antigravity 生效）";
-  if(t==="zcode")return "ZCode 主数据库（写回前自动备份，需重启 ZCode 生效）";
-  if(t==="codex")return "Codex 会话目录";
-  if(t==="claude")return "Claude Code projects 目录";
-  return t+" 会话目录";
-}
-function agyApplyHint(t){
-  if(t==="antigravity")return "已写入 conversations 目录，完全重启 Antigravity 生效";
-  if(t==="zcode")return "已写回 ZCode 主库（已自动备份），完全重启 ZCode 生效";
-  return "已写入目标原生会话目录";
-}
-async function agySyncPreview(){
-  const btn=$("#agy-sync-btn"),old=btn?btn.textContent:"";
-  if(btn){btn.disabled=true;btn.textContent="检查中…"}
-  const q=($("#snap-q")&&$("#snap-q").value||"").trim();
-  const qs=["dedup=1","only_agent=zcode"];
-  if(q)qs.push("project="+encodeURIComponent(q));
-  try{
-    const r=await api("/antigravity/sync?"+qs.join("&"));
-    const tc=r.targets_count||0,ec=(r.empty_projects||[]).length;
-    if(!tc&&!ec){
-      showTreeExportRes('<div class="rt">'+GOOD+'Antigravity 已与 ZCode 完全一致</div>'+
-        '<div class="hint">未发现需清理的已归档/已删项目对话、重复副本或空项目配置。</div>',false);
-      toast("Antigravity 已是最新状态");
-    }else{
-      const sample=(r.targets||[]).slice(0,8).map(t=>'<li><code>'+esc(t.cid.slice(0,8))+'</code> · '+esc(t.cwd||"")+' · '+esc(t.title||"(无标题)")+' <span class="chip">'+esc(t.reason)+'</span></li>').join("");
-      const emp=(r.empty_projects||[]).slice(0,8).map(e=>'<li>'+esc(e.name)+' <span class="mono">('+esc(e.cwd||e.id.slice(0,8))+')</span></li>').join("");
-      showTreeExportRes(
-        '<div class="rt">'+WARN+'待清理 Antigravity：'+num(tc)+' 条导入会话 · '+num(ec)+' 个空项目配置</div>'+
-        '<div class="hint">含 '+num(r.db_files||0)+' 个 .db 文件、'+num(r.summary_ids||0)+' 条摘要索引、'+num(r.proto_ids||0)+' 条 proto 缓存'+
-        (r.dup_count?' · '+num(r.dup_count)+' 条重复副本':'')+(r.agent_count?' · '+num(r.agent_count)+' 条非 ZCode 来源':'')+'。</div>'+
-        (sample?'<ul class="immlist" style="margin-top:8px">'+sample+(tc>8?'<li class="hint">…其余 '+num(tc-8)+' 条省略</li>':'')+'</ul>':'')+
-        (emp?'<div class="hint" style="margin-top:6px"><b>空项目注册：</b></div><ul class="immlist">'+emp+(ec>8?'<li class="hint">…其余 '+num(ec-8)+' 个省略</li>':'')+'</ul>':'')+
-        (r.summary_check_error?'<div class="hint" style="margin-top:6px;color:var(--warn)">提示: 当前摘要库只读受限（'+esc(r.summary_check_error)+'）；执行前请先完全退出 Antigravity。</div>':'')+
-        '<div class="exec-bar" style="margin-top:10px"><button class="btn danger sm" id="agy-sync-apply-btn" onclick="agySyncApply()">确认执行清理</button></div>',false);
-    }
-  }catch(e){
-    showTreeExportRes('<div class="rt">'+ERRIC+'清理预览失败</div><div class="hint">'+esc(e.message)+'</div>',true);
-    toast("清理预览失败："+e.message,1);
-  }
-  if(btn){btn.disabled=false;btn.textContent=old}
-}
-async function agySyncApply(){
-  if(!await askConfirm("清理仅从 Antigravity 移除已归档/已删/重复副本及空项目配置；Context Vault 与 ZCode 原始记录完整保留。\n\n注意：若 Antigravity 客户端正在运行会锁住摘要库，建议在浏览器打开本页面并先完全退出 Antigravity。","确认清理 Antigravity","确认清理"))return;
-  const q=($("#snap-q")&&$("#snap-q").value||"").trim();
-  const btn=$("#agy-sync-apply-btn");if(btn){btn.disabled=true;btn.textContent="清理中…"}
-  try{
-    const r=await api("/antigravity/sync",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({project:q||"",dedup:true,only_agent:"zcode",apply:true})});
-    showTreeExportRes(
-      '<div class="rt">'+GOOD+'Antigravity 清理完成</div>'+
-      '<div class="hint">删除 '+num(r.removed_dbs||0)+' 个 .db 文件 · 清理 '+num(r.cleaned_summaries||0)+' 条摘要 · '+
-      num(r.cleaned_proto||0)+' 条 proto 缓存 · 移除 '+num(r.removed_projects||0)+' 个空项目配置。重启 Antigravity 后生效。</div>',false);
-    toast("Antigravity 清理完成");
-  }catch(e){
-    showTreeExportRes('<div class="rt">'+ERRIC+'清理被中止</div><div class="hint">'+esc(e.message)+'</div>'+
-      '<div class="hint" style="margin-top:4px">请先在任务管理器/托盘完全退出 Antigravity（保留当前浏览器页），再点重试。</div>'+
-      '<div style="margin-top:8px"><button class="btn danger sm" onclick="agySyncApply()">重试清理</button></div>',true);
-    toast("清理失败："+e.message,1);
-  }
-}
-async function agyBatchPreview(){
-  const btn=$("#agy-batch-btn"),old=btn?btn.textContent:"";
-  if(btn){btn.disabled=true;btn.textContent="扫描中…"}
-  const q=($("#snap-q")&&$("#snap-q").value||"").trim();
-  const ag=treeAgent||"all";
-  const qs=["agent="+encodeURIComponent(ag)];
-  if(q)qs.push("project="+encodeURIComponent(q));
-  if(treeArchived)qs.push("archived=1");
-  try{
-    const r=await api("/antigravity/batch?"+qs.join("&"));
-    if(!r.planned){
-      showTreeExportRes('<div class="rt">'+GOOD+'没有需要补齐导入的对话</div>'+
-        '<div class="hint">已存在跳过 '+num(r.skipped_done||0)+' 条 · 指纹去重跳过 '+num(r.skipped_dup||0)+' 条（来源：'+esc(ag)+'）。</div>',false);
-      toast("全部符合条件的对话均已在 Antigravity");
-    }else{
-      const ps=(r.projects||[]).slice(0,8).map(p=>'<li><span class="mono">'+esc(p.cwd)+'</span> — '+num(p.count)+' 条</li>').join("");
-      showTreeExportRes(
-        '<div class="rt">'+WARN+'待补齐导入 Antigravity：'+num(r.planned)+' 条主对话（涉及 '+num((r.projects||[]).length)+' 个项目）</div>'+
-        '<div class="hint">已存在跳过 '+num(r.skipped_done||0)+' 条 · 指纹重复跳过 '+num(r.skipped_dup||0)+' 条 · 来源筛选：'+esc(ag)+'。</div>'+
-        (ps?'<ul class="immlist" style="margin-top:8px">'+ps+'</ul>':'')+
-        (r.summary_error?'<div class="hint" style="margin-top:6px;color:var(--warn)">摘要库只读提示：'+esc(r.summary_error)+'</div>':'')+
-        '<div class="exec-bar" style="margin-top:10px"><button class="btn primary sm" id="agy-batch-apply-btn" onclick="agyBatchApply()">确认导入 Antigravity</button></div>',false);
-    }
-  }catch(e){
-    showTreeExportRes('<div class="rt">'+ERRIC+'扫描失败</div><div class="hint">'+esc(e.message)+'</div>',true);
-    toast("扫描失败："+e.message,1);
-  }
-  if(btn){btn.disabled=false;btn.textContent=old}
-}
-async function agyBatchApply(){
-  if(!await askConfirm("将把待补齐的活跃主对话转换为 Antigravity 原生 .db 并登记摘要与项目目录（已存在对话自动跳过不重复导入）。\n\n注意：若 Antigravity 正在运行会锁住摘要库，请先退出 Antigravity 后执行。","确认批量导入 Antigravity","确认导入"))return;
-  const q=($("#snap-q")&&$("#snap-q").value||"").trim();
-  const ag=treeAgent||"all";
-  const btn=$("#agy-batch-apply-btn");if(btn){btn.disabled=true;btn.textContent="批量导入中…"}
-  try{
-    const r=await api("/antigravity/batch",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({agent:ag,project:q||"",archived:!!treeArchived,apply:true})});
-    showTreeExportRes(
-      '<div class="rt">'+GOOD+'批量补齐导入完成：成功 '+num(r.imported||0)+' 条'+(r.failed?'（失败 '+num(r.failed)+' 条）':'')+'</div>'+
-      '<div class="hint">已跳过已有 '+num((r.skipped_done||0)+(r.skipped_dup||0))+' 条 · 完全重启 Antigravity 后在对应项目下显示。</div>',r.failed>0);
-    toast("导入 Antigravity 完成：+"+num(r.imported||0));
-  }catch(e){
-    showTreeExportRes('<div class="rt">'+ERRIC+'批量导入失败</div><div class="hint">'+esc(e.message)+'</div>'+
-      '<div style="margin-top:8px"><button class="btn primary sm" onclick="agyBatchApply()">重试导入</button></div>',true);
-    toast("批量导入失败："+e.message,1);
-  }
-}
-async function quickExportConv(btn){
-  const sid=btn.dataset.sid,title=btn.dataset.title||sid;
-  const tgt=($("#tree-tgt")&&$("#tree-tgt").value)||treeTarget||"antigravity";
-  const canApply=tgt==="codex"||tgt==="claude"||tgt==="antigravity"||tgt==="zcode";
-  const apply=canApply&&!!(($("#tree-apply")&&$("#tree-apply").checked)||treeApply);
-  if(apply){
-    if(!await askConfirm("源对话: "+title.slice(0,60)+"\n目标: "+agyTargetLabel(tgt)+"\n\n将写入目标工具的真实会话数据。", "确认写入真实会话目录", "确认写入"))return;
-  }
-  const old=btn.textContent;
-  btn.disabled=true;btn.textContent="导出中…";
-  try{
-    const r=await api("/migrate",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({id:sid,target:tgt,apply:apply})});
-    showTreeExportRes(
-      '<div class="rt">'+GOOD+(r.applied?'已导入单条对话到真实会话目录「':'已导出单条对话「')+esc(title.slice(0,40))+'」→ '+esc(tgt)+'</div>'+
-      '<div class="path-row"><span class="hint">文件:</span><span class="mono" style="word-break:break-all">'+esc(r.dest||"")+'</span>'+
-      '<button class="btn sm" data-v="'+esc(r.dest||"")+'" onclick="copyData(this,\'已复制文件路径\')">复制路径</button></div>'+
-      '<div class="hint">'+num(r.lines||0)+' 行'+(r.dropped?' · 丢弃未配对 tool_result ×'+num(r.dropped):'')+
-      (r.applied?' · '+agyApplyHint(tgt):'')+'</div>',false);
-    toast((r.applied?"已写入 → ":"已导出 → ")+tgt);
-  }catch(e){
-    showTreeExportRes('<div class="rt">'+ERRIC+'导出失败</div><div class="hint">'+esc(e.message)+'</div>',true);
-    toast("导出失败："+e.message,1);
-  }
-  btn.disabled=false;btn.textContent=old;
-}
-async function quickExportProj(btn){
-  const proj=btn.dataset.proj,name=btn.dataset.name||proj,cnt=btn.dataset.count||"全部";
-  const tgt=($("#tree-tgt")&&$("#tree-tgt").value)||treeTarget||"antigravity";
-  const canApply=tgt==="codex"||tgt==="claude"||tgt==="antigravity"||tgt==="zcode";
-  const apply=canApply&&!!(($("#tree-apply")&&$("#tree-apply").checked)||treeApply);
-  if(apply){
-    if(!await askConfirm("项目: "+name+"（"+cnt+" 条主对话）\n目标: "+agyTargetLabel(tgt)+"\n\n将批量写入目标工具的真实会话目录。", "确认批量写入真实目录", "确认写入"))return;
-  }
-  const old=btn.textContent;
-  btn.disabled=true;btn.textContent="批量导出中…";
-  try{
-    const body={project:proj,target:tgt,apply:apply};
-    if(treeAgent)body.agent=treeAgent;
-    if(treeArchived)body.archived=true;
-    const r=await api("/migrate_project",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify(body)});
-    showTreeExportRes(
-      '<div class="rt">'+GOOD+(r.applied?'已批量导入项目「':'已批量导出项目「')+esc(name)+'」共 '+num(r.count||0)+' 条主对话 → '+esc(tgt)+'</div>'+
-      '<div class="path-row"><span class="hint">输出目录:</span><span class="mono" style="word-break:break-all">'+esc(r.dest_dir||"")+'</span>'+
-      '<button class="btn sm" data-v="'+esc(r.dest_dir||"")+'" onclick="copyData(this,\'已复制输出目录\')">复制目录</button></div>'+
-      '<div class="hint">共 '+num(r.total_lines||0)+' 行 · '+(r.applied?agyApplyHint(tgt):'产物已全部落入 vault/outbox/')+'</div>',false);
-    toast((r.applied?"已导入项目「":"已导出项目「")+name+"」×"+num(r.count||0));
-  }catch(e){
-    showTreeExportRes('<div class="rt">'+ERRIC+'批量导出失败</div><div class="hint">'+esc(e.message)+'</div>',true);
-    toast("批量导出失败："+e.message,1);
-  }
-  btn.disabled=false;btn.textContent=old;
-}
-async function renderSnaps(){
-  $("#snap-list").innerHTML='<div class="skel" style="width:45%"></div><div class="skel" style="width:66%"></div>';
-  try{
-    const d=await snapsSeq(()=>api("/recent?limit="+LIM+"&offset="+(snapPage*LIM)+"&order="+(snapAsc?"asc":"desc")+
-      "&leaves="+(snapLeaves?1:0)));
-    const rows=d.rows||[],total=d.total||0;
-    renderSnapTable(rows,{recent:true,total,rows:rows.length,versionsTotal:d.versions_total});
-  }catch(e){
-    if(e&&e.stale)return;
-    $("#snap-list").innerHTML=errEmpty("快照列表加载失败："+e.message,"renderSnaps()");
-    $("#snap-meta").textContent="";
-  }
-}
-const sidBtn=sid=>"<button class='linklike sid' title=\""+esc(sid)+"（点击打开详情）\" onclick=\"event.stopPropagation();snapDetail('"+sid+"')\">"+esc(shortSid(sid))+"</button>";
-const copyBtn=sid=>"<button class='btn sm' title='复制完整 SID' aria-label='复制 SID' data-v=\""+esc(sid)+"\" onclick=\"event.stopPropagation();copyData(this,'已复制完整 SID')\">复制 SID</button>";
-function copyData(btn,msg){copyText(btn.dataset.v,msg||"已复制")}
-function copySid(sid){copyText(sid,"已复制完整 SID: "+sid)}
-function renderSnapTable(rows,opt){
-  let meta="";
-  if(opt.search){
-    meta='筛选「'+esc(opt.search)+'」— <b class="num">'+num(opt.hits||0)+"</b> 条命中"+
-      ' <button class="xbtn" onclick="loadSnaps()">清空筛选 ×</button>';
-  }else if(snapLeaves){
-    meta="最近入库 · 共 <b class='num'>"+num(opt.total||0)+"</b> 个独立会话 (每会话显示最新版本 · 库存 <b class='num'>"+
-      num(opt.versionsTotal||opt.total||0)+"</b> 个快照版本)";
-  }else{
-    meta="最近入库 · 共 <b class='num'>"+num(opt.total||0)+"</b> 个快照版本 (含演进历史版本)";
-  }
-  $("#snap-meta").innerHTML=meta;
-  const pager=(total,rowsN)=>{
-    if(total<=LIM)return"";
-    return '<div class="pager"><span>第 <b class="num">'+num(snapPage*LIM+1)+"–"+num(snapPage*LIM+rowsN)+
-      "</b> 条 · 共 <b class='num'>"+num(total)+"</b> 条</span><span>"+
-      '<button class="btn"'+(snapPage<=0?" disabled":"")+' onclick="loadSnaps('+(snapPage-1)+')">← 上一页</button> '+
-      '<button class="btn"'+(snapPage*LIM+LIM>=total?" disabled":"")+' onclick="loadSnaps('+(snapPage+1)+')">下一页 →</button></span></div>'};
-  let body;
-  if(!rows.length){
-    body=opt.search
-      ?'<div class="empty">'+WARN+'<div>没有命中「'+esc(opt.search)+'」— 换个关键词试试：项目名、文件路径、任务描述都行</div>'+
-       '<button class="btn" onclick="loadSnaps()">清空筛选，显示最近</button></div>'
-      :'<div class="empty">vault 还是空的<br>点右上角 <b>↻ 立即同步</b> 或运行：<code>python tools/cv.py sync</code></div>';
-  }else{
-    body='<div class="cardbox">'+
-      table(opt.search
-        ?["快照","会话摘要","来源","得分","时间","目录",""]
-        :["快照","会话摘要","来源","块数","时间","目录",""],
-        rows.map(r=>{
-          const srcHtml=agentCell(r.agent)+(r.completeness&&r.completeness!=="full"
-            ?' <span class="chip warn" title="转录不完整: '+esc(r.completeness)+'">!</span>':"");
-          const verHtml=r.versions>1?'<span class="mini-tag" title="共 '+num(r.versions)+' 个版本">×'+num(r.versions)+'</span>':"";
-          const tr=['<span class="sid-wrap">'+sidBtn(r.sid)+verHtml+'</span>',
-            sumCell(r.first),srcHtml,
-            {t:opt.search?num(Math.round(r.score)):num(r.blocks),num:1},
-            '<span class="mono nowr" title="'+esc(r.created_at||"")+'">'+ftime(r.created_at)+"</span>",
-            dirCell(r.cwd,22),copyBtn(r.sid)];
-          tr.__tr='class="rowlink" onclick="snapDetail(\''+r.sid+'\',\''+(r.created_at||"")+'\')"';
-          return tr}),"tbl-44 fixed-cols tbl-snap")+"</div>";
-  }
-  const pg=opt.search?"":pager(opt.total||0,opt.rows||0);
-  $("#snap-list").innerHTML=pg+body+(opt.search?"":pg);
-}
-
-/* ================= 快照详情抽屉 ================= */
-const drawerIsOpen=()=>$("#drawer").open;
-function openDrawer(){
-  const d=$("#drawer");
-  if(d.open)return;
-  d.showModal();
-}
-function closeDrawer(){
-  const d=$("#drawer");
-  if(d.open)d.close();
-}
-
-let confirmRes=null;
-$("#confirm-dlg").addEventListener("close",()=>{
-  const v=$("#confirm-dlg").returnValue;
-  $("#confirm-dlg").returnValue="";
-  $("#confirm-t").textContent="确认写入真实会话目录";
-  $("#confirm-ok").textContent="确认写入";
-  const r=confirmRes;confirmRes=null;
-  if(r)r(v==="ok");
-});
-const askConfirm=(msg,title,okText)=>new Promise(res=>{confirmRes=res;
-  $("#confirm-t").textContent=title||"确认写入真实会话目录";
-  $("#confirm-ok").textContent=okText||"确认写入";
-  $("#confirm-msg").textContent=msg;
-  $("#confirm-dlg").showModal();});
-
-let dwSeq=0;
-async function toMig(sid){
-  closeDrawer();setTab("mig");
-  const ms=$("#mig-search");if(ms)ms.value="";
-  const clr=$("#mig-filter-clr");if(clr)clr.hidden=true;
-  const sel=$("#mig-sid");
-  const pick=()=>{const o=[...sel.options].find(x=>x.value===sid);if(o){sel.value=sid;onMigSource();return true}return false};
-  if(sel.dataset.filled==="1"&&pick())return;
-  if(!sel.dataset.filled){delete sel.dataset.filled;await fillMig().catch(()=>{});if(pick())return}
-  /* 老快照不在最近 200 条里: 直接拉 /snapshot 注入选项并立即预览, 不再失败阻断 */
-  try{
-    const d=await api("/snapshot?id="+encodeURIComponent(sid));
-    const c=d.capture||{};
-    const lbl=esc(shortSid(sid))+" · "+esc(c.agent||"?")+" · "+esc(truncPath(c.cwd||"",24))+"（详情带入）";
-    const optHtml='<option value="'+esc(sid)+'">'+lbl+'</option>';
-    sel.innerHTML=optHtml+(sel.innerHTML||"");
-    sel.value=sid;
-    onMigSource();
-  }catch(e){toast("未能载入该快照: "+String(e&&e.message||e),1)}
-}
-async function snapDetail(sid,ts){
-  const my=++dwSeq;
-  openDrawer();
-  $("#dw-sub").textContent=sid;
-  $("#dw-body").innerHTML='<div class="skel" style="width:55%"></div><div class="skel" style="width:82%"></div><div class="skel" style="width:64%"></div>';
-  try{
-    const [d,p]=await Promise.all([api("/snapshot?id="+sid),api("/preview?id="+sid).catch(()=>null)]);
-    if(my!==dwSeq)return;
-    const c=d.capture||{},s=d.stats||{};
-    const imm=[];
-    if(p){
-      if(p.no_assistant)imm.push("assistant 文本缺失（源转录不含）— 目标会话只有 user / tool 视角");
-      if(p.thinking)imm.push("thinking ×"+p.thinking+" — 仅明文摘要可迁移，加密推理不可移植");
-      if(p.agent_messages)imm.push("agent_message ×"+p.agent_messages+" — 降级为带标注的文本");
-      if(p.dropped_source)imm.push("源文件被丢弃行 ×"+p.dropped_source+"（developer 注入 / 无移植语义）");
-    }
-    const dist=Object.entries(d.block_dist||{}).map(([k,v])=>"<span class='chip'>"+esc(k)+" ×"+num(v)+"</span>").join(" ");
-    $("#dw-body").innerHTML=
-      "<div class='dw-chips'>"+
-      (c.agent?"<span class='chip'>"+esc(c.agent)+"</span>":"")+
-      (c.source_format?"<span class='chip'>"+esc(c.source_format)+"</span>":"")+
-      (c.completeness&&c.completeness!=="full"?"<span class='chip warn'>"+esc(c.completeness)+"</span>":"<span class='chip ok'>完整</span>")+
-      "<span class='hint'>"+ftime(ts||"")+"</span></div>"+
-      "<div class='kv' style='margin-top:12px'>"+
-      kv("项目目录",esc(c.cwd||"—"))+
-      (p?kv("活上下文",num(p.live_blocks)+" 块 · ~"+num(p.live_tokens_est)+" tokens"+(p.compactions?"（"+p.compactions+" 次压缩边界之后）":"")):"")+
-      (p?kv("历史累计输入",num(p.history_tokens_in)+" tokens（源口径"+(c.source_format&&c.source_format!=="codex-rollout"?"，未含 cache 读":"，含 cache 读")+"）"):"")+
-      kv("块总数",num(s.blocks_total)+" 块"+(s.blocks_dropped?" · 丢弃 "+num(s.blocks_dropped):""))+
-      "</div>"+
-      "<h3 class='sec'>块构成</h3><div class='dw-chips'>"+(dist||"<span class='hint'>—</span>")+"</div>"+
-      (p?"<h3 class='sec'>可迁移性限制</h3><ul class='immlist'>"+
-        (imm.length?imm.map(i=>"<li>"+WARN+"<span>"+i+"</span></li>").join(""):"<li class='good'>"+GOOD+"无可迁移性损失</li>")+"</ul>":"")+
-      "<h3 class='sec'>会话时间线</h3><div id='dw-tl'><div class='skel' style='width:70%'></div></div>"+
-      "<div class='section-note'>详情来自元数据接口（/snapshot + /preview），不含全文；全文查看：<code>cv show "+esc(shortSid(sid))+"</code></div>"+
-      "<div class='dw-actions'>"+
-      "<button class='btn primary' onclick=\"toMig('"+sid+"')\">迁移此快照 →</button>"+
-      "<button class='btn' onclick=\"copySid('"+sid+"')\">复制 SID</button></div>";
-    (async()=>{
-      try{
-        const tl=await api("/timeline?session="+encodeURIComponent(c.session_ref||"")+"&agent="+encodeURIComponent(c.agent||""));
-        if(my!==dwSeq)return;
-        const rows=(tl.days||[]).map(day=>"<div class='tl-day'><span class='tl-d'>"+esc(day.day)+"</span>"+
-          day.versions.map(v=>"<div class='tl-row"+(v.sid===sid?" cur":"")+"'>"+
-            "<span class='mono'>"+v.time+"</span> · "+num(v.blocks)+" 块 · 入 "+num(v.tokens_in)+
-            (v.leaf?" <span class='chip ok'>最新</span>":"")+
-            " <button class='linklike' onclick=\"snapDetail('"+v.sid+"','"+esc(day.day+"T"+v.time)+"')\">"+esc(shortSid(v.sid))+"</button></div>").join("")+
-          "</div>").join("");
-        $("#dw-tl").innerHTML=rows||"<span class='hint'>—</span>";
-      }catch(e){if(my!==dwSeq)return;$("#dw-tl").innerHTML="<span class='hint'>时间线加载失败: "+esc(String(e&&e.message||e))+"</span>"}
-    })();
-  }catch(e){if(my!==dwSeq)return;$("#dw-body").innerHTML=errEmpty("详情加载失败："+e.message,"snapDetail('"+sid+"')")}
-}
-const kv=(k,v)=>"<b>"+k+"</b><span>"+(v==null?"—":v)+"</span>";
-
-/* ================= 迁移工作台 (支持全库即时搜源 + 一屏双栏预览执行) ================= */
-const migSeq=seqGuard(),migPoolSeq=seqGuard();
-let migLastPreview=null,migRecentRows=[],migFilterTimer=null;
-
-function migOptionHtml(rows){
-  return rows.map(r=>{
-    const sum=r.first?cleanSummary(r.first).text.slice(0,26):"";
-    const dir=r.cwd?truncPath(r.cwd,18):"";
-    const meta=[shortSid(r.sid),r.agent||"?",sum||dir||"",ftime(r.created_at)].filter(Boolean).join(" · ");
-    return '<option value="'+esc(r.sid)+'">'+esc(meta)+"</option>";
-  }).join("");
-}
-async function fillMig(){
-  let d=null;
-  try{d=await migPoolSeq(()=>api("/recent?limit=200&offset=0&leaves=1"))}
-  catch(e){
-    if(e&&e.stale)return;
-    $("#mig-sid").innerHTML='<option value="">加载失败 — 服务异常</option>';
-    $("#mig-src-meta").innerHTML="<span class='hint'>加载失败: "+esc(String(e&&e.message||e))+"</span>";
-    $("#mig-preview").innerHTML='<div class="mig-idle">快照列表加载失败 — 服务恢复后重进本页重试。</div>';
-    return}
-  migRecentRows=d.rows||[];
-  const sel=$("#mig-sid");
-  sel.dataset.filled="1";
-  const hint=$("#mig-pool-hint");
-  if(hint)hint.textContent="已载入 "+num(migRecentRows.length)+" 个独立会话 · 支持搜全库";
-  sel.innerHTML=migRecentRows.length
-    ?migOptionHtml(migRecentRows)
-    :'<option value="">（vault 为空 — 先 ↻ 立即同步）</option>';
-  onMigSource();
-}
-function onMigFilterInput(){
-  const q=($("#mig-search")&&$("#mig-search").value||"").trim();
-  const clr=$("#mig-filter-clr");if(clr)clr.hidden=!q;
-  clearTimeout(migFilterTimer);
-  migFilterTimer=setTimeout(()=>migSearchPool(false),220);
-}
-function clearMigFilter(){
-  const ms=$("#mig-search");if(ms)ms.value="";
-  const clr=$("#mig-filter-clr");if(clr)clr.hidden=true;
-  const sel=$("#mig-sid");
-  sel.innerHTML=migRecentRows.length?migOptionHtml(migRecentRows):'<option value="">（无快照）</option>';
-  const hint=$("#mig-pool-hint");if(hint)hint.textContent="已载入 "+num(migRecentRows.length)+" 个独立会话 · 支持搜全库";
-  onMigSource();
-}
-async function migSearchPool(showToast){
-  const q=($("#mig-search")&&$("#mig-search").value||"").trim();
-  if(!q){clearMigFilter();return}
-  const sel=$("#mig-sid"),hint=$("#mig-pool-hint");
-  try{
-    if(/^cv_[0-9a-f]{8,64}$/i.test(q)){
-      const s=await migPoolSeq(()=>api("/snapshot?id="+encodeURIComponent(q)));
-      const c=s.capture||{};
-      const row=[{sid:q,agent:c.agent,first:c.cwd||"",cwd:c.cwd,created_at:""}];
-      sel.innerHTML=migOptionHtml(row);
-      if(hint)hint.textContent="按精确 SID 匹配";
-      onMigSource();return;
-    }
-    const d=await migPoolSeq(()=>api("/search?q="+encodeURIComponent(q)+"&limit=30"));
-    const hits=d.hits||[];
-    const ql=q.toLowerCase();
-    const local=migRecentRows.filter(r=>(r.sid||"").toLowerCase().includes(ql)||
-      (r.first||"").toLowerCase().includes(ql)||(r.cwd||"").toLowerCase().includes(ql)||
-      (r.agent||"").toLowerCase().includes(ql));
-    const seen=new Set();const merged=[];
-    for(const r of [...hits,...local]){if(r&&r.sid&&!seen.has(r.sid)){seen.add(r.sid);merged.push(r)}}
-    sel.innerHTML=merged.length?migOptionHtml(merged):'<option value="">未检索到匹配「'+esc(q)+'」的快照</option>';
-    if(hint)hint.textContent="检索命中 "+num(merged.length)+" 条";
-    if(showToast&&!merged.length)toast("未找到匹配「"+q+"」的快照",1);
-    onMigSource();
-  }catch(e){
-    if(e&&e.stale)return;
-    if(showToast)toast("检索失败: "+String(e&&e.message||e),1);
-  }
-}
-function migTarget(){const r=document.querySelector('input[name=tgt]:checked');return r?r.value:"codex"}
-function onMigTarget(){
-  const t=migTarget();
-  $$("#tgt-cards .tgt-card").forEach(c=>c.classList.toggle("on",c.querySelector("input").value===t));
-  const outOnly=t==="markdown";
-  $("#mig-md-note").style.display=outOnly?"block":"none";
-  if(outOnly)$("#mig-md-note").textContent="Markdown 目标始终导出到 outbox，无写入会话目录语义。";
-  $("#mig-outbox").textContent=outOnly?"导出交接简报（始终 outbox）":"生成到 outbox（安全）";
-  $("#mig-apply").style.display=outOnly?"none":"inline-flex";
-  renderMigPreview();
-}
-function onMigSource(){
-  const sel=$("#mig-sid");
-  const opt=sel.options[sel.selectedIndex];
-  $("#mig-src-meta").innerHTML=(!opt||!opt.value)?"<span class='hint'>无可用快照 — 先 <b>↻ 立即同步</b> 或搜其他关键词</span>"
-    :"已选 <span class='mono'>"+esc(opt.value)+"</span>";
-  migPreview();
-}
-function migExecEnabled(on){
-  $("#mig-outbox").disabled=!on;
-  $("#mig-apply").disabled=!on;
-  $("#mig-exec-hint").textContent=on?"":"预览就绪后才能执行";
-}
-async function migPreview(){
-  const id=$("#mig-sid").value;
-  if(!id){$("#mig-preview").innerHTML='<div class="mig-idle">暂无已选快照 — 在左侧搜索关键词或点击右上角 <b>↻ 立即同步</b>。</div>';
-    migExecEnabled(false);return}
-  $("#mig-preview").innerHTML='<div class="skel" style="width:55%"></div><div class="skel" style="width:75%"></div><div class="skel" style="width:40%"></div>';
-  migLastPreview=null;migExecEnabled(false);
-  try{
-    const p=await migSeq(()=>api("/preview?id="+id));
-    migLastPreview=p;
-    renderMigPreview();
-  }catch(e){
-    if(e&&e.stale)return;
-    $("#mig-preview").innerHTML=errEmpty("预览失败："+e.message,"migPreview()");
-    migExecEnabled(false);
-  }
-}
-function immList(p){
-  const imm=[];
-  if(p.no_assistant)imm.push("assistant 文本缺失（源转录不含）— 目标会话只有 user / tool 视角");
-  if(p.thinking)imm.push("thinking ×"+p.thinking+" — 仅明文摘要可迁移，加密推理不可移植");
-  if(p.agent_messages)imm.push("agent_message ×"+p.agent_messages+" — 降级为带标注的文本");
-  if(p.dropped_source)imm.push("源文件被丢弃行 ×"+p.dropped_source+"（developer 注入 / 无移植语义）");
-  return imm;
-}
-function targetLossNote(t){
-  if(t==="markdown")return "Markdown 是降级档：仅保留停点/最近动作/活上下文尾部摘要，工具调用配对细节不进简报。";
-  if(t==="antigravity")return "Antigravity 目标：经 smigrate 转换并自动补步级时间戳与项目目录；产物落 vault/outbox/，导入后出现在 Conversations 列表。";
-  if(t==="zcode")return "ZCode 写回（实验性）：转换为 ZCode session/message/part 写入主库；执行写入前自动先备份 ZCode 数据库。";
-  if(t==="codex")return "Codex 目标：developer 注入块被过滤（由目标运行时重新注入）；未配对 tool_result 逐条计数进迁移报告。";
-  if(t==="claude")return "Claude Code 目标：developer 注入块被过滤；未配对 tool_result 逐条计数进迁移报告。";
-  return "";
-}
-function renderMigPreview(){
-  const p=migLastPreview;
-  if(!p)return;
-  const t=migTarget();
-  const imm=immList(p);
-  const prof=document.getElementById("mig-src-profile");
-  if(prof)prof.innerHTML=
-    "<div class='chips'>"+
-    (p.agent?"<span class='chip'>"+esc(p.agent)+"</span>":"")+
-    (p.completeness&&p.completeness!=="full"?"<span class='chip warn'>"+esc(p.completeness)+"</span>":"<span class='chip ok'>完整</span>")+
-    "</div>"+
-    "<div class='kv'>"+kv("项目目录",esc(p.cwd||"—"))+
-    kv("历史累计输入",num(p.history_tokens_in)+" tokens（源口径）")+"</div>";
-  $("#mig-preview").innerHTML=
-    '<div class="pv-stats">'+
-    '<span class="stat-inline">活上下文 <b>'+num(p.live_blocks)+"</b> 块 · ~"+num(p.live_tokens_est)+" tok</span>"+
-    (p.compactions?'<span class="stat-inline">压缩边界 <b>'+num(p.compactions)+"</b> 次</span>":"")+
-    '<span class="stat-inline">构成 <b>'+(Object.entries(p.live_dist||{}).map(([k,v])=>esc(k)+"×"+num(v)).join(" · ")||"—")+"</b></span>"+
-    '<span class="stat-inline">累计输入 <b>'+num(p.history_tokens_in)+"</b> tok</span>"+
-    "</div>"+
-    '<div class="pv-cols">'+
-    '<div><h3 class="sec">丢失 / 降级说明</h3>'+
-    '<ul class="immlist">'+(imm.length?imm.map(i=>"<li>"+WARN+"<span>"+i+"</span></li>").join("")
-      :"<li class='good'>"+GOOD+"源端无已知损失项</li>")+"</ul>"+
-    '<div class="section-note">'+esc(targetLossNote(t))+"</div></div>"+
-    '<div><h3 class="sec">恢复命令（执行后生成真实 ID）</h3><div class="term"><span class="tp">预览命令</span>'+
-    '<code id="mig-cmd">$ '+esc(previewCmd(t))+"</code></div>"+
-    '<div class="hint" style="margin-top:8px">点击下方执行按钮，结果将替换为可直接复制的精确命令。</div></div>'+
-    "</div>";
-  migExecEnabled(true);
-}
-function previewCmd(t){
-  if(t==="claude")return "claude --resume";
-  if(t==="markdown")return "code vault/outbox/brief-*.md";
-  if(t==="antigravity")return "dir vault\\outbox\\harness-antigravity-*.json";
-  if(t==="zcode")return "zcode  # 写入模式直接入主库，重启 ZCode 生效";
-  return "codex resume";
-}
-async function migGo(apply){
-  const id=$("#mig-sid").value,t=migTarget();
-  if(!id)return toast("没有可迁移的快照",1);
-  if(!migLastPreview)return toast("预览未就绪，不能执行",1);
-  if(apply){
-    const sel=$("#mig-sid");const label=sel.options[sel.selectedIndex]?sel.options[sel.selectedIndex].textContent:id;
-    const tgtName=agyTargetLabel(t);
-    if(!await askConfirm("源快照: "+label+"\n目标: "+tgtName+"\n\n目标 agent 的会话列表将出现此会话。"))return;
-  }
-  const btns=[$("#mig-outbox"),$("#mig-apply")];
-  btns.forEach(b=>b&&(b.disabled=true));
-  $("#mig-result").innerHTML='<div class="skel" style="width:50%"></div>';
-  try{
-    const r=await api("/migrate",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({id:id,target:t,apply:apply})});
-    renderMigResult(r,{id,target:t,apply});
-    toast(r.applied?"已写入会话目录":"已生成到 outbox");
-  }catch(e){
-    $("#mig-result").innerHTML='<div class="result-card err"><div class="rt">'+ERRIC+'迁移失败</div>'+
-      '<div class="hint">'+esc(e.message)+"</div>"+
-      '<div style="margin-top:8px"><button class="btn sm" onclick="migGo('+(apply?"true":"false")+')">重试</button></div></div>';
-    toast("迁移失败："+e.message,1);
-  }
-  btns.forEach(b=>b&&(b.disabled=false));
-}
-function renderMigResult(r,ctx){
-  const fpath=String(r.dest||"");
-  const fname=fpath.split(/[\\/]/).pop();
-  let cmd="",cmdNote="";
-  if(ctx.target==="codex"&&r.new_sid){
-    cmd=r.applied?("codex resume "+r.new_sid):"codex resume";
-    cmdNote=r.applied?"session id 来自迁移结果, 可直接恢复":"outbox 产物 — 写入模式才会进会话目录; 或手动复制后再 resume";
-  }else if(ctx.target==="codex"){
-    cmd="codex resume";cmdNote="此产物无独立 session id (rollout 文件名内含) — 写入模式后 codex resume 列表可见";
-  }else if(ctx.target==="claude"){
-    cmd=r.applied?("claude --resume "+fname.replace(/\.jsonl$/i,"")):"claude --resume";
-    cmdNote=r.applied?"会话 id = 写入文件名 (uuid)":"outbox 产物 — 写入模式才会进 projects 目录";
-  }else if(ctx.target==="antigravity"){
-    cmd=fpath;cmdNote=r.applied?"已写入 Antigravity conversations 目录，完全关闭并重启 Antigravity 后在对应项目下显示":"outbox 产物（已对齐原生步骤与项目结构）— 选择写入真实目录或 --apply 可直接落盘";
-  }else if(ctx.target==="zcode"){
-    cmd=fpath;cmdNote=r.applied?"已写回 ZCode 主库（已先备份原库），完全关闭并重启 ZCode 后在对应项目列表出现":"outbox 产物（ZCode payload）— 选择写入真实目录或 --apply 可写回主库";
-  }else{
-    cmd="code \""+fpath+"\"";cmdNote="Markdown 简报 — 任意 agent / 编辑器可读";
-  }
-  $("#mig-result").innerHTML=
-    '<div class="result-card"><div class="rt">'+GOOD+
-    (r.applied?"已写入目标会话目录":"已生成到 vault/outbox/")+
-    (ctx.target==="markdown"?"（交接简报）":"")+"</div>"+
-    '<div class="path-row"><span class="hint">文件:</span><span class="mono" style="word-break:break-all">'+esc(fpath)+"</span>"+
-    '<button class="btn sm" data-v="'+esc(fpath)+'" onclick="copyData(this,\'已复制文件路径\')">复制路径</button></div>'+
-    '<div class="hint">'+num(r.lines)+" 行"+(r.dropped?" · 丢弃未配对 tool_result ×"+num(r.dropped):" · 无丢弃")+
-    (r.new_sid?" · session id <span class='mono'>"+esc(r.new_sid)+"</span>":"")+"</div>"+
-    '<div class="term"><span class="tp">'+esc(cmdNote)+"</span><code>$ "+esc(cmd)+
-    '</code><br><button class="btn sm" style="margin-top:8px" data-v="'+esc(cmd)+'" onclick="copyData(this,\'已复制命令\')">复制命令</button></div></div>';
-}
-
-/* ================= 哨兵 ================= */
-const probeSeq=seqGuard();
-const shortModels=s=>{try{const m=JSON.parse(s);return m.by_agent?Object.entries(m.by_agent).map(([k,v])=>k+"×"+v).join(" · ")+" 活跃会话":""}catch(e){return""}};
-function probeStateOf(rows){
-  if(!rows.length)return {cls:"off",txt:"未配置 / 暂无探测记录"};
-  const by={};
-  rows.forEach(r=>{if(r.profile&&!(r.profile in by))by[r.profile]=r});
-  const states=Object.values(by);
-  const missing=states.some(r=>r.missing_models&&r.missing_models!=="[]");
-  const err=states.some(r=>r.status==="http_error"||r.status==="error");
-  if(missing)return {cls:"err",txt:"模型缺失 — 见事件详情"};
-  if(err)return {cls:"err",txt:"存在异常节点 — 见事件详情"};
-  const okAll=states.every(r=>r.status==="ok");
-  if(okAll)return {cls:"ok",txt:states.length+" 个节点最近探测正常（基于最近样本）"};
-  return {cls:"warn",txt:"部分节点待确认 — 见事件详情"};
-}
-async function loadProbe(){
-  const el=$("#probe-list");
-  el.innerHTML='<div class="skel" style="width:60%"></div><div class="skel" style="width:45%"></div>';
-  try{
-    const rows=(await probeSeq(()=>api("/probe_events?limit=200"))).filter(r=>r.status!=="prune");
-    const st=probeStateOf(rows);
-    $("#probe-state").className="probe-state "+st.cls;
-    $("#probe-state").innerHTML='<span class="dot '+st.cls+'"></span>'+esc(st.txt);
-    $("#probe-last").textContent=rows.length?("最新样本 "+frel(rows[0].ts)+" · 仅本页可见时每 30s 自动刷新"):"";
-    const nodes=new Set(rows.map(r=>r.profile).filter(Boolean));
-    const okN=rows.filter(r=>r.status==="ok").length;
-    const lats=rows.filter(r=>r.status==="ok"&&r.latency_ms).map(r=>r.latency_ms);
-    $("#sn-nodes").textContent=nodes.size||"—";
-    $("#sn-avail").textContent=rows.length?((okN/rows.length)*100).toFixed(1)+"% ("+okN+"/"+rows.length+")":"—";
-    $("#sn-avail-wrap").title="口径: 最近 "+rows.length+" 条事件内正常响应占比 — 非全天可用率";
-    $("#sn-lat").textContent=lats.length?Math.round(lats.reduce((a,b)=>a+b,0)/lats.length)+" ms":"—";
-    $("#sn-note").textContent=rows.length?("最近 "+rows.length+" 条事件（limit=200）"):"尚无样本";
-
-    const by={};
-    rows.forEach(r=>{if(r.profile&&!(r.profile in by))by[r.profile]=r});
-    const profs=Object.entries(by);
-    $("#probe-detail").innerHTML=profs.length?profs.map(([p,r])=>{
-      const cls=r.status==="ok"?"ok":(r.status==="http_error"||r.status==="error")?"err":"warn";
-      const txt=r.missing_models&&r.missing_models!=="[]"?("模型缺失 "+r.missing_models)
-        :r.status==="ok"?("HTTP "+(r.http_code||200)+" · "+(r.latency_ms||"—")+" ms · 模型可用")
-        :r.status==="switch"?("切换检测 · "+(shortModels(r.models)||"profile 变更"))
-        :(r.status==="http_error"||r.status==="error")?("HTTP "+(r.http_code||"无响应")+" · 上游异常")
-        :esc(r.status||"—");
-      return '<span class="chip" style="margin:0 8px 8px 0"><span class="dot '+cls+'"></span><b class="mono">'+esc(formatNodeId(p))+'</b><span class="hint">· '+esc(txt)+'</span></span>';
-    }).join(""):"";
-
-    const httpCell=r=>{
-      if(r.status==="ok")return '<span class="pill ok">'+(r.http_code||200)+" 正常</span>";
-      if(r.status==="switch")return '<span class="pill warn">节点切换</span>';
-      if(r.status==="http_error"||r.status==="error")return '<span class="pill err">'+(r.http_code?(r.http_code+" 异常"):"无响应")+"</span>";
-      return '<span class="pill warn">'+esc(r.status||"—")+"</span>"};
-    const latCell=r=>{
-      if(!r.latency_ms)return '<span class="hint">—</span>';
-      if(r.status!=="ok")return '<span class="lat muted">'+r.latency_ms+" ms</span>";
-      const v=r.latency_ms;const cls=v<800?"good":v<=1500?"mid":"warm";
-      const pct=Math.min(100,Math.round(v/2000*100));
-      return '<span class="lat '+cls+'">'+v+" ms"+'<span class="latbar"><i style="width:'+pct+'%"></i></span></span>'};
-    const detCell=r=>{
-      if(r.missing_models&&r.missing_models!=="[]")return '<span style="color:var(--err)">模型消失 '+esc(r.missing_models)+"</span>";
-      if(r.status==="ok")return '<span class="hint">模型列表校验通过</span> <span class="mini-tag">GET /v1/models</span>';
-      if(r.status==="switch")return '<span class="hint">切换检测 · '+esc(shortModels(r.models)||"profile 变更")+"</span>";
-      if(r.status==="http_error"||r.status==="error")return '<span class="hint">上游无响应 / 非 2xx 返回</span>';
-      return '<span class="hint">—</span>'};
-
-    el.innerHTML=rows.length?'<div class="cardbox">'+
-      table(["时间","监控节点","状态","响应延迟","详情"],
-        rows.map(r=>{const cls=r.status==="ok"?"ok":(r.status==="warm"||r.status==="probe")?"warn":(r.status==="switch")?"sw":"err";
-          return ['<span class="mono nowr" title="'+esc(r.ts||"")+'" style="display:inline-flex;align-items:center;gap:6px"><span class="dot '+cls+'"></span>'+ftime(r.ts)+"</span>",
-            '<span class="mono">'+esc(formatNodeId(r.profile))+"</span>",httpCell(r),latCell(r),detCell(r)]}),"fixed-cols tbl-probe")+"</div>"
-      :'<div class="empty">'+WARN+'<div>暂无探测事件 — 还不能断言任何上游状态。</div>'+
-       '<div class="hint" style="margin-top:6px;line-height:1.8">配置探测节点（二选一）：<br>'+
-       '<code>~/.headroom/switcher-profiles.json</code> 或环境变量 <code>CV_RELAY_PROFILES=\'[{"id":"myrelay","openai_api_url":"https://host","default_model":"m"}]\'</code><br>'+
-       '配置后点「立即探测上游」，或由托盘每 5 分钟自动探测。</div>'+
-       '<button class="btn" onclick="probeNow()">立即探测上游</button></div>';
-    el.dataset.loaded=1;
-  }catch(e){
-    if(e&&e.stale)return;
-    el.innerHTML=errEmpty("哨兵事件加载失败："+e.message,"loadProbe()");
-    $("#probe-state").className="probe-state err";
-    $("#probe-state").innerHTML='<span class="dot err"></span>事件加载失败';
-  }
-}
-let probing=false;
-async function probeNow(){
-  if(probing)return;probing=true;
-  const b=$("#probe-btn");b&&(b.disabled=true);
-  $("#probe-state").className="probe-state warn";
-  $("#probe-state").innerHTML='<span class="dot warn"></span>探测中…';
-  toast("探测中…");
-  try{
-    const r=await api("/probe",{method:"POST",headers:{"Content-Type":"application/json"}});
-    const bad=r.alerts&&r.alerts.length;
-    toast(bad?"发现异常："+r.alerts.map(a=>"["+a.profile+"] "+(a.kind==="model_missing"?"模型消失 "+JSON.stringify(a.detail):a.kind)).join("；")
-      :"探测完成 — 本轮无新增异常",bad);
-    delete $("#probe-list").dataset.loaded;loadProbe();
-  }catch(e){
-    toast("探测失败："+e.message,1);
-    $("#probe-state").className="probe-state err";
-    $("#probe-state").innerHTML='<span class="dot err"></span>探测请求失败';
-  }
-  b&&(b.disabled=false);probing=false;
-}
-
-/* ================= 启动 ================= */
-const h0=(location.hash||"").slice(1);
-setTab(TABS.includes(h0)?h0:"ov");
-boot();
-setInterval(()=>{
-  if($("#t-probe").style.display!=="none"&&document.visibilityState==="visible"){
-    delete $("#probe-list").dataset.loaded;loadProbe()}
-},30000);
-</script></body></html>
-"""
+CONSOLE_HTML = _load_console_html()
 
 
 class _KeyStub:
@@ -6952,7 +4784,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                 return
             try:
                 if u.path == "/":
-                    self._send(CONSOLE_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                    self._send(_load_console_html().encode("utf-8"), "text/html; charset=utf-8")
                     return
                 if u.path == "/healthz":
                     idx.request_rebuild(60)  # 后台单飞重建; 本请求拿现态秒回, 增长期绝不阻塞
@@ -6964,11 +4796,16 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                         vault, q.get("since", ""), "all"))
                 if u.path == "/memory":
                     try:
-                        mlim = int(q.get("limit", 8))
+                        mlim = max(1, min(int(q.get("limit", 8)), 200))
                     except ValueError:
                         return self._json({"error": "invalid limit: 需要整数"}, 400)
-                    return self._json({"query": q.get("q", ""),
-                                       "memories": memory_search_api(vault, q.get("q", ""), mlim)})
+                    mkind = q.get("kind", "")
+                    return self._json({
+                        "query": q.get("q", ""),
+                        "kind": mkind,
+                        "counts": memory_counts_api(vault),
+                        "memories": memory_search_api(vault, q.get("q", ""), mlim, kind=mkind),
+                    })
                 if u.path == "/probe_events":
                     conn = db(vault)  # ThreadingHTTPServer 每请求短连接; 显式关闭归还 WAL 句柄
                     try:
@@ -7041,6 +4878,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     monthly = conn.execute("SELECT substr(occurred_at,1,7) m, SUM(cost_usd) c"
                                            " FROM ledger_events WHERE kind='compression'"
                                            " GROUP BY m ORDER BY m").fetchall()
+                    conn.close()
                     raw = json.loads(lt["raw"]) if lt else {}
                     return self._json({"lifetime": {"tokens_saved": lt["tokens_saved"] if lt else 0,
                                                     "saved_usd": lt["cost_usd"] if lt else 0, **raw},
@@ -7187,6 +5025,27 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                         apply=False,
                     )
                     return self._json(res)
+                if u.path == "/messages":
+                    qid = q.get("id", "")
+                    if not self._sid_ok(qid):
+                        return self._json({"error": "invalid id: 需要 cv_ 前缀的快照 id"}, 400)
+                    try:
+                        off = max(0, int(q.get("offset", 0) or 0))
+                        lim = max(1, min(int(q.get("limit", 40) or 40), 100))
+                    except ValueError:
+                        return self._json({"error": "invalid offset/limit: 需要整数"}, 400)
+                    env_m = idx.load_env(qid)
+                    if not env_m:
+                        return self._json({"error": "not found"}, 404)
+                    res_m = format_snapshot_messages(
+                        env_m,
+                        scope=q.get("scope", "live"),
+                        offset=off,
+                        limit=lim,
+                        query=q.get("q", ""),
+                    )
+                    res_m["id"] = qid
+                    return self._json(res_m)
                 if u.path == "/snapshot":
                     qid = q.get("id", "")
                     if not self._sid_ok(qid):
@@ -7197,13 +5056,15 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     from collections import Counter
                     dist = dict(Counter(b["type"] for b in env["conversation"]))
                     return self._json({"id": q.get("id"), "capture": env["capture"],
+                                       "lineage": env.get("lineage") or {},
                                        "stats": self._stats_overlay(qid, env["stats"]), "block_dist": dist})
                 self._json({"error": "unknown route",
                             "routes": ["/", "/healthz", "/search?q=", "/context?q=", "/preview?id=",
                                        "/recent", "/projects", "/timeline?session=", "/stats",
-                                       "/snapshot?id=", "/ledger", "/probe_events",
+                                       "/snapshot?id=", "/messages?id=", "/memory", "/ledger", "/probe_events",
                                        "/antigravity/sync", "/antigravity/batch",
                                        "POST /sync", "POST /migrate", "POST /migrate_project",
+                                       "POST /fork", "POST /memory/extract",
                                        "POST /antigravity/sync", "POST /antigravity/batch", "POST /probe"]}, 404)
             except Exception as e:
                 self._json({"error": str(e)}, 500)
@@ -7316,7 +5177,28 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                 if u.path == "/sync":
                     res = sync_vault(vault, debounce=bool(body.get("debounce")), quiet=True)
                     idx.rebuild()
+                    if body.get("extract_memory", True):
+                        try:
+                            mres = extract_memories_incremental(vault)
+                            res["memories_added"] = mres["added"]
+                            res["memories_total"] = mres["total"]
+                        except Exception:
+                            res["memories_added"] = 0
                     return self._json(res)
+                if u.path == "/memory/extract":
+                    mres = extract_memories_incremental(vault, force=bool(body.get("force")))
+                    return self._json(mres)
+                if u.path == "/fork":
+                    fid = str(body.get("id") or "")
+                    if not self._sid_ok(fid):
+                        return self._json({"error": "invalid id: 需要 cv_ 前缀的快照 id"}, 400)
+                    msg = str(body.get("message") or "").strip()[:200] or None
+                    try:
+                        fres = fork_snapshot(vault, fid, msg)
+                    except SnapshotNotFound as e:
+                        return self._json({"error": str(e)}, 404)
+                    idx.rebuild()
+                    return self._json(fres)
                 if u.path == "/antigravity/sync":
                     only_ag = str(body["only_agent"]).strip() or None if "only_agent" in body else "zcode"
                     try:
@@ -7467,21 +5349,48 @@ def cmd_doctor(args):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
-    checks = []
-    checks.append(("Codex 会话目录", CODEX_SESSIONS.exists(), str(CODEX_SESSIONS)))
-    checks.append(("Claude 转录目录", (HOME / ".claude" / "transcripts").exists(), str(HOME / ".claude/transcripts")))
-    checks.append(("headroom 配置目录", HEADROOM_DIR.exists(), str(HEADROOM_DIR)))
-    checks.append(("savings_events.jsonl", (HEADROOM_DIR / "savings_events.jsonl").exists(), ""))
-    checks.append(("proxy_savings.json", (HEADROOM_DIR / "proxy_savings.json").exists(), ""))
-    status, _, _, ms = fetch_models("http://127.0.0.1:8787/livez", None, timeout=3)
-    checks.append(("headroom 代理 8787", status == "ok", f"{status} {ms}ms"))
     vault = vault_dir(args)
-    checks.append(("vault 初始化", (vault / "vault.db").exists(), str(vault)))
-    ok = True
-    for name, good, detail in checks:
-        ok &= good
-        print(f"  {'✓' if good else '✗'} {name}  {detail}")
-    print("结论: " + ("环境就绪" if ok else "存在缺失项 (见上), 核心导出功能不依赖缺失项"))
+    db_ok = (vault / "vault.db").exists()
+    own = owned_stats(vault) if db_ok else {"snapshots": 0, "disk_snapshots": 0, "sessions": 0}
+    svc_port = 8791
+    if (vault / "serve.json").exists():
+        try:
+            svc_port = int(json.loads((vault / "serve.json").read_text(encoding="utf-8")).get("port") or 8791)
+        except (OSError, ValueError):
+            pass
+    svc_ok = _cv_service_alive(svc_port)
+
+    print(f"Context Vault v{VERSION} · 环境诊断")
+    print("\n[1/3] 核心资产库")
+    print(f"  {'✓' if db_ok else '✗'} vault 数据库   {vault.resolve() / 'vault.db'}")
+    if db_ok:
+        sync_note = ("盘库一致" if own["disk_snapshots"] == own["snapshots"]
+                     else f"在库文件 {own['disk_snapshots']} ≠ 台账记录 {own['snapshots']}")
+        print(f"  ✓ 资产库存     {own['sessions']} 独立会话 / {own['snapshots']} 快照版本 ({sync_note})")
+    print(f"  {'✓' if svc_ok else '·'} 常驻热索引   "
+          + (f"运行中 http://127.0.0.1:{svc_port}" if svc_ok else "未启动 (按需运行 cv serve; MCP 自动冷回退)"))
+
+    print("\n[2/3] 本地会话源 (发现任一即可同步)")
+    sources = [
+        ("ZCode 主库", ZCODE_DB.exists(), str(ZCODE_DB)),
+        ("Codex 会话", CODEX_SESSIONS.exists(), str(CODEX_SESSIONS)),
+        ("Claude Projects", CLAUDE_PROJECTS.exists(), str(CLAUDE_PROJECTS)),
+        ("Claude 转录", (HOME / ".claude" / "transcripts").exists(), str(HOME / ".claude/transcripts")),
+        ("Antigravity", ANTIGRAVITY_CONV_DIR.exists(), str(ANTIGRAVITY_CONV_DIR)),
+    ]
+    any_src = False
+    for name, good, detail in sources:
+        any_src |= good
+        print(f"  {'✓' if good else '·'} {name:<15} {detail}")
+
+    print("\n[3/3] 可选增强组件 (缺失不影响核心功能)")
+    smig = find_smigrate()
+    print(f"  {'✓' if smig else '·'} session-migrate  {smig or '未安装 (uv tool install session-migrate 解锁 18 格式桥接)'}")
+    hr_ok = (HEADROOM_DIR / "proxy_savings.json").exists() or (HEADROOM_DIR / "savings_events.jsonl").exists()
+    print(f"  {'✓' if hr_ok else '·'} headroom 账本    {HEADROOM_DIR if hr_ok else '未接入 (可选通路层省钱统计)'}")
+
+    core_ok = db_ok or any_src
+    print("\n结论: " + ("核心环境就绪" if core_ok else "尚未初始化 vault (运行 python tools/cv.py init 或 sync)"))
 
 
 # ------------------------------------------------- main
@@ -7572,9 +5481,10 @@ def main(argv=None):
 
     mem = sub.add_parser("memory", help="M3 记忆层: 从快照提取跨会话记忆")
     msub = mem.add_subparsers(dest="memory_cmd", required=True)
-    me = msub.add_parser("extract", help="提取决策/摘要/偏好记忆 (幂等, 重提先删旧)")
+    me = msub.add_parser("extract", help="提取决策/摘要/偏好记忆 (增量幂等, --force 可全量重提)")
     me.add_argument("--snapshot", help="只处理单个快照")
     me.add_argument("--engine", help="记忆引擎 (默认 rule; 或 module:Class 动态加载)")
+    me.add_argument("--force", action="store_true", help="忽略已提取水位, 全量重新提取")
     me.set_defaults(func=cmd_memory)
     ms = msub.add_parser("search", help="检索记忆")
     ms.add_argument("query")

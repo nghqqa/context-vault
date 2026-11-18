@@ -37,58 +37,19 @@ SUMMARY_DB = HOME / ".gemini" / "antigravity" / "conversation_summaries.db"
 NS = "context-vault:antigravity:"
 
 
-# ------------------------------------------------- 确定性 id (uuid5 → uuid4 格式位)
+# ------------------------------------------------- 复用 cv.py 权威实现 (单一真相源, 防协议漂移)
 
-def det_cascade(sid: str) -> str:
-    b = bytearray(uuid.uuid5(uuid.NAMESPACE_URL, NS + sid).bytes)
-    b[6] = (b[6] & 0x0F) | 0x40  # version 4
-    b[8] = (b[8] & 0x3F) | 0x80  # variant 10xx
-    return str(uuid.UUID(bytes=bytes(b)))
-
-
-# ------------------------------------------------- 项目筛选
-
-SKIP_MARKS = (".zcode/workspace", "appdata/local/temp", "/tmp/", "\\tmp\\", "cvtest")
-
-
-def eligible_cwd(cwd: str) -> bool:
-    if not cwd:
-        return False
-    n = cwd.replace("\\", "/").lower()
-    return not any(m in n for m in SKIP_MARKS)
-
-
-# ------------------------------------------------- 指纹: 首条用户消息
-
-def _pb_strings(data: bytes, depth: int = 0) -> list[str]:
-    """递归收集 protobuf 里所有可读字符串 (不依赖精确字段布局)。"""
-    out: list[str] = []
-    if depth > 6:
-        return out
-    i = 0
-    try:
-        while i < len(data):
-            tag, i = cv._rd_varint(data, i)
-            k, wt = tag >> 3, tag & 7
-            if wt == 0:
-                _, i = cv._rd_varint(data, i)
-            elif wt == 2:
-                ln, i = cv._rd_varint(data, i)
-                raw = data[i:i + ln]
-                i += ln
-                try:
-                    s = raw.decode("utf-8")
-                    if sum(32 <= ord(c) < 127 or ord(c) > 0x2E7F for c in s) > len(s) * 0.9:
-                        out.append(s)
-                    else:
-                        out += _pb_strings(raw, depth + 1)
-                except (UnicodeDecodeError, ValueError):
-                    out += _pb_strings(raw, depth + 1)
-            else:
-                break
-    except (IndexError, ValueError):
-        pass
-    return out
+det_cascade = lambda sid: str(uuid.UUID(bytes=bytes(  # noqa: E731 — 向后兼容旧符号
+    bytearray(uuid.uuid5(uuid.NAMESPACE_URL, NS + sid).bytes)[:6]
+    + bytes([(uuid.uuid5(uuid.NAMESPACE_URL, NS + sid).bytes[6] & 0x0F) | 0x40])
+    + bytearray(uuid.uuid5(uuid.NAMESPACE_URL, NS + sid).bytes)[7:8]
+    + bytes([(uuid.uuid5(uuid.NAMESPACE_URL, NS + sid).bytes[8] & 0x3F) | 0x80])
+    + bytearray(uuid.uuid5(uuid.NAMESPACE_URL, NS + sid).bytes)[9:]
+)))
+eligible_cwd = cv._antigravity_eligible_cwd
+db_first_user_text = cv._antigravity_db_fingerprint
+build_raw_summary = cv._antigravity_raw_summary
+ws_uris = cv._antigravity_ws_uris
 
 
 def _norm_text(s: str) -> str:
@@ -96,65 +57,8 @@ def _norm_text(s: str) -> str:
 
 
 def first_user_text(env: dict) -> str:
-    for b in env.get("conversation") or []:
-        role = (b.get("role") or b.get("type") or "").lower()
-        if role == "user":
-            text = (b.get("content") or b.get("summary") or "").strip()
-            if text:
-                return _norm_text(text)
-    return ""
-
-
-def db_first_user_text(db_path: Path) -> str:
-    """从已安装库提取首条用户输入文本 (step_type=14 USER_INPUT)。"""
-    try:
-        conn = sqlite3.connect(db_path, timeout=10)
-        row = conn.execute(
-            "SELECT step_payload FROM steps WHERE step_type = 14 ORDER BY idx LIMIT 1").fetchone()
-        conn.close()
-        if not row or not row[0]:
-            return ""
-        strs = _pb_strings(bytes(row[0]))
-        return _norm_text(max(strs, key=len)) if strs else ""
-    except sqlite3.Error:
-        return ""
-
-
-# ------------------------------------------------- raw_summary protobuf (对齐已验证模板)
-
-def _ts_msg(epoch: int, nanos: int = 0) -> bytes:
-    return cv._pb_var(1, max(1, int(epoch))) + cv._pb_var(2, nanos)
-
-
-def _ws_msg(ws_raw: str) -> bytes:
-    return cv._pb_len(1, ws_raw.encode("utf-8")) + cv._pb_len(3, b"")
-
-
-def build_raw_summary(title: str, step_count: int, epoch_mod: int, epoch_input: int,
-                      traj_id: str, ws_raw: str, enc_uri: str, cascade: str,
-                      project_id: str, f17_uuid: str) -> bytes:
-    t = title.encode("utf-8")
-    f15 = cv._pb_len(1, t) + cv._pb_len(7, _ts_msg(epoch_mod))
-    f17 = (cv._pb_len(1, _ws_msg(ws_raw)) + cv._pb_len(2, _ts_msg(epoch_input))
-           + cv._pb_len(3, f17_uuid.encode("ascii"))
-           + cv._pb_len(6, cascade.encode("ascii"))
-           + cv._pb_len(7, enc_uri.encode("utf-8"))
-           + cv._pb_len(18, (project_id or "outside-of-project").encode("ascii")))
-    out = (cv._pb_len(1, t) + cv._pb_var(2, max(1, step_count))
-           + cv._pb_len(3, _ts_msg(epoch_mod)) + cv._pb_len(4, traj_id.encode("ascii"))
-           + cv._pb_var(5, 1) + cv._pb_len(7, _ts_msg(epoch_input))
-           + cv._pb_len(9, _ws_msg(ws_raw)) + cv._pb_len(10, _ts_msg(epoch_input))
-           + cv._pb_len(15, f15) + cv._pb_var(16, 1) + cv._pb_len(17, f17)
-           + cv._pb_var(22, 4) + cv._pb_var(28, 4))
-    return out
-
-
-def ws_uris(cwd: str) -> tuple[str, str]:
-    """与 cv._antigravity_set_workspace 同规则: 盘符小写, 冒号 %3A 编码。"""
-    posix = cwd.replace("\\", "/").rstrip("/")
-    if len(posix) >= 2 and posix[1] == ":":
-        posix = posix[0].lower() + posix[1:]
-    return "file:///" + posix, "file:///" + quote(posix, safe="/")
+    t = cv._antigravity_first_user_text(env)
+    return _norm_text(t) if t else ""
 
 
 def iso_utc(epoch: int) -> str:

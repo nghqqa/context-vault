@@ -111,6 +111,17 @@ def main() -> int:
                               + ("OK" if ok else "OVERFLOW " + "; ".join(r["bad"])))
                         if not ok:
                             failures.append((w, tab))
+                        if tab == "snap":
+                            for sub_sel, sub_lbl in (("#snap-tree-btn", "snap:tree"), ("#snap-mem-btn", "snap:mem")):
+                                page.click(sub_sel)
+                                page.wait_for_timeout(300)
+                                r_sub = page.evaluate(PROBE)
+                                ok_sub = r_sub["docW"] <= r_sub["vw"] and not r_sub["bad"]
+                                print(f"{w:>5}px {sub_lbl:<8} docW={r_sub['docW']:<5} "
+                                      + ("OK" if ok_sub else "OVERFLOW " + "; ".join(r_sub["bad"])))
+                                if not ok_sub:
+                                    failures.append((w, sub_lbl))
+                            page.click("#snap-list-btn")
                 browser.close()
         finally:
             srv.shutdown()

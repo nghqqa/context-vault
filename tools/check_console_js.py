@@ -15,8 +15,12 @@ import re
 import sys
 from pathlib import Path
 
-src = Path(__file__).resolve().parent / "cv.py"
-html = re.search(r'CONSOLE_HTML = r?"""(.*?)"""', src.read_text(encoding="utf-8"), re.S).group(1)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cv_ui  # noqa: E402
+
+html = cv_ui.load_console_html()
+assert html.count("<script>") == 1 and html.count("</script>") == 1, "CONSOLE_HTML 必须严格保持单 <script> 自包含约束"
+assert html.count("<style>") == 1 and html.count("</style>") == 1, "CONSOLE_HTML 必须严格保持单 <style> 自包含约束"
 js = re.search(r"<script>(.*)</script>", html, re.S).group(1)
 
 out = sys.argv[1] if len(sys.argv) > 1 else "emit"
@@ -62,7 +66,13 @@ elif out == "unit":
         'if(u.indexOf("/recent")===0)return DATA.recent;'
         'if(u.indexOf("/projects")===0)return DATA.projects;'
         'if(u.indexOf("/probe_events")===0)return [];'
-        'if(u.indexOf("/memory")===0)return [];'
+        'if(u.indexOf("/memory/extract")===0)return {scanned:2,added:3,total:3,by_kind:{decision:2,preference:1}};'
+        'if(u.indexOf("/memory")===0)return {memories:[{kind:"decision",content:"结论：采用单文件 SQLite WAL",project:"proj",snapshot:"cv_abc123def45678",hits:1}],counts:{total:1,by_kind:{decision:1}}};'
+        'if(u.indexOf("/messages")===0)return {id:"cv_abc123def45678",scope:"live",total:2,total_live:2,total_all:2,has_more:false,items:[{idx:0,type:"text",role:"user",text:"请检查 `cv.py`\\n```python\\nprint(1)\\n```",truncated:false,full_chars:30},{idx:1,type:"tool_result",role:"tool",name:"bash",is_error:false,text:"OK",truncated:false,full_chars:2}]};'
+        'if(u.indexOf("/fork")===0)return {fork_sid:"cv_ff00112233445566",source_sid:"cv_abc123def45678",existed:false};'
+        'if(u.indexOf("/snapshot")===0)return {id:"cv_abc123def45678",capture:{agent:"codex",cwd:"D:\\\\proj",completeness:"full"},lineage:{fork_of:"cv_0000111122223333"},stats:{blocks_total:3},block_dist:{text:3}};'
+        'if(u.indexOf("/preview")===0)return {id:"cv_abc123def45678",live_blocks:3,live_tokens_est:40,history_tokens_in:100};'
+        'if(u.indexOf("/timeline")===0)return {days:[{day:"2026-11-01",versions:[{sid:"cv_abc123def45678",time:"00:00:00",blocks:3,tokens_in:100,leaf:true}]}]};'
         'if(u.indexOf("/audit")===0)return {summary:{ok_probes:1,abnormal:0,switches:0,'
         'model_missing_events:0},total_events:2};'
         'if(u.indexOf("/search")===0)return DATA.search;'
@@ -97,8 +107,16 @@ elif out == "unit":
         'if(_el("#tree-export-res").innerHTML.indexOf("待清理 Antigravity")<0){console.error("A1: 清理预览未渲染");process.exit(8);}'
         'await agyBatchPreview();'
         'if(_el("#tree-export-res").innerHTML.indexOf("待补齐导入 Antigravity")<0){console.error("A2: 批导预览未渲染");process.exit(10);}'
+        'await loadMemoryView();'
+        'if(_el("#snap-list").innerHTML.indexOf("mem-dock")<0||_el("#snap-list").innerHTML.indexOf("采用单文件")<0){console.error("M1: 记忆库视图未渲染");process.exit(11);}'
+        'await extractMemoriesNow(false);'
+        'dwCurSid="cv_abc123def45678";dwMsgQuery="print";await loadDrawerMessages(true);'
+        'const mp=_el("#dw-msg-pane").innerHTML;'
+        'if(mp.indexOf("code-blk")<0||mp.indexOf("<mark")<0||mp.indexOf("RESULT · bash")<0){console.error("M2: 对话正文代码块/高亮/工具名未渲染");process.exit(12);}'
+        'dwMsgQuery="";await snapDetail("cv_abc123def45678","2026-11-01T00:00:00");'
+        'if(_el("#dw-body").innerHTML.indexOf("分叉来源")<0){console.error("F1: 抽屉分叉溯源未渲染");process.exit(13);}'
         'await syncVaultNow();'
-        'console.log("console unit OK: B03 token-strip / B04 loadOv / B06 empty+hit / T4 project-tree / sync+agy");'
+        'console.log("console unit OK: B03 token-strip / B04 loadOv / B06 empty+hit / T4 project-tree / M1 memory / M2 msg-reader / F1 fork / sync+agy");'
         'process.exit(0);'
         '})().catch(e=>{console.error("unit failed:",(e&&e.message)||e);process.exit(6)});')
     Path("console_unit.js").write_text(mock + js + tests, encoding="utf-8")
