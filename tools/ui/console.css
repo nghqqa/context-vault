@@ -1,36 +1,36 @@
-/* ================= 设计 tokens: Mineral Slate × Forest Teal (Adaptive Light / Dark) ================= */
+/* ================= 设计 tokens: Swiss International Style (Hochkontrast & Helvetica Grid) ================= */
 :root{
   color-scheme:light dark;
-  --bg-canvas:light-dark(#f3f5f7,#0d1014);
-  --bg-surface:light-dark(#ffffff,#14191f);
-  --bg-subtle:light-dark(#f8fafb,#1a2028);
-  --bg-inset:light-dark(#eaeef2,#222933);
-  --line:light-dark(#dfe3e8,#27303c);
-  --line-soft:light-dark(#edf0f3,#1e2630);
-  --line-strong:light-dark(#c6cdd5,#3a4656);
-  --ink:light-dark(#15191d,#edf1f5);
-  --ink-2:light-dark(#424a52,#b6c0ca);
-  --ink-3:light-dark(#5e6770,#8d98a5);
-  --acc:#0e7568;
-  --acc-strong:light-dark(#0a5a50,#4fd1c5);
-  --acc-soft:light-dark(#e6f3f0,rgba(79,209,197,.14));
-  --acc-line:light-dark(#b7dcd4,rgba(79,209,197,.32));
+  --bg-canvas:light-dark(#f4f4f2,#18191b);
+  --bg-surface:light-dark(#ffffff,#202225);
+  --bg-subtle:light-dark(#f8f8f6,#272a2e);
+  --bg-inset:light-dark(#ecece8,#2f3338);
+  --line:light-dark(#d4d4d0,#383c42);
+  --line-soft:light-dark(#e6e6e2,#2c3035);
+  --line-strong:light-dark(#111111,#d4d6d8);
+  --ink:light-dark(#0a0a0a,#ededeb);
+  --ink-2:light-dark(#333333,#b8bcc2);
+  --ink-3:light-dark(#666662,#8a8f96);
+  --acc:#e1251b;
+  --acc-strong:light-dark(#c81e14,#ff645a);
+  --acc-soft:light-dark(#fceceb,rgba(255,100,90,.15));
+  --acc-line:light-dark(#f3b7b3,rgba(255,100,90,.36));
   --acc-ink:#ffffff;
-  --warn:light-dark(#9a5b05,#f5b942);
-  --warn-bg:light-dark(#fdf6e7,rgba(245,185,66,.12));
-  --warn-line:light-dark(#ead5a3,rgba(245,185,66,.32));
-  --err:light-dark(#b42323,#f87171);
-  --err-bg:light-dark(#fdf0ef,rgba(248,113,113,.13));
-  --err-line:light-dark(#eec4c1,rgba(248,113,113,.32));
-  --sans:"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI",system-ui,sans-serif;
-  --mono:"Cascadia Code",Consolas,"SF Mono",ui-monospace,monospace;
+  --warn:light-dark(#9a5200,#f5b027);
+  --warn-bg:light-dark(#fef5e7,rgba(245,176,39,.13));
+  --warn-line:light-dark(#edd09a,rgba(245,176,39,.34));
+  --err:light-dark(#990f0f,#ff7070);
+  --err-bg:light-dark(#fdf0f0,rgba(255,112,112,.14));
+  --err-line:light-dark(#eabcbc,rgba(255,112,112,.36));
+  --sans:"Helvetica Neue","Inter","Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI",system-ui,sans-serif;
+  --mono:"JetBrains Mono","Cascadia Code",Consolas,"SF Mono",ui-monospace,monospace;
   --fs-xs:12px; --fs-sm:12.5px; --fs-md:13.5px; --fs-lg:15px; --fs-xl:18px;
-  --rad-s:6px; --rad-m:9px; --rad-l:13px;
+  --rad-s:2px; --rad-m:2px; --rad-l:4px;
   --ctl-h:34px;
   --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:24px; --sp-6:32px;
-  --shadow-1:0 1px 2px light-dark(rgba(16,20,24,.04),rgba(0,0,0,.28));
-  --shadow-2:0 14px 36px light-dark(rgba(16,20,24,.15),rgba(0,0,0,.55));
-  --scrollbar-thumb:light-dark(#8b939c,#55606e); --scrollbar-track:transparent;
+  --shadow-1:none;
+  --shadow-2:0 16px 40px light-dark(rgba(0,0,0,.18),rgba(0,0,0,.5));
+  --scrollbar-thumb:light-dark(#888884,#5a5e66); --scrollbar-track:transparent;
   --sidebar-w:216px; --topbar-h:52px;
 }
 :root:has(> head > meta[name="color-scheme"][content="dark"]){color-scheme:dark}
@@ -94,10 +94,10 @@ svg{flex:none;display:block}
   padding:0 5px;line-height:18px;background:var(--bg-surface);pointer-events:none}
 .top-actions{display:flex;align-items:center;gap:8px;flex:none}
 .status-pill{display:inline-flex;align-items:center;gap:7px;font-size:var(--fs-xs);color:var(--ink-2);
-  border:1px solid var(--line);border-radius:999px;padding:4px 12px;background:var(--bg-subtle);white-space:nowrap}
+  border:1px solid var(--line);border-radius:var(--rad-s);padding:4px 10px;background:var(--bg-subtle);white-space:nowrap;font-family:var(--mono)}
 .status-pill .pulse{width:7px;height:7px;border-radius:50%;background:var(--acc);
-  box-shadow:0 0 0 0 rgba(14,117,104,.4);animation:pulse 2.4s ease-out infinite}
-@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(14,117,104,.35)}70%{box-shadow:0 0 0 6px rgba(14,117,104,0)}100%{box-shadow:0 0 0 0 rgba(14,117,104,0)}}
+  box-shadow:0 0 0 0 rgba(225,37,27,.4);animation:pulse 2.4s ease-out infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(225,37,27,.35)}70%{box-shadow:0 0 0 6px rgba(225,37,27,0)}100%{box-shadow:0 0 0 0 rgba(225,37,27,0)}}
 .status-pill.err{color:var(--err);border-color:var(--err-line);background:var(--err-bg)}
 .status-pill.err .pulse{background:var(--err);animation:none}
 .status-pill.auth{color:var(--warn);border-color:var(--warn-line);background:var(--warn-bg)}
@@ -203,18 +203,18 @@ table.tbl-probe col.c-lat{width:128px}
 
 /* 按钮 / 表单 */
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;background:var(--bg-surface);
-  border:1px solid var(--line-strong);border-radius:var(--rad-s);padding:0 13px;height:var(--ctl-h);
+  border:1px solid var(--line);border-radius:var(--rad-s);padding:0 13px;height:var(--ctl-h);
   font-size:13px;font-weight:500;cursor:pointer;transition:border-color .12s ease,background .12s ease,transform .08s ease;white-space:nowrap}
-.btn:hover{border-color:var(--ink-3);background:var(--bg-subtle)}
+.btn:hover{border-color:var(--line-strong);background:var(--bg-subtle)}
 .btn:active{transform:translateY(1px)}
 .btn.primary{background:var(--acc);border-color:var(--acc);color:var(--acc-ink);font-weight:600}
-.btn.primary:hover{background:#0b5d53;border-color:#0b5d53}
+.btn.primary:hover{background:#be1b12;border-color:#be1b12}
 .btn.danger{background:var(--bg-surface);border-color:var(--err-line);color:var(--err)}
 .btn.danger:hover{background:var(--err-bg);border-color:var(--err)}
 .btn.sm{height:27px;padding:0 9px;font-size:12px}
 .btn:disabled{opacity:.48;cursor:not-allowed;transform:none}
 .btn.on,.btn[aria-pressed="true"]{border-color:var(--acc);background:var(--acc-soft);color:var(--acc-strong);font-weight:600}
-input[type=search],select{background:var(--bg-surface);border:1px solid var(--line-strong);color:var(--ink);
+input[type=search],select{background:var(--bg-surface);border:1px solid var(--line);color:var(--ink);
   border-radius:var(--rad-s);height:var(--ctl-h);padding:0 12px;font-size:13px;transition:border-color .12s ease}
 input[type=search]::placeholder{color:var(--ink-3)}
 input[type=search]:focus,select:focus{border-color:var(--acc)}

@@ -7,35 +7,35 @@
 <script>try{document.querySelector('meta[name="color-scheme"]').content=localStorage.getItem('cv-color-scheme')??'light dark'}catch(e){}</script>
 <title>Context Vault — 本地优先的 AI 会话资产库</title>
 <meta name="description" content="把 Codex / Claude Code / ZCode / Antigravity 等会话导出为供应商中立快照：双向迁移、深度检索、token 账本、双时态记忆、MCP 后端。纯标准库零依赖，数据不出机器。">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M8 4.5h11a1.8 1.8 0 0 1 1.8 1.8v7.4' fill='none' stroke='%230e7568' stroke-width='1.9' opacity='.45' stroke-linecap='round'/%3E%3Crect x='2.8' y='10.2' width='15' height='10' rx='2' fill='none' stroke='%230e7568' stroke-width='1.9'/%3E%3Crect x='5.6' y='13.8' width='6.2' height='2.8' rx='.9' fill='%230e7568'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect x='2' y='2' width='16' height='16' fill='%23e1251b'/%3E%3Cpath d='M10 5v10M5 10h10' stroke='%23ffffff' stroke-width='2.6'/%3E%3C/svg%3E">
 <style>
-/* ============ Design Tokens — 与 tools/ui/console.css 同源 (Mineral Slate × Forest Teal) ============ */
+/* ============ Design Tokens — 与 tools/ui/console.css 同源 (Swiss International Style) ============ */
 :root{
   color-scheme:light dark;
-  --bg-canvas:light-dark(#f3f5f7,#0d1014);
-  --bg-surface:light-dark(#ffffff,#14191f);
-  --bg-subtle:light-dark(#f8fafb,#1a2028);
-  --bg-inset:light-dark(#eaeef2,#222933);
-  --line:light-dark(#dfe3e8,#27303c);
-  --line-soft:light-dark(#edf0f3,#1e2630);
-  --line-strong:light-dark(#c6cdd5,#3a4656);
-  --ink:light-dark(#15191d,#edf1f5);
-  --ink-2:light-dark(#424a52,#b6c0ca);
-  --ink-3:light-dark(#5e6770,#8d98a5);
-  --acc:#0e7568;
-  --acc-strong:light-dark(#0a5a50,#4fd1c5);
-  --acc-soft:light-dark(#e6f3f0,rgba(79,209,197,.14));
-  --acc-line:light-dark(#b7dcd4,rgba(79,209,197,.32));
+  --bg-canvas:light-dark(#f4f4f2,#18191b);
+  --bg-surface:light-dark(#ffffff,#202225);
+  --bg-subtle:light-dark(#f8f8f6,#272a2e);
+  --bg-inset:light-dark(#ecece8,#2f3338);
+  --line:light-dark(#d4d4d0,#383c42);
+  --line-soft:light-dark(#e6e6e2,#2c3035);
+  --line-strong:light-dark(#111111,#d4d6d8);
+  --ink:light-dark(#0a0a0a,#ededeb);
+  --ink-2:light-dark(#333333,#b8bcc2);
+  --ink-3:light-dark(#666662,#8a8f96);
+  --acc:#e1251b;
+  --acc-strong:light-dark(#c81e14,#ff645a);
+  --acc-soft:light-dark(#fceceb,rgba(255,100,90,.15));
+  --acc-line:light-dark(#f3b7b3,rgba(255,100,90,.36));
   --acc-ink:#ffffff;
-  --warn:light-dark(#9a5b05,#f5b942);
-  --warn-bg:light-dark(#fdf6e7,rgba(245,185,66,.12));
-  --warn-line:light-dark(#ead5a3,rgba(245,185,66,.32));
-  --err:light-dark(#b42323,#f87171);
-  --sans:"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI",system-ui,sans-serif;
-  --mono:"Cascadia Code",Consolas,"SF Mono",ui-monospace,monospace;
-  --rad-s:6px;--rad-m:9px;--rad-l:13px;
-  --shadow-1:0 1px 2px light-dark(rgba(16,20,24,.04),rgba(0,0,0,.28));
-  --shadow-2:0 14px 36px light-dark(rgba(16,20,24,.15),rgba(0,0,0,.55));
+  --warn:light-dark(#9a5200,#f5b027);
+  --warn-bg:light-dark(#fef5e7,rgba(245,176,39,.13));
+  --warn-line:light-dark(#edd09a,rgba(245,176,39,.34));
+  --err:light-dark(#990f0f,#ff7070);
+  --sans:"Helvetica Neue","Inter","Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI",system-ui,sans-serif;
+  --mono:"JetBrains Mono","Cascadia Code",Consolas,"SF Mono",ui-monospace,monospace;
+  --rad-s:2px;--rad-m:2px;--rad-l:4px;
+  --shadow-1:none;
+  --shadow-2:0 16px 40px light-dark(rgba(0,0,0,.18),rgba(0,0,0,.5));
 }
 :root:has(> head > meta[name="color-scheme"][content="dark"]){color-scheme:dark}
 :root:has(> head > meta[name="color-scheme"][content="light"]){color-scheme:light}
@@ -51,7 +51,7 @@ svg{flex:none;display:block}
 :focus-visible{outline:2px solid var(--acc-strong);outline-offset:2px;border-radius:4px}
 .wrap{max-width:1080px;margin:0 auto;padding:0 clamp(16px,4vw,28px)}
 @keyframes rise{from{opacity:0;transform:translateY(10px)}}
-@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(14,117,104,.35)}70%{box-shadow:0 0 0 6px rgba(14,117,104,0)}100%{box-shadow:0 0 0 0 rgba(14,117,104,0)}}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(225,37,27,.35)}70%{box-shadow:0 0 0 6px rgba(225,37,27,0)}100%{box-shadow:0 0 0 0 rgba(225,37,27,0)}}
 
 /* ============ 顶栏 ============ */
 .top{position:sticky;top:0;z-index:60;
@@ -105,7 +105,7 @@ svg{flex:none;display:block}
 .btn:hover{border-color:var(--ink-3);background:var(--bg-subtle)}
 .btn:active{transform:translateY(1px)}
 .btn.primary{background:var(--acc);border-color:var(--acc);color:var(--acc-ink)}
-.btn.primary:hover{background:#0b5d53;border-color:#0b5d53}
+.btn.primary:hover{background:#be1b12;border-color:#be1b12}
 .btn svg{width:16px;height:16px}
 .hero .meta{margin-top:20px;color:var(--ink-3);font-size:13px;line-height:1.8}
 @media(prefers-reduced-motion:no-preference){
@@ -375,8 +375,8 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
     <div class="wrap">
       <div class="sec-head">
         <span class="kicker">02 · 界面</span>
-        <h2>与控制台同源的设计语言</h2>
-        <p class="sub">官网与 <code style="font-family:var(--mono);font-size:12px;background:var(--bg-subtle);border:1px solid var(--line-soft);border-radius:5px;padding:0 5px">tools/cv.py</code> 内置控制台共用同一套 Mineral Slate × Forest Teal 设计 Token，亮暗三态自适应。</p>
+        <h2>与控制台同源的瑞士国际主义网格</h2>
+        <p class="sub">官网与 <code style="font-family:var(--mono);font-size:12px;background:var(--bg-subtle);border:1px solid var(--line-soft);border-radius:2px;padding:0 5px">tools/ui/console.css</code> 内置控制台共用同一套 Swiss Grid × Signal Red 设计 Token，亮暗三态自适应。</p>
       </div>
       <figure class="mock-fig">
         <div class="mock" aria-hidden="true">

@@ -1,43 +1,43 @@
 ---
 name: Context Vault Console
-description: Local-first AI session specimen ledger & bidirectional migration workbench (`tools/cv.py` CONSOLE_HTML)
+description: Local-first AI session specimen ledger & bidirectional migration workbench (`tools/ui/console.*`)
 colors:
-  primary: "#0e7568"
-  primary-ink-light: "#0a5a50"
-  primary-ink-dark: "#4fd1c5"
-  canvas-light: "#f3f5f7"
-  canvas-dark: "#0d1014"
+  primary: "#e1251b"
+  primary-ink-light: "#c81e14"
+  primary-ink-dark: "#ff645a"
+  canvas-light: "#f4f4f2"
+  canvas-dark: "#18191b"
   surface-light: "#ffffff"
-  surface-dark: "#14191f"
-  subtle-light: "#f8fafb"
-  subtle-dark: "#1a2028"
-  line-light: "#dfe3e8"
-  line-dark: "#27303c"
-  ink-light: "#15191d"
-  ink-dark: "#edf1f5"
-  ink-secondary-light: "#424a52"
-  ink-secondary-dark: "#b6c0ca"
-  ink-muted-light: "#5e6770"
-  ink-muted-dark: "#8d98a5"
-  warning-light: "#9a5b05"
-  warning-dark: "#f5b942"
-  danger-light: "#b42323"
-  danger-dark: "#f87171"
+  surface-dark: "#202225"
+  subtle-light: "#f8f8f6"
+  subtle-dark: "#272a2e"
+  line-light: "#d4d4d0"
+  line-dark: "#383c42"
+  ink-light: "#0a0a0a"
+  ink-dark: "#ededeb"
+  ink-secondary-light: "#333333"
+  ink-secondary-dark: "#b8bcc2"
+  ink-muted-light: "#666662"
+  ink-muted-dark: "#8a8f96"
+  warning-light: "#9a5200"
+  warning-dark: "#f5b027"
+  danger-light: "#990f0f"
+  danger-dark: "#ff7070"
 typography:
   body:
-    fontFamily: '"Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif'
+    fontFamily: '"Helvetica Neue", "Inter", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif'
     fontSize: "13.5px"
     fontWeight: 400
     lineHeight: 1.58
   label:
-    fontFamily: '"Cascadia Code", Consolas, "SF Mono", ui-monospace, monospace'
+    fontFamily: '"JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", ui-monospace, monospace'
     fontSize: "12px"
     fontWeight: 600
     letterSpacing: "0.03em"
 rounded:
-  sm: "6px"
-  md: "9px"
-  lg: "13px"
+  sm: "2px"
+  md: "2px"
+  lg: "4px"
 spacing:
   xs: "4px"
   sm: "8px"
