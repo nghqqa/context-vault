@@ -927,7 +927,9 @@ class VaultIndex:
         try:
             conn = (sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True, timeout=10,
                                     check_same_thread=False)
-                    if readonly else sqlite3.connect(p, timeout=10))
+                    if readonly else
+                    # 装载路径同样要放开跨线程 (serve 工作线程共用此连接; 与 _conn 一致)
+                    sqlite3.connect(p, timeout=10, check_same_thread=False))
             row = conn.execute("SELECT value FROM meta WHERE key='hdr'").fetchone()
             if not row:
                 conn.close()
