@@ -20,7 +20,7 @@
 
 ### 📊 CodingVault-Bench (open, reproducible / 公开可复现消融基准)
 - 162 gold queries × 5 dimensions (single-session / multi-session / temporal update / handoff / abstention) over a seeded synthetic corpus (18 evolving chains, 3 fictional projects, zero secrets).
-- Ablation (same corpus & queries): retrieval R@1 0.49 (v0 set-overlap) → **0.89** (v2); version intrusion 0.57 → **0.0**; memory active recall 0.48 (v0) / 0.50 (v0.1, which false-kills 100% of technical decisions) → **0.88 with stale intrusion 0.0** (v2); handoff file-pass 0.92 (naive truncation) → **1.0** (five-slot, compression 0.42).
+- Ablation (same corpus & queries, 162 gold): cross-writing retrieval R@1 0.69 (vanilla BM25) → **0.89** (v2 code-aware weighted BM25); abstention accuracy 0.46 (v0 set-overlap) → **0.92** (v2); version intrusion 0.86 → **0.0** (lineage folding); memory active recall 0.48 (v0) / 0.50 (v0.1, which false-kills 100% of technical decisions) → **0.88 with stale intrusion 0.0** (v2); handoff file-pass 0.92 (naive truncation) → **1.0** (five-slot, compression 0.42).
 - One command: `python benchmarks/run_bench.py` · scale probe: `python benchmarks/bench_scale_local.py --vault <your vault>` · details: `docs/BENCHMARK.md`.
 
 ## 🔧 Upgrade notes / 升级说明
