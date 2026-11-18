@@ -115,63 +115,70 @@ def block_text(b: dict) -> str:
     return _cv.block_text(b)
 
 
+def _readonly_index(args_vault):
+    """只读直查 search_index.db (常驻服务未启动时的毫秒级冷路径):
+    装载失败/无索引文件返回 None (调用方回退全量扫描)。绝不重建/落盘/删文件。"""
+    try:
+        import cv as _cv
+        idx = _cv.VaultIndex(args_vault, readonly=True)
+        return None if getattr(idx, "_broken", False) else idx
+    except Exception:
+        return None
+
+
 def t_search(args_vault, query: str, limit: int) -> str:
-    """冷回退搜索 — 分词与评分必须走 cv.tokenize/cv.score_blocks, 与热索引命中集一致
-    (此前自写整段子串匹配, 中文 query 在冷热两侧命中的快照集合不同)。"""
+    """冷回退搜索 — 三级路径: 常驻服务热索引 > 只读 search_index.db 直查 (毫秒级)
+    > 全量文件扫描 ColdRanker。三级共用同一评分/折叠/衰减数学, 命中集一致
+    (铁律: 常驻只是加速, 不是依赖)。"""
     import cv as _cv
-    terms = _cv.tokenize(query)
-    if not terms:
+    if not _cv.tokenize(query):
         return "查询词太短"
-    snaps = load_all_snapshots(args_vault)
-    results = []
-    for env in snaps:
-        hits = _cv.score_blocks(env, terms)
-        if hits:
-            total = sum(h[0] for h in hits)
-            results.append((total, env, len(hits)))
-    results.sort(key=lambda r: -r[0])
-    if not results:
+    idx = _readonly_index(args_vault)
+    if idx is not None:
+        try:
+            r = idx.search(query, limit)
+        finally:
+            idx._close()  # 立即释放 Windows SQLite 只读句柄
+        via = " (via 本地索引)"
+    else:
+        snaps = load_all_snapshots(args_vault)
+        r = _cv.ColdRanker(snaps, query).search(limit)
+        via = ""
+    if not r["hits"]:
         return f"未命中: {query}"
-    lines = [f"搜索 '{query}' 命中 {len(results)} 个快照:"]
-    for total, env, nhits in results[:limit]:
-        c = env["capture"]
-        lines.append(f"  [{env.get('_sid')}] {c.get('agent')} 得分={total} 命中块={nhits}"
-                     f" — {c.get('cwd', '?')} ({env.get('created_at', '')[:10]})")
+    folded = sum(int(h.get("folded", 0) or 0) for h in r["hits"])
+    suffix = f" (折叠 {folded} 个历史版本)" if folded else ""
+    lines = [f"搜索 '{query}' 命中 {r['total']} 个快照{suffix}{via}:"]
+    for h in r["hits"]:
+        lines.append(f"  [{h['sid']}] {h['agent']} 得分={h['score']}"
+                     f" — {h.get('cwd', '?')} ({str(h.get('created_at', ''))[:10]})")
     return "\n".join(lines)
 
 
 def t_context(args_vault, query: str, limit: int) -> str:
     """记忆检索: 跨快照找最相关的上下文摘录, 供当前会话引用。
-    分词/评分与热索引共用 (同 t_search), 保证启停常驻服务不改变命中集合。"""
+    三级路径同 t_search (同分词/评分/折叠), 保证启停常驻服务不改变命中集合。"""
     import cv as _cv
-    terms = _cv.tokenize(query)
-    if not terms:
+    if not _cv.tokenize(query):
         return "查询词太短"
-    snaps = load_all_snapshots(args_vault)
-    candidates = []  # (score, sid, block_idx, excerpt)
-    for env in snaps:
-        hits = _cv.score_blocks(env, terms)
-        for n, i, text in hits:
-            role = env["conversation"][i].get("role") or env["conversation"][i]["type"]
-            # 摘录取命中位置附近窗口
-            pos = text.lower().find(terms[0])
-            start = max(0, pos - SEARCH_CONTEXT_CHARS // 2)
-            excerpt = text[start:start + SEARCH_CONTEXT_CHARS]
-            candidates.append((n, env.get("_sid"), i, role, excerpt, env["capture"].get("cwd", "?")))
-    candidates.sort(key=lambda c: -c[0])
-    if not candidates:
+    idx = _readonly_index(args_vault)
+    if idx is not None:
+        try:
+            r = idx.context(query, limit)
+        finally:
+            idx._close()  # 立即释放 Windows SQLite 只读句柄
+        via = " (via 本地索引)"
+    else:
+        snaps = load_all_snapshots(args_vault)
+        r = _cv.ColdRanker(snaps, query).context(limit)
+        via = ""
+    if not r["results"]:
         return f"vault 中无相关上下文: {query}"
-    seen_sids, picked = set(), []
-    for n, sid, i, role, excerpt, cwd in candidates:
-        if len(picked) >= limit:
-            break
-        if sid in seen_sids:  # 每快照只取最佳命中, 避免单会话刷屏
-            continue
-        seen_sids.add(sid)
-        picked.append((n, sid, i, role, excerpt, cwd))
     lines = [f"来自 context-vault 的相关历史上下文 (查询: '{query}'):"]
-    for n, sid, i, role, excerpt, cwd in picked:
-        lines.append(f"\n--- 快照 {sid} 块#{i} ({role}, cwd={cwd}) 相关度={n} ---\n{excerpt}")
+    for res in r["results"]:
+        ver = f", 版本链 {res['versions']}" if res.get("versions", 1) > 1 else ""
+        lines.append(f"\n--- 快照 {res['sid']} 块#{res['block']} ({res['role']}, "
+                     f"cwd={res['cwd']}{ver}) 相关度={res['score']} ---\n{res['excerpt']}")
     lines.append("\n(以上为历史会话摘录; 引用时注明来源快照)")
     return "\n".join(lines)[:12000]
 
@@ -285,7 +292,9 @@ def _via_service(name: str, args_dict: dict):
             # 判空用服务端 total (截断前的真实命中数): limit=0 曾把真实命中报成"未命中" (二轮 mcp-6)
             if not r.get("total"):
                 return f"未命中: {r['query']} (via 热索引)"
-            lines = [f"搜索 '{r['query']}' 命中 {r['total']} 个快照 (via 热索引):"]
+            folded = sum(int(h.get("folded", 0) or 0) for h in r.get("hits", []))
+            suffix = f" (折叠 {folded} 个历史版本)" if folded else ""
+            lines = [f"搜索 '{r['query']}' 命中 {r['total']} 个快照{suffix} (via 热索引):"]
             for h in r["hits"]:
                 lines.append(f"  [{h['sid']}] {h['agent']} 得分={h['score']} — "
                              f"{h.get('cwd', '?')} ({str(h.get('created_at', ''))[:10]})")
@@ -339,35 +348,48 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "id": {"type": "string", "description": "快照 id (cv_ 开头)"}},
          "required": ["id"]}},
-    {"name": "vault_remember", "description": "检索跨会话的长期记忆 (历史决策/项目结论/用户偏好, 由快照自动提取) — 新任务开始时先问一句'关于 X 我们之前定过什么'",
+    {"name": "vault_remember", "description": "检索跨会话的长期记忆 (历史决策/项目结论/用户偏好/踩坑/架构红线, 由快照自动提取; 默认只返回当前有效记忆, 被推翻的旧记忆不污染上下文) — 新任务开始时先问一句'关于 X 我们之前定过什么'",
      "inputSchema": {"type": "object", "properties": {
          "query": {"type": "string", "description": "主题关键词 (如 'RBAC 方案' / 'dataset1 调参')"},
-         "limit": {"type": "integer", "default": 6}}, "required": ["query"]}},
+         "limit": {"type": "integer", "default": 6},
+         "include_history": {"type": "boolean", "default": False,
+                             "description": "true = 追溯决策演变链 (含已 superseded 的旧记忆及其指向)"}},
+         "required": ["query"]}},
     {"name": "vault_stats", "description": "token 账本汇总 (累计节省/缓存节省/快照数)",
      "inputSchema": {"type": "object", "properties": {}}},
 ]
 
 
-def t_remember(vault: Path, query: str, limit: int) -> str:
+def t_remember(vault: Path, query: str, limit: int, include_history: bool = False) -> str:
+    hist_qs = "&history=1" if include_history else ""
     try:  # 常驻服务热路径
-        r = _svc_get(f"/memory?q={urllib.parse.quote(query)}&limit={limit}")
+        r = _svc_get(f"/memory?q={urllib.parse.quote(query)}&limit={limit}{hist_qs}")
         ms = r["memories"]
     except Exception:
-        ms = _local_memory(vault, query, limit)
+        ms = _local_memory(vault, query, limit, include_history)
     if not ms:
         return f"vault 中没有关于「{query}」的记忆。可先运行: python tools/cv.py memory extract"
-    lines = [f"跨会话记忆 ({query}) — 来自 context-vault 历史快照的自动提取:"]
+    lines = [f"跨会话记忆 ({query}) — 来自 context-vault 历史快照的自动提取"
+             + (" (含历史演变链):" if include_history else " (仅当前有效记忆):")]
     for m in ms:
-        lines.append(f"  [{m['kind']}] {m['content'][:200]}\n"
-                     f"      (项目 {m.get('project') or '?'} · 快照 {m.get('snapshot', '')[:18]})")
+        provenance = f"项目 {m.get('project') or '?'} · 快照 {m.get('snapshot', '')[:18]}"
+        if m.get("block_idx") is not None:
+            provenance += f" 块#{m['block_idx']}"
+        if m.get("event_ts"):
+            provenance += f" · {str(m['event_ts'])[:16]}"
+        status = m.get("status") or "active"
+        tag = "" if status == "active" else f" [已推翻 ← 见 #{m.get('superseded_by')}]"
+        conf = f" · 置信 {m['confidence']:.1f}" if m.get("confidence") else ""
+        lines.append(f"  [{m['kind']}]{tag} {m['content'][:200]}\n"
+                     f"      ({provenance}{conf})")
     lines.append("引用时注明来源快照; 记忆为规则提取, 关键决策请回读原快照核实。")
     return "\n".join(lines)[:9000]
 
 
-def _local_memory(vault: Path, query: str, limit: int) -> list:
+def _local_memory(vault: Path, query: str, limit: int, include_history: bool = False) -> list:
     sys.path.insert(0, str(Path(__file__).parent))
     import cv as _cv
-    return _cv.memory_search_api(vault, query, limit)
+    return _cv.memory_search_api(vault, query, limit, include_history=include_history)
 
 
 def dispatch(name: str, args_dict: dict, vault: Path) -> str:
@@ -386,7 +408,8 @@ def dispatch(name: str, args_dict: dict, vault: Path) -> str:
     if name == "vault_snapshot":
         return t_snapshot(vault, args_dict.get("id", ""))
     if name == "vault_remember":
-        return t_remember(vault, args_dict.get("query", ""), int(args_dict.get("limit", 6)))
+        return t_remember(vault, args_dict.get("query", ""), int(args_dict.get("limit", 6)),
+                          bool(args_dict.get("include_history", False)))
     if name == "vault_stats":
         return t_stats(vault)
     raise ValueError(f"未知工具: {name}")

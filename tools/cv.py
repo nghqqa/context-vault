@@ -51,8 +51,16 @@ if _TOOLS_DIR not in sys.path:
 from cv_ui import load_console_html as _load_console_html, load_dashboard_html as _load_dashboard_html
 from cv_index import (  # noqa: F401 — re-exported as public engine API
     VaultIndex,
+    ColdRanker,
+    DEFAULT_WEIGHTS,
+    IDENT_BOOST,
+    UNIFORM,
     block_text,
+    decay_factor,
+    fold_chains,
     format_snapshot_messages,
+    ident_set,
+    rrf_fuse,
     score_blocks,
     tokenize,
 )
@@ -1338,47 +1346,211 @@ def do_import_zcode(vault: Path, env: dict, sid: str, apply: bool,
             "new_sid": sess_id, "applied": True}
 
 
-def blocks_to_brief(env: dict, max_chars: int = 48 * 1024) -> str:
-    """Markdown 交接简报: 精确迁移之外的可携降级档 (Beacon 模式) — 任何 agent 都吃 Markdown。
-    内容: 它停在哪儿 / 最近动作 / 活上下文尾部; 密钥类内容不特殊处理 (简报只含会话内已明文的内容)。"""
+def estimate_text_tokens(text: str) -> int:
+    """文本 token 粗估 (预算装配用, 诚实标注为估算): CJK ≈ 1 字/token, ASCII ≈ 4 字符/token。"""
+    if not text:
+        return 0
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    return cjk + (len(text) - cjk) // 4 + 1
+
+
+_BRIEF_LINE_CAP = 220   # 槽位单行截断 (v0 同款视觉)
+
+
+def _brief_stop_point(blocks: list) -> str:
+    """停点 = 最后一条 assistant 文本 / agent_message (2026-11-02 审查 #5 契约, 两类都认)。"""
+    for b in reversed(blocks):
+        if not isinstance(b, dict):
+            continue
+        if b.get("type") == "agent_message" or (b.get("type") == "text" and b.get("role") == "assistant"):
+            txt = (b.get("content") or "").strip()
+            if txt:
+                return txt[:2000] + ("…[截断]" if len(txt) > 2000 else "")
+    return "(会话中无 assistant 文本输出)"
+
+
+def compress_brief(env: dict, budget_tokens: int | None = None,
+                   max_chars: int = 48 * 1024) -> tuple:
+    """预算受限交接简报装配器 (W3): 显式 token 预算下的效用最大化 —
+    槽位优先级 ① 任务目标与最终停靠态 (必保) ② 关键架构裁决 ③ 已证伪死路与踩坑
+    ④ 触碰文件与工具拓扑 ⑤ 活上下文尾部。同文件多次读取折叠为 ×N 末次态,
+    重复报错去重计数, 长回显只留锚点行。返回 (markdown, stats 元数据)。"""
     from collections import Counter
-    c, s = env["capture"], env["stats"]
-    blocks = env["conversation"]
-    dist = Counter(b["type"] for b in blocks)
+    from cv_memory import CONSTRAINT_MARKERS, DECISION_MARKERS, PITFALL_MARKERS
+    c, s = env.get("capture") or {}, env.get("stats") or {}
+    blocks = env.get("conversation") or []
+    dist = Counter(b.get("type") for b in blocks if isinstance(b, dict))
+    budget = max(300, int(budget_tokens)) if budget_tokens else max_chars // 2
+    orig_tokens = estimate_tokens(blocks)
+    used = 0
+    kept = {"decisions": 0, "pitfalls": 0, "files": 0, "tail": 0}
+
+    # ---- ① 任务目标与最终停靠态 (强制保留 — 简报的存在意义) ----
+    first_task = ""
+    for b in blocks:
+        if isinstance(b, dict) and b.get("type") == "text" and b.get("role") == "user":
+            t = (b.get("content") or "").strip()
+            if t and not t.startswith(("<environment_context>", "<permissions")):
+                first_task = " ".join(t.split())[:300]
+                break
+    goal_lines = ([f"- 任务: {first_task}"] if first_task else [])
+    goal_lines.append(f"- 停点: {_brief_stop_point(blocks)}")
+
+    # ---- ② 关键架构裁决 (assistant 决策/红线句, 行级去重) ----
+    decisions, seen_dec = [], set()
+    for b in blocks:
+        if not isinstance(b, dict) or b.get("type") != "text" or b.get("role") != "assistant":
+            continue
+        for ln in (b.get("content") or "").splitlines():
+            t = ln.strip()
+            if not (12 <= len(t) <= 400):
+                continue
+            low = t.lower()
+            if any(m in low[:32] for m in DECISION_MARKERS) \
+                    or any(m in low[:48] for m in CONSTRAINT_MARKERS):
+                key = t[:80]
+                if key not in seen_dec:
+                    seen_dec.add(key)
+                    decisions.append("- " + t[:_BRIEF_LINE_CAP])
+
+    # ---- ③ 已证伪死路与踩坑 (assistant pitfall 句 + 报错去重 ×N) ----
+    pitfalls, seen_pit = [], set()
+    for b in blocks:
+        if not isinstance(b, dict) or b.get("type") != "text" or b.get("role") != "assistant":
+            continue
+        for ln in (b.get("content") or "").splitlines():
+            t = ln.strip()
+            low = t.lower()
+            if 12 <= len(t) <= 400 and any(m in low[:48] for m in PITFALL_MARKERS):
+                key = t[:80]
+                if key not in seen_pit:
+                    seen_pit.add(key)
+                    pitfalls.append("- " + t[:_BRIEF_LINE_CAP])
+    call_names = {}
+    for b in blocks:
+        if isinstance(b, dict) and b.get("type") == "tool_call" and b.get("call_id"):
+            call_names[str(b["call_id"])] = str(b.get("name") or "call")
+    err_counts, err_order = {}, []
+    for b in blocks:
+        if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("is_error"):
+            key = " ".join(str(b.get("content") or "").split())[:100]
+            if key:
+                if key not in err_counts:
+                    err_counts[key] = [0, str(b.get("call_id") or "")]
+                    err_order.append(key)
+                err_counts[key][0] += 1
+    err_lines = [f"[报错×{cnt} · {call_names.get(cid, cid[:20])}] {key[:160]}"
+                 for key in err_order[:8]
+                 for cnt, cid in (err_counts[key],)]
+
+    # ---- ④ 触碰文件拓扑 + 工具统计 + 最近动作 (v0 契约段名保留) ----
+    file_stats, tool_counts, calls = {}, Counter(), []
+    path_arg_keys = ("path", "file", "file_path", "notebook_path", "abs_path")
+    for b in blocks:
+        if not isinstance(b, dict) or b.get("type") != "tool_call":
+            continue
+        name = str(b.get("name") or "?")
+        tool_counts[name] += 1
+        calls.append(b)
+        args = b.get("arguments") if isinstance(b.get("arguments"), dict) else {}
+        for k in path_arg_keys:
+            v = args.get(k)
+            if isinstance(v, str) and v:
+                st = file_stats.setdefault(v, {"n": 0, "last": name})
+                st["n"] += 1
+                st["last"] = name
+                break
+    file_lines = [f"- `{p}` ×{st['n']} (末次: {st['last']})"
+                  for p, st in sorted(file_stats.items(), key=lambda kv: -kv[1]["n"])]
+    recent_lines = [f"- `{b.get('name', '?')}` {json.dumps(b.get('arguments', {}), ensure_ascii=False)[:110]}"
+                    for b in reversed(calls[-12:])]
+
+    # ---- ⑤ 活上下文尾部 (v0 行格式) ----
+    tail_lines = []
+    for b in blocks[-30:]:
+        if not isinstance(b, dict):
+            continue
+        role = b.get("role") or b.get("type")
+        text = (b.get("content") or b.get("summary") or "").strip().replace("\n", " ")
+        if b.get("type") == "compaction":
+            text = "(压缩边界) " + (b.get("summary") or "")[:150]
+        if b.get("type") == "tool_call":
+            text = (b.get("name") or "") + " " + text[:110]
+        elif b.get("type") == "tool_result":
+            nm = call_names.get(str(b.get("call_id") or ""), "tool")
+            note = "回显略 → 见死路/文件段" if b.get("is_error") else "回显略"
+            text = "[" + nm + " " + note + "]"
+        if text:
+            tail_lines.append(f"- **{role}**: {text[:_BRIEF_LINE_CAP]}")
+
+    # ---- 按预算装配 (优先级 ①→②→③→④→⑤; 段头成本忽略, ≪预算) ----
     out = [f"# 会话交接简报 — {c.get('agent', '?')} · {str(env.get('created_at', ''))[:10]}",
            "",
            f"- 工作目录: `{c.get('cwd', '?')}`",
-           f"- 完整性: {c.get('completeness', '?')} · 块 {s['blocks_total']} · "
-           f"输入 {s['tokens_in']:,} tok · 压缩边界 {dist.get('compaction', 0)}",
-           f"- 来源快照: `{env.get('_sid', snapshot_id(env))}` (可用 cv import --target codex|claude 精确迁移)",
-           "", "## 它停在哪儿", ""]
-    for b in reversed(blocks):  # 最后一条 assistant 输出 = 停点
-        # 停点检索 (2026-11-02 审查 #5): 原生 Codex/Claude exporter 的普通 assistant 消息
-        # 是 text 块 (role=assistant), agent_message 只是多 agent 场景的类型 — 两者都要认
-        if b["type"] == "agent_message" or (b["type"] == "text" and b.get("role") == "assistant"):
-            txt = (b.get("content") or "").strip()
-            out += [txt[:2000] + ("…[截断]" if len(txt) > 2000 else ""), ""]
-            break
-    else:
-        out += ["(会话中无 assistant 文本输出)", ""]
-    out += ["## 最近动作 (工具调用, 末 12 条)", ""]
-    calls = [b for b in blocks if b["type"] == "tool_call"][-12:]
-    for b in reversed(calls):
-        arg = json.dumps(b.get("arguments", {}), ensure_ascii=False)[:110]
-        out.append(f"- `{b.get('name', '?')}` {arg}")
-    if not calls:
-        out.append("(无工具调用)")
-    out += ["", "## 活上下文尾部 (最后 30 块)", ""]
-    for b in blocks[-30:]:
-        role = b.get("role") or b["type"]
-        text = (b.get("content") or b.get("summary") or "").strip().replace("\n", " ")
-        if b["type"] == "compaction":
-            text = "(压缩边界) " + (b.get("summary") or "")[:150]
-        if b["type"] in ("tool_call", "tool_result"):
-            text = (b.get("name") or "") + " " + text[:110]
-        if text:
-            out.append(f"- **{role}**: {text[:220]}")
-    brief = "\n".join(out)
+           f"- 完整性: {c.get('completeness', '?')} · 块 {s.get('blocks_total', 0)} · "
+           f"输入 {s.get('tokens_in', 0):,} tok · 压缩边界 {dist.get('compaction', 0)}",
+           f"- 来源快照: `{env.get('_sid', snapshot_id(env))}` (可用 cv import --target codex|claude 精确迁移)"]
+
+    def fit(title: str, lines: list, force: bool = False) -> list:
+        nonlocal used
+        body = []
+        for ln in lines:
+            cost = estimate_text_tokens(ln) + 1
+            if used + cost > budget and body and not force:
+                body.append("…[预算截断]")
+                break
+            if used + cost > budget and not force:
+                continue
+            body.append(ln)
+            used += cost
+        if not body:
+            return []
+        return ["", f"## {title}", ""] + body
+
+    out += fit("它停在哪儿", goal_lines, force=True)
+    if decisions:
+        sec = fit("关键架构裁决", decisions)
+        kept["decisions"] = sum(1 for ln in sec if ln.startswith("- "))
+        out += sec
+    pit_all = pitfalls + err_lines
+    if pit_all:
+        sec = fit("已证伪死路与踩坑", pit_all)
+        kept["pitfalls"] = sum(1 for ln in sec if ln.startswith("- "))
+        out += sec
+    out += fit("最近动作 (工具调用, 末 12 条)", recent_lines or ["(无工具调用)"])
+    if file_lines:
+        top_tools = ", ".join(f"{k}×{v}" for k, v in tool_counts.most_common(5))
+        sec = fit("触碰文件与工具", file_lines + [f"- 工具用量: {top_tools}"])
+        kept["files"] = sum(1 for ln in sec if ln.startswith("- `"))
+        out += sec
+    if tail_lines:
+        sec = fit("活上下文尾部 (最后 30 块)", tail_lines)
+        kept["tail"] = sum(1 for ln in sec if ln.startswith("- **"))
+        out += sec
+
+    out_tokens = estimate_text_tokens("\n".join(out)) + used
+    stats = {"budget_tokens": budget, "orig_tokens": orig_tokens, "out_tokens": out_tokens,
+             "ratio": round(out_tokens / max(orig_tokens, 1), 4),
+             "decisions_kept": kept["decisions"], "decisions_total": len(decisions),
+             "pitfalls_kept": kept["pitfalls"], "pitfalls_total": len(pit_all),
+             "files_kept": kept["files"], "files_total": len(file_lines),
+             "tail_blocks_kept": kept["tail"]}
+    out += ["", "## 压缩统计", "",
+            f"- 预算 {budget} tok → 输出约 {stats['out_tokens']} tok"
+            f" (原始估算 {orig_tokens} tok, 压缩比 {stats['ratio']:.2f})",
+            f"- 保留: 裁决 {stats['decisions_kept']}/{stats['decisions_total']}"
+            f" · 死路 {stats['pitfalls_kept']}/{stats['pitfalls_total']}"
+            f" · 文件 {stats['files_kept']}/{stats['files_total']}"
+            f" · 尾部块 {stats['tail_blocks_kept']}",
+            "- token 数为估算值 (CJK≈1 字/tok, ASCII≈4 字符/tok)"]
+    return "\n".join(out), stats
+
+
+def blocks_to_brief(env: dict, max_chars: int = 48 * 1024, budget_tokens: int | None = None) -> str:
+    """Markdown 交接简报: 精确迁移之外的可携降级档 (Beacon 模式) — 任何 agent 都吃 Markdown。
+    v2: 预算受限五槽位效用装配 (compress_brief); budget_tokens=None 时按 max_chars 推导宽预算,
+    小会话内容与 v0 一致。密钥类内容不特殊处理 (简报只含会话内已明文的内容)。"""
+    brief, _stats = compress_brief(env, budget_tokens=budget_tokens, max_chars=max_chars)
     if len(brief) > max_chars:
         brief = brief[:max_chars] + "\n\n…[简报超限截断; 完整内容请用精确迁移 cv import]"
     return brief
@@ -1391,7 +1563,7 @@ def _record_migration(vault: Path, dest: Path, sid: str, baseline=None):
 
 
 def do_import(vault: Path, sid: str, target: str, apply: bool, strip_thinking=False,
-              session_id: str | None = None) -> dict:
+              session_id: str | None = None, budget_tokens: int | None = None) -> dict:
     """迁移执行核心 (CLI 与控制台 HTTP 共用)。返回 {lines, dropped, dest, new_sid, applied}。
     session_id 缺省按源会话 (agent+session_ref) 确定性派生: 同一会话重复导出/演进后重导出
     在目标端同名覆盖 (原位更新), 不再产生并排副本。antigravity apply 同时登记
@@ -1438,7 +1610,7 @@ def do_import(vault: Path, sid: str, target: str, apply: bool, strip_thinking=Fa
     (vault / "outbox").mkdir(parents=True, exist_ok=True)
     if target == "markdown":  # 交接简报: 可携降级档, 不写真实会话目录, 无 apply 语义
         dest = vault / "outbox" / f"brief-{sid}.md"
-        lines_text = blocks_to_brief(env)
+        lines_text = blocks_to_brief(env, budget_tokens=budget_tokens)
         atomic_write_text(dest, lines_text)
         return {"lines": len(lines_text.splitlines()), "dropped": 0, "dest": str(dest),
                 "new_sid": None, "applied": False}
@@ -1508,7 +1680,8 @@ def cmd_import(args):
     req_agent = getattr(args, "agent", None)
     if sid:
         _check_single_sid_agent(vault, sid, req_agent)
-        r = do_import(vault, sid, args.target, args.apply, args.strip_thinking)
+        r = do_import(vault, sid, args.target, args.apply, args.strip_thinking,
+                      budget_tokens=getattr(args, "budget_tokens", None))
         _print_import_result(r, args.target)
         return
     if project:
@@ -1526,7 +1699,8 @@ def cmd_import(args):
         for it in items:
             title = (it["title"] or "(无标题)")[:50]
             print(f"\n[{it['id']}] {it['cwd'] or '(无项目)'} — {title}")
-            r = do_import(vault, it["id"], args.target, args.apply, args.strip_thinking)
+            r = do_import(vault, it["id"], args.target, args.apply, args.strip_thinking,
+                          budget_tokens=getattr(args, "budget_tokens", None))
             _print_import_result(r, args.target)
         print(f"\n共导入 {len(items)} 条主对话 → {args.target}")
         return
@@ -1546,6 +1720,7 @@ def cmd_migrate(args):
             print("已中止 (快照已留存于 vault)")
             return
     a.target, a.apply, a.strip_thinking = args.target, args.apply, args.strip_thinking
+    a.budget_tokens = getattr(args, "budget_tokens", None)
     cmd_import(a)
 
 
@@ -2568,10 +2743,17 @@ from cv_memory import (  # noqa: F401,E402
     MEMORY_TABLE,
     DECISION_MARKERS,
     PREFERENCE_MARKERS,
+    PITFALL_MARKERS,
+    CONSTRAINT_MARKERS,
+    SUPERSEDE_MARKERS,
     MAX_MEMORY_PER_SNAPSHOT,
     extract_memories,
+    extract_memories_v2,
+    ensure_memory_schema,
+    recompute_supersession,
     ENGINE_PROTOCOL_DOC,
     RuleMemoryEngine,
+    TemporalMemoryEngine,
     load_memory_engine,
     extract_memories_incremental,
     memory_dedup,
@@ -2584,7 +2766,7 @@ def cmd_memory(args):
     if not hasattr(args, "engine"):
         args.engine = None  # search/list 子命令未注册 --engine, 统一兜底
     vault = vault_dir(args)
-    engine_name = args.engine or os.environ.get("CV_MEMORY_ENGINE", "rule")
+    engine_name = args.engine or os.environ.get("CV_MEMORY_ENGINE", "v2")
     if args.memory_cmd == "extract":
         res = extract_memories_incremental(
             vault,
@@ -2603,36 +2785,38 @@ def cmd_memory(args):
         return
     conn = db(vault)
     try:
-        conn.executescript(SCHEMA + MEMORY_TABLE)
-        engine = load_memory_engine(engine_name)
+        # 老库迁移必须走 ensure_memory_schema (先补列再建索引 — 直接 executescript
+        # MEMORY_TABLE 会在缺 topic_key 列的老库上炸 no such column)
+        ensure_memory_schema(conn)
         if args.memory_cmd == "search":
-            if engine_name != "rule":
-                for m in engine.search(vault, args.query, args.limit):
-                    print(f"[{m['kind']:<10}] {m['content'][:100]}  ({m.get('project') or '?'})")
-                return
-            terms = tokenize(args.query)
-            rows = conn.execute("SELECT * FROM memory_items").fetchall()
-            scored = []
-            for r in rows:
-                low = r["content"].lower()
-                n = sum(low.count(t) for t in terms)
-                if n:
-                    scored.append((n + (3 if r["kind"] == "summary" else 0), r))
-            scored.sort(key=lambda x: -x[0])
-            if not scored:
+            history = bool(getattr(args, "history", False))
+            ms = memory_search_api(vault, args.query, args.limit,
+                                   include_history=history)
+            if not ms:
                 print(f"无相关记忆: {args.query}")
                 return
-            for n, r in scored[:args.limit]:
-                print(f"[{r['kind']:<10}] {r['content'][:100]}  ({r['project'] or '?'})")
-                conn.execute("UPDATE memory_items SET hits=hits+1, last_used=? WHERE id=?",
-                             (now_iso(), r["id"]))
-            conn.commit()
+            for m in ms:
+                tag = ""
+                if (m.get("status") or "active") != "active":
+                    tag = f" [已推翻 ← #{m.get('superseded_by')}]"
+                prov = m.get("project") or "?"
+                if m.get("block_idx") is not None:
+                    prov += f" · {m.get('snapshot', '')[:18]}#{m['block_idx']}"
+                if m.get("event_ts"):
+                    prov += f" · {str(m['event_ts'])[:16]}"
+                print(f"[{m['kind']:<10}]{tag} {m['content'][:100]}  ({prov})")
         elif args.memory_cmd == "list":
             q = "SELECT kind, COUNT(*) n FROM memory_items GROUP BY kind"
             for r in conn.execute(q):
                 print(f"  {r[0]:<10} ×{r[1]}")
-            for r in conn.execute("SELECT * FROM memory_items ORDER BY id DESC LIMIT ?", (args.limit,)):
-                print(f"[{r['kind']:<10}] {r['content'][:90]}  ({r['project'] or '?'})")
+            hist = "WHERE status='active'" if not getattr(args, "history", False) else ""
+            for r in conn.execute(f"SELECT * FROM memory_items {hist} ORDER BY id DESC LIMIT ?",
+                                  (args.limit,)):
+                prov = r["project"] or "?"
+                if r["block_idx"] is not None:
+                    prov += f" · {r['snapshot_id'][:18]}#{r['block_idx']}"
+                tag = "" if (r["status"] or "active") == "active" else " [已推翻]"
+                print(f"[{r['kind']:<10}]{tag} {r['content'][:90]}  ({prov})")
     finally:
         conn.close()
 
@@ -4602,9 +4786,9 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     return
                 if u.path == "/healthz":
                     idx.request_rebuild(60)  # 后台单飞重建; 本请求拿现态秒回, 增长期绝不阻塞
-                    st = idx._state  # 单次读取: 快照数与词项数出自同一代索引
+                    # 单次读取 meta/term_count: 快照数与词项数出自同一代索引 (v2 SQLite 倒排)
                     return self._json({"service": "context-vault", "status": "ok",
-                                       "snapshots": len(st[1]), "terms": len(st[0])})
+                                       "snapshots": len(idx.meta), "terms": idx.term_count})
                 if u.path == "/audit":
                     return self._json(audit_summary_and_timeline(
                         vault, q.get("since", ""), "all"))
@@ -4618,7 +4802,8 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                         "query": q.get("q", ""),
                         "kind": mkind,
                         "counts": memory_counts_api(vault),
-                        "memories": memory_search_api(vault, q.get("q", ""), mlim, kind=mkind),
+                        "memories": memory_search_api(vault, q.get("q", ""), mlim, kind=mkind,
+                                                      include_history=(q.get("history") == "1")),
                     })
                 if u.path == "/probe_events":
                     conn = db(vault)  # ThreadingHTTPServer 每请求短连接; 显式关闭归还 WAL 句柄
@@ -4730,6 +4915,15 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                         lim = int(q.get("limit", 5))
                     except ValueError:
                         return self._json({"error": "invalid limit: 需要整数"}, 400)
+                    if q.get("hybrid") == "1":  # 可选稠密重排 (CV_EMBEDDINGS_URL 配置时生效;
+                        # 未配置/故障时 hybrid_search 内部回退纯结构化, 行为不变)
+                        try:
+                            from cv_dense import DenseProvider, EmbeddingCache, hybrid_search
+                            return self._json(hybrid_search(
+                                idx, vault, q.get("q", ""), lim,
+                                provider=DenseProvider(), cache=EmbeddingCache(vault)))
+                        except Exception:
+                            pass
                     return self._json(idx.search(q.get("q", ""), lim))
                 if u.path == "/context":
                     idx.rebuild()
@@ -4740,8 +4934,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     return self._json(idx.context(q.get("q", ""), lim))
                 if u.path == "/recent":
                     idx.request_rebuild(60)  # 后台单飞重建; 分页总数与徽章同源同新鲜度且秒回
-                    st = idx._state  # 真正的单次读取: 曾写成两次独立下标, 换装插进中间时 KeyError 500
-                    meta, sids = st[1], st[2]
+                    meta, sids = idx.meta, idx.sids  # 单次引用读取 (换装是整体换装, 属性读自洽)
                     total = len(meta)  # 可列出库存 = 唯一对外口径: 徽章/资产卡/分页同一数字
                     try:
                         lim = max(1, min(int(q.get("limit", 5)), 200))
@@ -4948,7 +5141,8 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                         return self._json({"error": f"snapshot not found: {mid}"}, 404)
                     try:
                         r = do_import(vault, mid, body.get("target", "codex"),
-                                      bool(body.get("apply")))
+                                      bool(body.get("apply")),
+                                      budget_tokens=body.get("budget_tokens"))
                     except SnapshotNotFound as e:  # 存在性检查到加载之间被删的竞态兜底
                         return self._json({"error": str(e)}, 404)
                     except BadMigrateTarget as e:  # HTTP 层没有 argparse choices, 未知 target 挡在这
@@ -5104,8 +5298,7 @@ def cmd_serve(args):
     token = args.token or os.environ.get("CV_SERVE_TOKEN")
     srv, idx = build_vault_server(vault_dir(args), args.port, token=token)
     port = srv.server_address[1]  # 首选端口被保留时会退到备用端口: 打印实际地址
-    st = idx._state
-    print(f"vault 热索引就绪: {len(st[1])} 快照, {len(st[0])} 词项")
+    print(f"vault 热索引就绪: {len(idx.meta)} 快照, {idx.term_count} 词项 (引擎 v2, SQLite 倒排)")
     print(f"Context Vault 服务已启动: http://127.0.0.1:{port} (Ctrl+C 退出)")
     if token:
         print("  鉴权已启用: 首访 http://127.0.0.1:{}/?token=*** 自动登录; "
@@ -5250,6 +5443,8 @@ def main(argv=None):
     i.add_argument("--include-archived", action="store_true", help="包含 ZCode 已归档会话 (不含子代理)")
     i.add_argument("--apply", action="store_true", help="写入真实会话目录 (默认 dry-run)")
     i.add_argument("--strip-thinking", action="store_true", help="不迁移 reasoning 摘要")
+    i.add_argument("--budget-tokens", type=int, default=None,
+                   help="markdown 目标的简报 token 预算 (建议 2000|4000|8000; 缺省按 48KB 推导)")
     i.set_defaults(func=cmd_import)
 
     m = sub.add_parser("migrate", help="一键: 导出→预览→导入")
@@ -5259,6 +5454,8 @@ def main(argv=None):
     m.add_argument("--yes", action="store_true")
     m.add_argument("--strip-thinking", action="store_true")
     m.add_argument("--drop-developer", action="store_true")
+    m.add_argument("--budget-tokens", type=int, default=None,
+                   help="markdown 目标的简报 token 预算 (建议 2000|4000|8000)")
     m.set_defaults(func=cmd_migrate)
 
     pr = sub.add_parser("probe", help="上游 /v1/models 可用性探测")
@@ -5299,15 +5496,18 @@ def main(argv=None):
     msub = mem.add_subparsers(dest="memory_cmd", required=True)
     me = msub.add_parser("extract", help="提取决策/摘要/偏好记忆 (增量幂等, --force 可全量重提)")
     me.add_argument("--snapshot", help="只处理单个快照")
-    me.add_argument("--engine", help="记忆引擎 (默认 rule; 或 module:Class 动态加载)")
+    me.add_argument("--engine", help="记忆引擎 (默认 v2 双时态; 'rule'=v0.1 规则引擎; 或 module:Class 动态加载)")
     me.add_argument("--force", action="store_true", help="忽略已提取水位, 全量重新提取")
     me.set_defaults(func=cmd_memory)
-    ms = msub.add_parser("search", help="检索记忆")
+    ms = msub.add_parser("search", help="检索记忆 (默认只回当前有效记忆, 被推翻的不污染)")
     ms.add_argument("query")
     ms.add_argument("--limit", type=int, default=8)
+    ms.add_argument("--history", action="store_true",
+                    help="追溯决策演变链 (含已 superseded 的旧记忆及其指向)")
     ms.set_defaults(func=cmd_memory)
-    ml = msub.add_parser("list", help="最近记忆")
+    ml = msub.add_parser("list", help="最近记忆 (默认只列 active; --history 含已推翻)")
     ml.add_argument("--limit", type=int, default=20)
+    ml.add_argument("--history", action="store_true", help="包含已推翻记忆")
     ml.set_defaults(func=cmd_memory)
     mdd = msub.add_parser("dedup", help="合并 (kind, content) 完全相同的跨快照重复摘录")
     mdd.set_defaults(func=cmd_memory)

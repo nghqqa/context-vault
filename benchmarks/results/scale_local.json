@@ -1,0 +1,19 @@
+{
+ "vault": "vault",
+ "snapshots": 2006,
+ "unique_blocks": 353978,
+ "terms": 904349,
+ "stage_sec": 4.0,
+ "hardlinked": 0,
+ "copied": 2006,
+ "build_sec": 208.7,
+ "index_v2_mb": 100.9,
+ "index_v0_pickle_mb": 778.5,
+ "reduction_vs_pickle_pct": 87.0,
+ "cold_start_ms": 375.5,
+ "latency_p50_ms": 23.1,
+ "latency_p95_ms": 39.0,
+ "latency_max_ms": 68.5,
+ "n_queries": 15,
+ "note": "快照以硬链接/拷贝进临时目录实测, 原 vault 未改写; 查询词为通用工程词, 无会话内容外泄"
+}

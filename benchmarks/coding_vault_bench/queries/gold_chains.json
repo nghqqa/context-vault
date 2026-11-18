@@ -1,0 +1,2044 @@
+[
+ {
+  "chain": "phoenix-relay-retry",
+  "project": "phoenix-api",
+  "sids": [
+   "cv_bench_phoenix-relay-retry_v00",
+   "cv_bench_phoenix-relay-retry_v01",
+   "cv_bench_phoenix-relay-retry_v02",
+   "cv_bench_phoenix-relay-retry_v03",
+   "cv_bench_phoenix-relay-retry_v04",
+   "cv_bench_phoenix-relay-retry_v05"
+  ],
+  "leaf_sid": "cv_bench_phoenix-relay-retry_v05",
+  "files": [
+   "relay/retry_policy.py",
+   "relay/schedule.py",
+   "config/retry.yaml",
+   "relay/metrics.py",
+   "tests/test_retry.py",
+   "docs/retry_runbook.md"
+  ],
+  "pitfall": "retry.yaml 全量重发会在风暴时放大故障, 此路已验证无效",
+  "tokens": [
+   "ERR_502_RELAY_TIMEOUT",
+   "--drain-timeout 90",
+   "retry_budget=0.3"
+  ],
+  "slots": [
+   {
+    "slot": "retry.yaml",
+    "final": "exponential_jitter",
+    "superseded": [
+     "fixed_1s"
+    ],
+    "at_version": 1
+   },
+   {
+    "slot": "retry.yaml",
+    "final": "circuit_breaker",
+    "superseded": [
+     "fixed_1s",
+     "exponential_jitter"
+    ],
+    "at_version": 2
+   }
+  ],
+  "block_spans": {
+   "cv_bench_phoenix-relay-retry_v00": {
+    "decision_blocks": [
+     1
+    ],
+    "files_touched": [
+     "relay/retry_policy.py",
+     "relay/schedule.py"
+    ]
+   },
+   "cv_bench_phoenix-relay-retry_v01": {
+    "decision_blocks": [
+     1,
+     13
+    ],
+    "files_touched": [
+     "relay/schedule.py",
+     "config/retry.yaml"
+    ]
+   },
+   "cv_bench_phoenix-relay-retry_v02": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27
+    ],
+    "files_touched": [
+     "config/retry.yaml",
+     "relay/metrics.py"
+    ]
+   },
+   "cv_bench_phoenix-relay-retry_v03": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "relay/metrics.py",
+     "tests/test_retry.py"
+    ]
+   },
+   "cv_bench_phoenix-relay-retry_v04": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "tests/test_retry.py",
+     "docs/retry_runbook.md"
+    ]
+   },
+   "cv_bench_phoenix-relay-retry_v05": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "docs/retry_runbook.md",
+     "relay/retry_policy.py"
+    ]
+   }
+  },
+  "cross": {
+   "camel": "err502RelayTimeout",
+   "snake": "err_502_relay_timeout"
+  }
+ },
+ {
+  "chain": "phoenix-webhook-sign",
+  "project": "phoenix-api",
+  "sids": [
+   "cv_bench_phoenix-webhook-sign_v00",
+   "cv_bench_phoenix-webhook-sign_v01",
+   "cv_bench_phoenix-webhook-sign_v02",
+   "cv_bench_phoenix-webhook-sign_v03",
+   "cv_bench_phoenix-webhook-sign_v04"
+  ],
+  "leaf_sid": "cv_bench_phoenix-webhook-sign_v04",
+  "files": [
+   "webhook/verify.py",
+   "webhook/routes.py",
+   "webhook/tests_sign.py",
+   "docs/webhook_runbook.md",
+   "config/keys.env"
+  ],
+  "pitfall": "字符串直接比较签名存在时序侧信道, 旧实现必须废弃",
+  "tokens": [
+   "SIG_V2_HMAC",
+   "nonce_window=300",
+   "ERR_SIG_MISMATCH"
+  ],
+  "slots": [
+   {
+    "slot": "verify.py",
+    "final": "hmac_sha256_constant_time",
+    "superseded": [
+     "hmac_sha1_legacy"
+    ],
+    "at_version": 1
+   },
+   {
+    "slot": "verify.py",
+    "final": "rotating_key_v3",
+    "superseded": [
+     "hmac_sha1_legacy",
+     "hmac_sha256_constant_time"
+    ],
+    "at_version": 2
+   }
+  ],
+  "block_spans": {
+   "cv_bench_phoenix-webhook-sign_v00": {
+    "decision_blocks": [
+     1
+    ],
+    "files_touched": [
+     "webhook/verify.py",
+     "webhook/routes.py"
+    ]
+   },
+   "cv_bench_phoenix-webhook-sign_v01": {
+    "decision_blocks": [
+     1,
+     13
+    ],
+    "files_touched": [
+     "webhook/routes.py",
+     "webhook/tests_sign.py"
+    ]
+   },
+   "cv_bench_phoenix-webhook-sign_v02": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27
+    ],
+    "files_touched": [
+     "webhook/tests_sign.py",
+     "docs/webhook_runbook.md"
+    ]
+   },
+   "cv_bench_phoenix-webhook-sign_v03": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "docs/webhook_runbook.md",
+     "config/keys.env"
+    ]
+   },
+   "cv_bench_phoenix-webhook-sign_v04": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "config/keys.env",
+     "webhook/verify.py"
+    ]
+   }
+  },
+  "cross": {
+   "camel": "sigV2Hmac",
+   "snake": "sig_v2_hmac"
+  }
+ },
+ {
+  "chain": "phoenix-refund-recon",
+  "project": "phoenix-api",
+  "sids": [
+   "cv_bench_phoenix-refund-recon_v00",
+   "cv_bench_phoenix-refund-recon_v01",
+   "cv_bench_phoenix-refund-recon_v02",
+   "cv_bench_phoenix-refund-recon_v03",
+   "cv_bench_phoenix-refund-recon_v04"
+  ],
+  "leaf_sid": "cv_bench_phoenix-refund-recon_v04",
+  "files": [
+   "refund/reconcile.py",
+   "refund/report.csv",
+   "refund/tests_recon.py",
+   "docs/recon_runbook.md"
+  ],
+  "pitfall": "夜间全量对账在退款高峰日超窗, 增量方案才可行",
+  "tokens": [
+   "recon_batch=5000",
+   "ERR_AMOUNT_MISMATCH",
+   "--dry-run-refund"
+  ],
+  "slots": [
+   {
+    "slot": "reconcile.py",
+    "final": "hourly_incremental",
+    "superseded": [
+     "nightly_full"
+    ],
+    "at_version": 1
+   },
+   {
+    "slot": "reconcile.py",
+    "final": "streaming_recon",
+    "superseded": [
+     "nightly_full",
+     "hourly_incremental"
+    ],
+    "at_version": 2
+   }
+  ],
+  "block_spans": {
+   "cv_bench_phoenix-refund-recon_v00": {
+    "decision_blocks": [
+     1
+    ],
+    "files_touched": [
+     "refund/reconcile.py",
+     "refund/report.csv"
+    ]
+   },
+   "cv_bench_phoenix-refund-recon_v01": {
+    "decision_blocks": [
+     1,
+     13
+    ],
+    "files_touched": [
+     "refund/report.csv",
+     "refund/tests_recon.py"
+    ]
+   },
+   "cv_bench_phoenix-refund-recon_v02": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27
+    ],
+    "files_touched": [
+     "refund/tests_recon.py",
+     "docs/recon_runbook.md"
+    ]
+   },
+   "cv_bench_phoenix-refund-recon_v03": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "docs/recon_runbook.md",
+     "refund/reconcile.py"
+    ]
+   },
+   "cv_bench_phoenix-refund-recon_v04": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "refund/reconcile.py",
+     "refund/report.csv"
+    ]
+   }
+  },
+  "cross": {
+   "camel": "reconBatch=5000",
+   "snake": "recon_batch=5000"
+  }
+ },
+ {
+  "chain": "phoenix-idempotency",
+  "project": "phoenix-api",
+  "sids": [
+   "cv_bench_phoenix-idempotency_v00",
+   "cv_bench_phoenix-idempotency_v01",
+   "cv_bench_phoenix-idempotency_v02",
+   "cv_bench_phoenix-idempotency_v03",
+   "cv_bench_phoenix-idempotency_v04",
+   "cv_bench_phoenix-idempotency_v05"
+  ],
+  "leaf_sid": "cv_bench_phoenix-idempotency_v05",
+  "files": [
+   "idem/store.py",
+   "idem/ttl.py",
+   "idem/tests_idem.py",
+   "migrations/0001_idem.sql",
+   "docs/idem_notes.md"
+  ],
+  "pitfall": "redis SETNX 无 TTL 会让死键永久堆积, 必须带过期",
+  "tokens": [
+   "idem_key_ttl=86400",
+   "ERR_DUP_REQUEST",
+   "UNIQUE(idem_key)"
+  ],
+  "slots": [
+   {
+    "slot": "store.py",
+    "final": "sqlite_unique_index",
+    "superseded": [
+     "redis_setnx"
+    ],
+    "at_version": 1
+   },
+   {
+    "slot": "store.py",
+    "final": "postgres_upsert",
+    "superseded": [
+     "redis_setnx",
+     "sqlite_unique_index"
+    ],
+    "at_version": 2
+   }
+  ],
+  "block_spans": {
+   "cv_bench_phoenix-idempotency_v00": {
+    "decision_blocks": [
+     1
+    ],
+    "files_touched": [
+     "idem/store.py",
+     "idem/ttl.py"
+    ]
+   },
+   "cv_bench_phoenix-idempotency_v01": {
+    "decision_blocks": [
+     1,
+     13
+    ],
+    "files_touched": [
+     "idem/ttl.py",
+     "idem/tests_idem.py"
+    ]
+   },
+   "cv_bench_phoenix-idempotency_v02": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27
+    ],
+    "files_touched": [
+     "idem/tests_idem.py",
+     "migrations/0001_idem.sql"
+    ]
+   },
+   "cv_bench_phoenix-idempotency_v03": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "migrations/0001_idem.sql",
+     "docs/idem_notes.md"
+    ]
+   },
+   "cv_bench_phoenix-idempotency_v04": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "docs/idem_notes.md",
+     "idem/store.py"
+    ]
+   },
+   "cv_bench_phoenix-idempotency_v05": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "idem/store.py",
+     "idem/ttl.py"
+    ]
+   }
+  },
+  "cross": {
+   "camel": "idemKeyTtl=86400",
+   "snake": "idem_key_ttl=86400"
+  }
+ },
+ {
+  "chain": "phoenix-ledger-migration",
+  "project": "phoenix-api",
+  "sids": [
+   "cv_bench_phoenix-ledger-migration_v00",
+   "cv_bench_phoenix-ledger-migration_v01",
+   "cv_bench_phoenix-ledger-migration_v02",
+   "cv_bench_phoenix-ledger-migration_v03",
+   "cv_bench_phoenix-ledger-migration_v04",
+   "cv_bench_phoenix-ledger-migration_v05",
+   "cv_bench_phoenix-ledger-migration_v06"
+  ],
+  "leaf_sid": "cv_bench_phoenix-ledger-migration_v06",
+  "files": [
+   "ledger/dual_write.py",
+   "ledger/backfill.sql",
+   "ledger/cutover.md",
+   "ledger/tests_dw.py",
+   "scripts/cutover.sh",
+   "docs/cutover_plan.md"
+  ],
+  "pitfall": "直接切换不回填会让历史行缺失, 必须先 backfill",
+  "tokens": [
+   "backfill_chunk=10000",
+   "ERR_CUTOVER_DIRTY",
+   "--verify-ledger"
+  ],
+  "slots": [
+   {
+    "slot": "cutover.md",
+    "final": "read_switch_10pct",
+    "superseded": [
+     "dual_write_shadow"
+    ],
+    "at_version": 1
+   },
+   {
+    "slot": "cutover.md",
+    "final": "full_cutover",
+    "superseded": [
+     "dual_write_shadow",
+     "read_switch_10pct"
+    ],
+    "at_version": 2
+   }
+  ],
+  "block_spans": {
+   "cv_bench_phoenix-ledger-migration_v00": {
+    "decision_blocks": [
+     1
+    ],
+    "files_touched": [
+     "ledger/dual_write.py",
+     "ledger/backfill.sql"
+    ]
+   },
+   "cv_bench_phoenix-ledger-migration_v01": {
+    "decision_blocks": [
+     1,
+     13
+    ],
+    "files_touched": [
+     "ledger/backfill.sql",
+     "ledger/cutover.md"
+    ]
+   },
+   "cv_bench_phoenix-ledger-migration_v02": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27
+    ],
+    "files_touched": [
+     "ledger/cutover.md",
+     "ledger/tests_dw.py"
+    ]
+   },
+   "cv_bench_phoenix-ledger-migration_v03": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "ledger/tests_dw.py",
+     "scripts/cutover.sh"
+    ]
+   },
+   "cv_bench_phoenix-ledger-migration_v04": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "scripts/cutover.sh",
+     "docs/cutover_plan.md"
+    ]
+   },
+   "cv_bench_phoenix-ledger-migration_v05": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "docs/cutover_plan.md",
+     "ledger/dual_write.py"
+    ]
+   },
+   "cv_bench_phoenix-ledger-migration_v06": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "ledger/dual_write.py",
+     "ledger/backfill.sql"
+    ]
+   }
+  },
+  "cross": {
+   "camel": "backfillChunk=10000",
+   "snake": "backfill_chunk=10000"
+  }
+ },
+ {
+  "chain": "phoenix-rate-limiter",
+  "project": "phoenix-api",
+  "sids": [
+   "cv_bench_phoenix-rate-limiter_v00",
+   "cv_bench_phoenix-rate-limiter_v01",
+   "cv_bench_phoenix-rate-limiter_v02",
+   "cv_bench_phoenix-rate-limiter_v03",
+   "cv_bench_phoenix-rate-limiter_v04"
+  ],
+  "leaf_sid": "cv_bench_phoenix-rate-limiter_v04",
+  "files": [
+   "ratelimit/token_bucket.py",
+   "ratelimit/rules.json",
+   "ratelimit/tests_rl.py",
+   "config/limits.json",
+   "docs/rl_notes.md"
+  ],
+  "pitfall": "全局统一限额会饿死大商户, 分层才公平",
+  "tokens": [
+   "bucket_cap=200",
+   "ERR_RATE_LIMITED",
+   "refill_rate=50/s"
+  ],
+  "slots": [
+   {
+    "slot": "rules.json",
+    "final": "merchant_tiered",
+    "superseded": [
+     "global_limit"
+    ],
+    "at_version": 1
+   },
+   {
+    "slot": "rules.json",
+    "final": "adaptive_burst",
+    "superseded": [
+     "global_limit",
+     "merchant_tiered"
+    ],
+    "at_version": 2
+   }
+  ],
+  "block_spans": {
+   "cv_bench_phoenix-rate-limiter_v00": {
+    "decision_blocks": [
+     1
+    ],
+    "files_touched": [
+     "ratelimit/token_bucket.py",
+     "ratelimit/rules.json"
+    ]
+   },
+   "cv_bench_phoenix-rate-limiter_v01": {
+    "decision_blocks": [
+     1,
+     13
+    ],
+    "files_touched": [
+     "ratelimit/rules.json",
+     "ratelimit/tests_rl.py"
+    ]
+   },
+   "cv_bench_phoenix-rate-limiter_v02": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27
+    ],
+    "files_touched": [
+     "ratelimit/tests_rl.py",
+     "config/limits.json"
+    ]
+   },
+   "cv_bench_phoenix-rate-limiter_v03": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "config/limits.json",
+     "docs/rl_notes.md"
+    ]
+   },
+   "cv_bench_phoenix-rate-limiter_v04": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "docs/rl_notes.md",
+     "ratelimit/token_bucket.py"
+    ]
+   }
+  },
+  "cross": {
+   "camel": "bucketCap=200",
+   "snake": "bucket_cap=200"
+  }
+ },
+ {
+  "chain": "phoenix-sdk-client",
+  "project": "phoenix-api",
+  "sids": [
+   "cv_bench_phoenix-sdk-client_v00",
+   "cv_bench_phoenix-sdk-client_v01",
+   "cv_bench_phoenix-sdk-client_v02",
+   "cv_bench_phoenix-sdk-client_v03",
+   "cv_bench_phoenix-sdk-client_v04"
+  ],
+  "leaf_sid": "cv_bench_phoenix-sdk-client_v04",
+  "files": [
+   "sdk/client.py",
+   "sdk/errors.py",
+   "sdk/tests_client.py",
+   "docs/sdk_errors.md"
+  ],
+  "pitfall": "对非幂等接口盲目重试会造成重复扣款",
+  "tokens": [
+   "SDK_MAX_RETRIES=3",
+   "ERR_SDK_TIMEOUT",
+   "backoff_base_ms=250"
+  ],
+  "slots": [
+   {
+    "slot": "client.py",
+    "final": "retry_idempotent_only",
+    "superseded": [
+     "retry_all"
+    ],
+    "at_version": 1
+   },
+   {
+    "slot": "client.py",
+    "final": "retry_safe_methods",
+    "superseded": [
+     "retry_all",
+     "retry_idempotent_only"
+    ],
+    "at_version": 2
+   }
+  ],
+  "block_spans": {
+   "cv_bench_phoenix-sdk-client_v00": {
+    "decision_blocks": [
+     1
+    ],
+    "files_touched": [
+     "sdk/client.py",
+     "sdk/errors.py"
+    ]
+   },
+   "cv_bench_phoenix-sdk-client_v01": {
+    "decision_blocks": [
+     1,
+     13
+    ],
+    "files_touched": [
+     "sdk/errors.py",
+     "sdk/tests_client.py"
+    ]
+   },
+   "cv_bench_phoenix-sdk-client_v02": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27
+    ],
+    "files_touched": [
+     "sdk/tests_client.py",
+     "docs/sdk_errors.md"
+    ]
+   },
+   "cv_bench_phoenix-sdk-client_v03": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "docs/sdk_errors.md",
+     "sdk/client.py"
+    ]
+   },
+   "cv_bench_phoenix-sdk-client_v04": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "sdk/client.py",
+     "sdk/errors.py"
+    ]
+   }
+  },
+  "cross": {
+   "camel": "sdkMaxRetries=3",
+   "snake": "sdk_max_retries=3"
+  }
+ },
+ {
+  "chain": "quartz-virtual-table",
+  "project": "quartz-ui",
+  "sids": [
+   "cv_bench_quartz-virtual-table_v00",
+   "cv_bench_quartz-virtual-table_v01",
+   "cv_bench_quartz-virtual-table_v02",
+   "cv_bench_quartz-virtual-table_v03",
+   "cv_bench_quartz-virtual-table_v04",
+   "cv_bench_quartz-virtual-table_v05"
+  ],
+  "leaf_sid": "cv_bench_quartz-virtual-table_v05",
+  "files": [
+   "src/table/VirtualTable.tsx",
+   "src/table/rowHeight.ts",
+   "src/table/tests_table.tsx",
+   "stories/Table.stories.tsx"
+  ],
+  "pitfall": "定高假设在富文本行上崩坏, 必须实测行高",
+  "tokens": [
+   "rowHeight=36",
+   "ERR_OVERSCAN_RANGE",
+   "overscan=8"
+  ],
+  "slots": [
+   {
+    "slot": "VirtualTable.tsx",
+    "final": "measured_rows",
+    "superseded": [
+     "fixed_rows"
+    ],
+    "at_version": 1
+   },
+   {
+    "slot": "VirtualTable.tsx",
+    "final": "hybrid_estimator",
+    "superseded": [
+     "fixed_rows",
+     "measured_rows"
+    ],
+    "at_version": 2
+   }
+  ],
+  "block_spans": {
+   "cv_bench_quartz-virtual-table_v00": {
+    "decision_blocks": [
+     1
+    ],
+    "files_touched": [
+     "src/table/VirtualTable.tsx",
+     "src/table/rowHeight.ts"
+    ]
+   },
+   "cv_bench_quartz-virtual-table_v01": {
+    "decision_blocks": [
+     1,
+     13
+    ],
+    "files_touched": [
+     "src/table/rowHeight.ts",
+     "src/table/tests_table.tsx"
+    ]
+   },
+   "cv_bench_quartz-virtual-table_v02": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27
+    ],
+    "files_touched": [
+     "src/table/tests_table.tsx",
+     "stories/Table.stories.tsx"
+    ]
+   },
+   "cv_bench_quartz-virtual-table_v03": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "stories/Table.stories.tsx",
+     "src/table/VirtualTable.tsx"
+    ]
+   },
+   "cv_bench_quartz-virtual-table_v04": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "src/table/VirtualTable.tsx",
+     "src/table/rowHeight.ts"
+    ]
+   },
+   "cv_bench_quartz-virtual-table_v05": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "src/table/rowHeight.ts",
+     "src/table/tests_table.tsx"
+    ]
+   }
+  },
+  "cross": {
+   "camel": "rowheight=36",
+   "snake": "rowheight=36"
+  }
+ },
+ {
+  "chain": "quartz-theme-tokens",
+  "project": "quartz-ui",
+  "sids": [
+   "cv_bench_quartz-theme-tokens_v00",
+   "cv_bench_quartz-theme-tokens_v01",
+   "cv_bench_quartz-theme-tokens_v02",
+   "cv_bench_quartz-theme-tokens_v03",
+   "cv_bench_quartz-theme-tokens_v04"
+  ],
+  "leaf_sid": "cv_bench_quartz-theme-tokens_v04",
+  "files": [
+   "src/theme/tokens.ts",
+   "src/theme/dark.css",
+   "src/theme/tests_theme.ts",
+   "docs/tokens_guide.md",
+   "scripts/build_tokens.mjs"
+  ],
+  "pitfall": "硬编码色值让暗色主题失控, 必须走令牌管线",
+  "tokens": [
+   "token_prefix=qz-",
+   "ERR_TOKEN_MISSING",
+   "contrast_ratio=4.5"
+  ],
+  "slots": [
+   {
+    "slot": "tokens.ts",
+    "final": "css_variables",
+    "superseded": [
+     "hardcoded_hex"
+    ],
+    "at_version": 1
+   },
+   {
+    "slot": "tokens.ts",
+    "final": "token_pipeline",
+    "superseded": [
+     "hardcoded_hex",
+     "css_variables"
+    ],
+    "at_version": 2
+   }
+  ],
+  "block_spans": {
+   "cv_bench_quartz-theme-tokens_v00": {
+    "decision_blocks": [
+     1
+    ],
+    "files_touched": [
+     "src/theme/tokens.ts",
+     "src/theme/dark.css"
+    ]
+   },
+   "cv_bench_quartz-theme-tokens_v01": {
+    "decision_blocks": [
+     1,
+     13
+    ],
+    "files_touched": [
+     "src/theme/dark.css",
+     "src/theme/tests_theme.ts"
+    ]
+   },
+   "cv_bench_quartz-theme-tokens_v02": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27
+    ],
+    "files_touched": [
+     "src/theme/tests_theme.ts",
+     "docs/tokens_guide.md"
+    ]
+   },
+   "cv_bench_quartz-theme-tokens_v03": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "docs/tokens_guide.md",
+     "scripts/build_tokens.mjs"
+    ]
+   },
+   "cv_bench_quartz-theme-tokens_v04": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "scripts/build_tokens.mjs",
+     "src/theme/tokens.ts"
+    ]
+   }
+  },
+  "cross": {
+   "camel": "tokenPrefix=qz-",
+   "snake": "token_prefix=qz-"
+  }
+ },
+ {
+  "chain": "quartz-form-validation",
+  "project": "quartz-ui",
+  "sids": [
+   "cv_bench_quartz-form-validation_v00",
+   "cv_bench_quartz-form-validation_v01",
+   "cv_bench_quartz-form-validation_v02",
+   "cv_bench_quartz-form-validation_v03",
+   "cv_bench_quartz-form-validation_v04",
+   "cv_bench_quartz-form-validation_v05"
+  ],
+  "leaf_sid": "cv_bench_quartz-form-validation_v05",
+  "files": [
+   "src/form/schema.ts",
+   "src/form/validate.ts",
+   "src/form/tests_form.ts",
+   "docs/validation_guide.md"
+  ],
+  "pitfall": "内联规则与 schema 双轨校验会互相打架, 单一事实源才可维护",
+  "tokens": [
+   "ERR_SCHEMA_INVALID",
+   "debounce_ms=200",
+   "zod_schema_v4"
+  ],
+  "slots": [
+   {
+    "slot": "validate.ts",
+    "final": "schema_first",
+    "superseded": [
+     "inline_rules"
+    ],
+    "at_version": 1
+   },
+   {
+    "slot": "validate.ts",
+    "final": "async_schema",
+    "superseded": [
+     "inline_rules",
+     "schema_first"
+    ],
+    "at_version": 2
+   }
+  ],
+  "block_spans": {
+   "cv_bench_quartz-form-validation_v00": {
+    "decision_blocks": [
+     1
+    ],
+    "files_touched": [
+     "src/form/schema.ts",
+     "src/form/validate.ts"
+    ]
+   },
+   "cv_bench_quartz-form-validation_v01": {
+    "decision_blocks": [
+     1,
+     13
+    ],
+    "files_touched": [
+     "src/form/validate.ts",
+     "src/form/tests_form.ts"
+    ]
+   },
+   "cv_bench_quartz-form-validation_v02": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27
+    ],
+    "files_touched": [
+     "src/form/tests_form.ts",
+     "docs/validation_guide.md"
+    ]
+   },
+   "cv_bench_quartz-form-validation_v03": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "docs/validation_guide.md",
+     "src/form/schema.ts"
+    ]
+   },
+   "cv_bench_quartz-form-validation_v04": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "src/form/schema.ts",
+     "src/form/validate.ts"
+    ]
+   },
+   "cv_bench_quartz-form-validation_v05": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "src/form/validate.ts",
+     "src/form/tests_form.ts"
+    ]
+   }
+  },
+  "cross": {
+   "camel": "errSchemaInvalid",
+   "snake": "err_schema_invalid"
+  }
+ },
+ {
+  "chain": "quartz-date-picker",
+  "project": "quartz-ui",
+  "sids": [
+   "cv_bench_quartz-date-picker_v00",
+   "cv_bench_quartz-date-picker_v01",
+   "cv_bench_quartz-date-picker_v02",
+   "cv_bench_quartz-date-picker_v03",
+   "cv_bench_quartz-date-picker_v04"
+  ],
+  "leaf_sid": "cv_bench_quartz-date-picker_v04",
+  "files": [
+   "src/datepicker/Calendar.tsx",
+   "src/datepicker/tz.ts",
+   "src/datepicker/tests_dp.tsx",
+   "docs/tz_guide.md"
+  ],
+  "pitfall": "用本地时区存日期字段会在跨时区会话中漂移",
+  "tokens": [
+   "ERR_TZ_OFFSET",
+   "utc_only=true",
+   "locale=zh-CN"
+  ],
+  "slots": [
+   {
+    "slot": "tz.ts",
+    "final": "utc_normalize",
+    "superseded": [
+     "local_zone"
+    ],
+    "at_version": 1
+   },
+   {
+    "slot": "tz.ts",
+    "final": "zone_aware",
+    "superseded": [
+     "local_zone",
+     "utc_normalize"
+    ],
+    "at_version": 2
+   }
+  ],
+  "block_spans": {
+   "cv_bench_quartz-date-picker_v00": {
+    "decision_blocks": [
+     1
+    ],
+    "files_touched": [
+     "src/datepicker/Calendar.tsx",
+     "src/datepicker/tz.ts"
+    ]
+   },
+   "cv_bench_quartz-date-picker_v01": {
+    "decision_blocks": [
+     1,
+     13
+    ],
+    "files_touched": [
+     "src/datepicker/tz.ts",
+     "src/datepicker/tests_dp.tsx"
+    ]
+   },
+   "cv_bench_quartz-date-picker_v02": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27
+    ],
+    "files_touched": [
+     "src/datepicker/tests_dp.tsx",
+     "docs/tz_guide.md"
+    ]
+   },
+   "cv_bench_quartz-date-picker_v03": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "docs/tz_guide.md",
+     "src/datepicker/Calendar.tsx"
+    ]
+   },
+   "cv_bench_quartz-date-picker_v04": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "src/datepicker/Calendar.tsx",
+     "src/datepicker/tz.ts"
+    ]
+   }
+  },
+  "cross": {
+   "camel": "errTzOffset",
+   "snake": "err_tz_offset"
+  }
+ },
+ {
+  "chain": "quartz-websocket-feed",
+  "project": "quartz-ui",
+  "sids": [
+   "cv_bench_quartz-websocket-feed_v00",
+   "cv_bench_quartz-websocket-feed_v01",
+   "cv_bench_quartz-websocket-feed_v02",
+   "cv_bench_quartz-websocket-feed_v03",
+   "cv_bench_quartz-websocket-feed_v04",
+   "cv_bench_quartz-websocket-feed_v05"
+  ],
+  "leaf_sid": "cv_bench_quartz-websocket-feed_v05",
+  "files": [
+   "src/feed/socket.ts",
+   "src/feed/buffer.ts",
+   "src/feed/tests_feed.ts",
+   "docs/feed_notes.md"
+  ],
+  "pitfall": "盲目立即重连会在网关抖动时打爆连接数",
+  "tokens": [
+   "heartbeat_ms=15000",
+   "ERR_SOCKET_STALE",
+   "buffer_max=500"
+  ],
+  "slots": [
+   {
+    "slot": "socket.ts",
+    "final": "backoff_probe",
+    "superseded": [
+     "reconnect_blind"
+    ],
+    "at_version": 1
+   },
+   {
+    "slot": "socket.ts",
+    "final": "sticky_session",
+    "superseded": [
+     "reconnect_blind",
+     "backoff_probe"
+    ],
+    "at_version": 2
+   }
+  ],
+  "block_spans": {
+   "cv_bench_quartz-websocket-feed_v00": {
+    "decision_blocks": [
+     1
+    ],
+    "files_touched": [
+     "src/feed/socket.ts",
+     "src/feed/buffer.ts"
+    ]
+   },
+   "cv_bench_quartz-websocket-feed_v01": {
+    "decision_blocks": [
+     1,
+     13
+    ],
+    "files_touched": [
+     "src/feed/buffer.ts",
+     "src/feed/tests_feed.ts"
+    ]
+   },
+   "cv_bench_quartz-websocket-feed_v02": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27
+    ],
+    "files_touched": [
+     "src/feed/tests_feed.ts",
+     "docs/feed_notes.md"
+    ]
+   },
+   "cv_bench_quartz-websocket-feed_v03": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "docs/feed_notes.md",
+     "src/feed/socket.ts"
+    ]
+   },
+   "cv_bench_quartz-websocket-feed_v04": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "src/feed/socket.ts",
+     "src/feed/buffer.ts"
+    ]
+   },
+   "cv_bench_quartz-websocket-feed_v05": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "src/feed/buffer.ts",
+     "src/feed/tests_feed.ts"
+    ]
+   }
+  },
+  "cross": {
+   "camel": "heartbeatMs=15000",
+   "snake": "heartbeat_ms=15000"
+  }
+ },
+ {
+  "chain": "quartz-build-pipeline",
+  "project": "quartz-ui",
+  "sids": [
+   "cv_bench_quartz-build-pipeline_v00",
+   "cv_bench_quartz-build-pipeline_v01",
+   "cv_bench_quartz-build-pipeline_v02",
+   "cv_bench_quartz-build-pipeline_v03",
+   "cv_bench_quartz-build-pipeline_v04"
+  ],
+  "leaf_sid": "cv_bench_quartz-build-pipeline_v04",
+  "files": [
+   "vite.config.ts",
+   "src/lazyRoutes.ts",
+   "scripts/analyze_bundle.mjs",
+   "docs/build_notes.md"
+  ],
+  "pitfall": "单 bundle 让首屏体积失控, 路由拆分是底线",
+  "tokens": [
+   "chunk_warn=250kb",
+   "ERR_CHUNK_BLOAT",
+   "manualChunks=true"
+  ],
+  "slots": [
+   {
+    "slot": "vite.config.ts",
+    "final": "route_splitting",
+    "superseded": [
+     "single_bundle"
+    ],
+    "at_version": 1
+   },
+   {
+    "slot": "vite.config.ts",
+    "final": "lib_externalization",
+    "superseded": [
+     "single_bundle",
+     "route_splitting"
+    ],
+    "at_version": 2
+   }
+  ],
+  "block_spans": {
+   "cv_bench_quartz-build-pipeline_v00": {
+    "decision_blocks": [
+     1
+    ],
+    "files_touched": [
+     "vite.config.ts",
+     "src/lazyRoutes.ts"
+    ]
+   },
+   "cv_bench_quartz-build-pipeline_v01": {
+    "decision_blocks": [
+     1,
+     13
+    ],
+    "files_touched": [
+     "src/lazyRoutes.ts",
+     "scripts/analyze_bundle.mjs"
+    ]
+   },
+   "cv_bench_quartz-build-pipeline_v02": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27
+    ],
+    "files_touched": [
+     "scripts/analyze_bundle.mjs",
+     "docs/build_notes.md"
+    ]
+   },
+   "cv_bench_quartz-build-pipeline_v03": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "docs/build_notes.md",
+     "vite.config.ts"
+    ]
+   },
+   "cv_bench_quartz-build-pipeline_v04": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "vite.config.ts",
+     "src/lazyRoutes.ts"
+    ]
+   }
+  },
+  "cross": {
+   "camel": "chunkWarn=250kb",
+   "snake": "chunk_warn=250kb"
+  }
+ },
+ {
+  "chain": "cobalt-conflict-resolve",
+  "project": "cobalt-sync",
+  "sids": [
+   "cv_bench_cobalt-conflict-resolve_v00",
+   "cv_bench_cobalt-conflict-resolve_v01",
+   "cv_bench_cobalt-conflict-resolve_v02",
+   "cv_bench_cobalt-conflict-resolve_v03",
+   "cv_bench_cobalt-conflict-resolve_v04",
+   "cv_bench_cobalt-conflict-resolve_v05"
+  ],
+  "leaf_sid": "cv_bench_cobalt-conflict-resolve_v05",
+  "files": [
+   "sync/merge.py",
+   "sync/vector_clock.py",
+   "sync/tests_merge.py",
+   "docs/merge_notes.md"
+  ],
+  "pitfall": "last-write-wins 在时钟漂移下会丢更新, 向量钟才可靠",
+  "tokens": [
+   "clock_depth=16",
+   "ERR_CONFLICT_LOOP",
+   "lamport_ts"
+  ],
+  "slots": [
+   {
+    "slot": "merge.py",
+    "final": "vector_clock_merge",
+    "superseded": [
+     "last_write_wins"
+    ],
+    "at_version": 1
+   },
+   {
+    "slot": "merge.py",
+    "final": "crdt_lww_register",
+    "superseded": [
+     "last_write_wins",
+     "vector_clock_merge"
+    ],
+    "at_version": 2
+   }
+  ],
+  "block_spans": {
+   "cv_bench_cobalt-conflict-resolve_v00": {
+    "decision_blocks": [
+     1
+    ],
+    "files_touched": [
+     "sync/merge.py",
+     "sync/vector_clock.py"
+    ]
+   },
+   "cv_bench_cobalt-conflict-resolve_v01": {
+    "decision_blocks": [
+     1,
+     13
+    ],
+    "files_touched": [
+     "sync/vector_clock.py",
+     "sync/tests_merge.py"
+    ]
+   },
+   "cv_bench_cobalt-conflict-resolve_v02": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27
+    ],
+    "files_touched": [
+     "sync/tests_merge.py",
+     "docs/merge_notes.md"
+    ]
+   },
+   "cv_bench_cobalt-conflict-resolve_v03": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "docs/merge_notes.md",
+     "sync/merge.py"
+    ]
+   },
+   "cv_bench_cobalt-conflict-resolve_v04": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "sync/merge.py",
+     "sync/vector_clock.py"
+    ]
+   },
+   "cv_bench_cobalt-conflict-resolve_v05": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "sync/vector_clock.py",
+     "sync/tests_merge.py"
+    ]
+   }
+  },
+  "cross": {
+   "camel": "clockDepth=16",
+   "snake": "clock_depth=16"
+  }
+ },
+ {
+  "chain": "cobalt-checkpoint-store",
+  "project": "cobalt-sync",
+  "sids": [
+   "cv_bench_cobalt-checkpoint-store_v00",
+   "cv_bench_cobalt-checkpoint-store_v01",
+   "cv_bench_cobalt-checkpoint-store_v02",
+   "cv_bench_cobalt-checkpoint-store_v03",
+   "cv_bench_cobalt-checkpoint-store_v04"
+  ],
+  "leaf_sid": "cv_bench_cobalt-checkpoint-store_v04",
+  "files": [
+   "sync/checkpoint.py",
+   "sync/resume.log",
+   "sync/tests_ckpt.py",
+   "docs/ckpt_notes.md"
+  ],
+  "pitfall": "纯内存检查点在进程重启后全部丢失",
+  "tokens": [
+   "ckpt_interval=30s",
+   "ERR_CKPT_GAP",
+   "resume_from_seq"
+  ],
+  "slots": [
+   {
+    "slot": "checkpoint.py",
+    "final": "sqlite_ckpt",
+    "superseded": [
+     "memory_only"
+    ],
+    "at_version": 1
+   },
+   {
+    "slot": "checkpoint.py",
+    "final": "append_log_ckpt",
+    "superseded": [
+     "memory_only",
+     "sqlite_ckpt"
+    ],
+    "at_version": 2
+   }
+  ],
+  "block_spans": {
+   "cv_bench_cobalt-checkpoint-store_v00": {
+    "decision_blocks": [
+     1
+    ],
+    "files_touched": [
+     "sync/checkpoint.py",
+     "sync/resume.log"
+    ]
+   },
+   "cv_bench_cobalt-checkpoint-store_v01": {
+    "decision_blocks": [
+     1,
+     13
+    ],
+    "files_touched": [
+     "sync/resume.log",
+     "sync/tests_ckpt.py"
+    ]
+   },
+   "cv_bench_cobalt-checkpoint-store_v02": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27
+    ],
+    "files_touched": [
+     "sync/tests_ckpt.py",
+     "docs/ckpt_notes.md"
+    ]
+   },
+   "cv_bench_cobalt-checkpoint-store_v03": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "docs/ckpt_notes.md",
+     "sync/checkpoint.py"
+    ]
+   },
+   "cv_bench_cobalt-checkpoint-store_v04": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "sync/checkpoint.py",
+     "sync/resume.log"
+    ]
+   }
+  },
+  "cross": {
+   "camel": "ckptInterval=30s",
+   "snake": "ckpt_interval=30s"
+  }
+ },
+ {
+  "chain": "cobalt-schema-drift",
+  "project": "cobalt-sync",
+  "sids": [
+   "cv_bench_cobalt-schema-drift_v00",
+   "cv_bench_cobalt-schema-drift_v01",
+   "cv_bench_cobalt-schema-drift_v02",
+   "cv_bench_cobalt-schema-drift_v03",
+   "cv_bench_cobalt-schema-drift_v04"
+  ],
+  "leaf_sid": "cv_bench_cobalt-schema-drift_v04",
+  "files": [
+   "sync/schema_probe.py",
+   "sync/drift_report.json",
+   "sync/tests_probe.py",
+   "docs/drift_runbook.md"
+  ],
+  "pitfall": "手工 diff 只能事后救火, 定时探测才能提前预警",
+  "tokens": [
+   "probe_cron=0 */6 * * *",
+   "ERR_DRIFT_DETECTED",
+   "fingerprint_v2"
+  ],
+  "slots": [
+   {
+    "slot": "schema_probe.py",
+    "final": "scheduled_probe",
+    "superseded": [
+     "manual_diff"
+    ],
+    "at_version": 1
+   },
+   {
+    "slot": "schema_probe.py",
+    "final": "event_driven_hook",
+    "superseded": [
+     "manual_diff",
+     "scheduled_probe"
+    ],
+    "at_version": 2
+   }
+  ],
+  "block_spans": {
+   "cv_bench_cobalt-schema-drift_v00": {
+    "decision_blocks": [
+     1
+    ],
+    "files_touched": [
+     "sync/schema_probe.py",
+     "sync/drift_report.json"
+    ]
+   },
+   "cv_bench_cobalt-schema-drift_v01": {
+    "decision_blocks": [
+     1,
+     13
+    ],
+    "files_touched": [
+     "sync/drift_report.json",
+     "sync/tests_probe.py"
+    ]
+   },
+   "cv_bench_cobalt-schema-drift_v02": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27
+    ],
+    "files_touched": [
+     "sync/tests_probe.py",
+     "docs/drift_runbook.md"
+    ]
+   },
+   "cv_bench_cobalt-schema-drift_v03": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "docs/drift_runbook.md",
+     "sync/schema_probe.py"
+    ]
+   },
+   "cv_bench_cobalt-schema-drift_v04": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "sync/schema_probe.py",
+     "sync/drift_report.json"
+    ]
+   }
+  },
+  "cross": {
+   "camel": "probeCron=0 */6 * * *",
+   "snake": "probe_cron=0 */6 * * *"
+  }
+ },
+ {
+  "chain": "cobalt-batch-export",
+  "project": "cobalt-sync",
+  "sids": [
+   "cv_bench_cobalt-batch-export_v00",
+   "cv_bench_cobalt-batch-export_v01",
+   "cv_bench_cobalt-batch-export_v02",
+   "cv_bench_cobalt-batch-export_v03",
+   "cv_bench_cobalt-batch-export_v04",
+   "cv_bench_cobalt-batch-export_v05"
+  ],
+  "leaf_sid": "cv_bench_cobalt-batch-export_v05",
+  "files": [
+   "export/pipeline.py",
+   "export/parquet_writer.py",
+   "export/tests_export.py",
+   "docs/export_runbook.md"
+  ],
+  "pitfall": "一次性全量 CSV 在千万行级会 OOM, 分块才是正解",
+  "tokens": [
+   "batch_rows=20000",
+   "ERR_PARQUET_TRUNCATED",
+   "flush_bytes=64mb"
+  ],
+  "slots": [
+   {
+    "slot": "pipeline.py",
+    "final": "chunked_parquet",
+    "superseded": [
+     "csv_full_load"
+    ],
+    "at_version": 1
+   },
+   {
+    "slot": "pipeline.py",
+    "final": "streaming_arrow",
+    "superseded": [
+     "csv_full_load",
+     "chunked_parquet"
+    ],
+    "at_version": 2
+   }
+  ],
+  "block_spans": {
+   "cv_bench_cobalt-batch-export_v00": {
+    "decision_blocks": [
+     1
+    ],
+    "files_touched": [
+     "export/pipeline.py",
+     "export/parquet_writer.py"
+    ]
+   },
+   "cv_bench_cobalt-batch-export_v01": {
+    "decision_blocks": [
+     1,
+     13
+    ],
+    "files_touched": [
+     "export/parquet_writer.py",
+     "export/tests_export.py"
+    ]
+   },
+   "cv_bench_cobalt-batch-export_v02": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27
+    ],
+    "files_touched": [
+     "export/tests_export.py",
+     "docs/export_runbook.md"
+    ]
+   },
+   "cv_bench_cobalt-batch-export_v03": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "docs/export_runbook.md",
+     "export/pipeline.py"
+    ]
+   },
+   "cv_bench_cobalt-batch-export_v04": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "export/pipeline.py",
+     "export/parquet_writer.py"
+    ]
+   },
+   "cv_bench_cobalt-batch-export_v05": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "export/parquet_writer.py",
+     "export/tests_export.py"
+    ]
+   }
+  },
+  "cross": {
+   "camel": "batchRows=20000",
+   "snake": "batch_rows=20000"
+  }
+ },
+ {
+  "chain": "cobalt-connector-auth",
+  "project": "cobalt-sync",
+  "sids": [
+   "cv_bench_cobalt-connector-auth_v00",
+   "cv_bench_cobalt-connector-auth_v01",
+   "cv_bench_cobalt-connector-auth_v02",
+   "cv_bench_cobalt-connector-auth_v03",
+   "cv_bench_cobalt-connector-auth_v04"
+  ],
+  "leaf_sid": "cv_bench_cobalt-connector-auth_v04",
+  "files": [
+   "connector/oauth.py",
+   "connector/token_cache.py",
+   "connector/tests_oauth.py",
+   "docs/auth_notes.md"
+  ],
+  "pitfall": "每请求都换 token 会触发上游限流, 必须缓存刷新",
+  "tokens": [
+   "refresh_skew=120s",
+   "ERR_TOKEN_EXPIRED",
+   "scope=read:sync"
+  ],
+  "slots": [
+   {
+    "slot": "oauth.py",
+    "final": "cached_refresh",
+    "superseded": [
+     "token_per_request"
+    ],
+    "at_version": 1
+   },
+   {
+    "slot": "oauth.py",
+    "final": "prefetch_jwty",
+    "superseded": [
+     "token_per_request",
+     "cached_refresh"
+    ],
+    "at_version": 2
+   }
+  ],
+  "block_spans": {
+   "cv_bench_cobalt-connector-auth_v00": {
+    "decision_blocks": [
+     1
+    ],
+    "files_touched": [
+     "connector/oauth.py",
+     "connector/token_cache.py"
+    ]
+   },
+   "cv_bench_cobalt-connector-auth_v01": {
+    "decision_blocks": [
+     1,
+     13
+    ],
+    "files_touched": [
+     "connector/token_cache.py",
+     "connector/tests_oauth.py"
+    ]
+   },
+   "cv_bench_cobalt-connector-auth_v02": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27
+    ],
+    "files_touched": [
+     "connector/tests_oauth.py",
+     "docs/auth_notes.md"
+    ]
+   },
+   "cv_bench_cobalt-connector-auth_v03": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "docs/auth_notes.md",
+     "connector/oauth.py"
+    ]
+   },
+   "cv_bench_cobalt-connector-auth_v04": {
+    "decision_blocks": [
+     1,
+     13,
+     26,
+     27,
+     41
+    ],
+    "files_touched": [
+     "connector/oauth.py",
+     "connector/token_cache.py"
+    ]
+   }
+  },
+  "cross": {
+   "camel": "refreshSkew=120s",
+   "snake": "refresh_skew=120s"
+  }
+ }
+]

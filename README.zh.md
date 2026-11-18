@@ -18,11 +18,13 @@
 ## ✨ 核心能力
 
 - **快照资产库**——把 Codex / Claude Code / ZCode / Antigravity / 18 种桥接 harness 的会话导出为供应商中立的 [context-snapshot](docs/snapshot-format.md) 格式：内容寻址、不可变、幂等、自动 lineage（会话树与 fork），并支持按天保留裁剪（`cv prune`）。
-- **交接简报档**——`--target markdown` 生成 ≤48KB 可携交接简报（停在哪/最近动作/活上下文尾部），任何 agent 都能吃。
+- **交接简报档**——`--target markdown --budget-tokens 4000` 在显式 token 预算下按五槽位效用装配（停靠态/关键裁决/已证伪死路/触碰文件拓扑/活上下文尾部），自动折叠重复读文件与重复报错，附压缩统计。
 - **vault 备份**——`cv backup`：一致性快照 + 轮换 zip；常驻控制台可选 `CV_SERVE_TOKEN` 鉴权。
 - **诚实迁移与双向同步**——Codex ⇄ Claude Code 双向（双端真机验证）、Antigravity 原生 `.db`/Proto 双向迁回与项目树批量清理/补齐、实验性 ZCode 写回（自动备份），默认 dry-run，每次迁移产出"什么保住了/什么丢了"的完整报告。
+- **深度检索内核**——代码感知分词（camel/snake/路径/错误码复合+子词双索引）、块角色加权 BM25（全局 IDF + 长度归一）、Lineage 折叠（演进链命中折叠到最新版）、时间衰减与可选稠密向量 RRF；SQLite 紧凑倒排取代巨型 pickle。
+- **公开可复现 Benchmark**——`python benchmarks/run_bench.py` 30 秒复现 144 题五维度消融（v0→v2 全演进链），见 [docs/BENCHMARK.md](docs/BENCHMARK.md)。
 - **token 账本**——从你自己会话文件内嵌的 usage 记录聚合出按模型成本、缓存命中率，不需要任何代理。
-- **跨会话记忆**——从历史自动提取决策/偏好/摘要，`MemoryEngine` 接口可插拔；每条记忆标注来源快照。
+- **跨会话双时态记忆**——从历史自动提取决策/偏好/摘要/踩坑/架构红线，每条带精确出处（快照#块 + 会话真实时间）与主题签名；方案被推翻时旧记忆自动标记 `superseded` 并默认不再返回，`include_history` 可追溯完整演变链。
 - **MCP 记忆后端**——6 个工具让任意 MCP 客户端（Claude Code / Codex / Cursor）变成"记得住的 agent"，一条命令全客户端接入。
 - **上游哨兵**——定时探测 relay `/v1/models`，模型静默消失即刻告警并留审计痕。
 
@@ -88,7 +90,7 @@ vault/
 - 195MB Codex rollout → **1.5 秒**导出 → 12MB 快照；39 个压缩边界、2.24 亿 token 用量、838 对工具调用全部保真。
 - **双向迁移真机验证全部通过**：Codex→Claude 在 2.1.181 里 resume 续写；Claude→Codex 在 0.153.4 里恢复 **373,160 tokens 全量上下文**。
 - 逆向并规避 codex 两代格式陷阱（`ordinal` 数字/字符串互不兼容、resume 走 SQLite thread-store、"rollout is empty" 误导性报错）。
-- 测试 **88+ 用例**，含冷热双路径等价测试——常驻索引与文件扫描回退必须结果一致（"常驻只是加速，不是依赖"被写进了测试）；CI 另有控制台 JS 执行/单元回归与真实浏览器多视口布局探针（380–2560px × 四分区溢出检测）。
+- 测试 **124+ 用例**，含冷热双路径等价测试——常驻索引与文件扫描回退必须结果一致（"常驻只是加速，不是依赖"被写进了测试）；CI 另有控制台 JS 执行/单元回归与真实浏览器多视口布局探针（380–2560px × 四分区溢出检测）。
 
 ## 设计原则
 
@@ -117,7 +119,7 @@ vault/
 | 不可变内容寻址存储 + lineage | ✅ | — | — | — |
 | 双向迁移 | ✅ 原生 2 + 桥接 18 | ✅ | — | — |
 | 从会话文件出账本 | ✅ | — | — | 仅自家流量 |
-| 带出处的记忆 | ✅（规则引擎 v0，可插拔） | — | ✅ | — |
+| 带出处的记忆 | ✅（双时态引擎 v2，含冲突覆盖；可插拔） | — | ✅ | — |
 | 开放格式规范 | ✅ [CC-BY](docs/snapshot-format.md)（含 txcript 映射） | txcript `Simple` | — | — |
 
 搬运工是上游适配器而非竞品——`cv ingest` / `cv export-harness` 的 18 格式桥接正是驱动 session-migrate 实现的。Vault 拥有它们不做的部分：存储、谱系、账本、审计。
@@ -138,7 +140,8 @@ vault/
 - **M1 ✅** SQLite 资产库 · 双向迁移（双端真机验证）· diff 预览
 - **M2 ✅** 常驻服务 + Web 控制台 · MCP 后端 · 缓存预热 · 哨兵/守望 · 18 格式桥接接入
 - **M3 ✅** 记忆层（引擎可插拔）· fork/谱系 · 审计时间线
-- **下一步** 发布与反馈 · 记忆出处 span · 可选加密
+- **M4 ✅** 深度检索内核（代码感知 BM25 + Lineage 折叠 + SQLite 倒排）· 双时态记忆（superseded 覆盖）· 预算受限交接压缩 · CodingVault-Bench 公开消融基准
+- **下一步** 发布与反馈 · 可选稠密向量默认接入 · 可选加密
 
 ## FAQ
 

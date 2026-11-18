@@ -1,0 +1,54 @@
+{"id": "ss-001", "dim": "single_session", "query": "phoenix-api ERR_502_RELAY_TIMEOUT", "expect_sids": ["cv_bench_phoenix-relay-retry_v05"], "expect_facts": ["ERR_502_RELAY_TIMEOUT"], "abstain": false}
+{"id": "ss-002", "dim": "single_session", "query": "phoenix-api --drain-timeout 90", "expect_sids": ["cv_bench_phoenix-relay-retry_v05"], "expect_facts": ["--drain-timeout 90"], "abstain": false}
+{"id": "ss-003", "dim": "single_session", "query": "phoenix-api SIG_V2_HMAC", "expect_sids": ["cv_bench_phoenix-webhook-sign_v04"], "expect_facts": ["SIG_V2_HMAC"], "abstain": false}
+{"id": "ss-004", "dim": "single_session", "query": "phoenix-api nonce_window=300", "expect_sids": ["cv_bench_phoenix-webhook-sign_v04"], "expect_facts": ["nonce_window=300"], "abstain": false}
+{"id": "ss-005", "dim": "single_session", "query": "phoenix-api recon_batch=5000", "expect_sids": ["cv_bench_phoenix-refund-recon_v04"], "expect_facts": ["recon_batch=5000"], "abstain": false}
+{"id": "ss-006", "dim": "single_session", "query": "phoenix-api ERR_AMOUNT_MISMATCH", "expect_sids": ["cv_bench_phoenix-refund-recon_v04"], "expect_facts": ["ERR_AMOUNT_MISMATCH"], "abstain": false}
+{"id": "ss-007", "dim": "single_session", "query": "phoenix-api idem_key_ttl=86400", "expect_sids": ["cv_bench_phoenix-idempotency_v05"], "expect_facts": ["idem_key_ttl=86400"], "abstain": false}
+{"id": "ss-008", "dim": "single_session", "query": "phoenix-api ERR_DUP_REQUEST", "expect_sids": ["cv_bench_phoenix-idempotency_v05"], "expect_facts": ["ERR_DUP_REQUEST"], "abstain": false}
+{"id": "ss-009", "dim": "single_session", "query": "phoenix-api backfill_chunk=10000", "expect_sids": ["cv_bench_phoenix-ledger-migration_v06"], "expect_facts": ["backfill_chunk=10000"], "abstain": false}
+{"id": "ss-010", "dim": "single_session", "query": "phoenix-api ERR_CUTOVER_DIRTY", "expect_sids": ["cv_bench_phoenix-ledger-migration_v06"], "expect_facts": ["ERR_CUTOVER_DIRTY"], "abstain": false}
+{"id": "ss-011", "dim": "single_session", "query": "phoenix-api bucket_cap=200", "expect_sids": ["cv_bench_phoenix-rate-limiter_v04"], "expect_facts": ["bucket_cap=200"], "abstain": false}
+{"id": "ss-012", "dim": "single_session", "query": "phoenix-api ERR_RATE_LIMITED", "expect_sids": ["cv_bench_phoenix-rate-limiter_v04"], "expect_facts": ["ERR_RATE_LIMITED"], "abstain": false}
+{"id": "ss-013", "dim": "single_session", "query": "phoenix-api SDK_MAX_RETRIES=3", "expect_sids": ["cv_bench_phoenix-sdk-client_v04"], "expect_facts": ["SDK_MAX_RETRIES=3"], "abstain": false}
+{"id": "ss-014", "dim": "single_session", "query": "phoenix-api ERR_SDK_TIMEOUT", "expect_sids": ["cv_bench_phoenix-sdk-client_v04"], "expect_facts": ["ERR_SDK_TIMEOUT"], "abstain": false}
+{"id": "ss-015", "dim": "single_session", "query": "quartz-ui rowHeight=36", "expect_sids": ["cv_bench_quartz-virtual-table_v05"], "expect_facts": ["rowHeight=36"], "abstain": false}
+{"id": "ss-016", "dim": "single_session", "query": "quartz-ui ERR_OVERSCAN_RANGE", "expect_sids": ["cv_bench_quartz-virtual-table_v05"], "expect_facts": ["ERR_OVERSCAN_RANGE"], "abstain": false}
+{"id": "ss-017", "dim": "single_session", "query": "quartz-ui token_prefix=qz-", "expect_sids": ["cv_bench_quartz-theme-tokens_v04"], "expect_facts": ["token_prefix=qz-"], "abstain": false}
+{"id": "ss-018", "dim": "single_session", "query": "quartz-ui ERR_TOKEN_MISSING", "expect_sids": ["cv_bench_quartz-theme-tokens_v04"], "expect_facts": ["ERR_TOKEN_MISSING"], "abstain": false}
+{"id": "ss-019", "dim": "single_session", "query": "quartz-ui ERR_SCHEMA_INVALID", "expect_sids": ["cv_bench_quartz-form-validation_v05"], "expect_facts": ["ERR_SCHEMA_INVALID"], "abstain": false}
+{"id": "ss-020", "dim": "single_session", "query": "quartz-ui debounce_ms=200", "expect_sids": ["cv_bench_quartz-form-validation_v05"], "expect_facts": ["debounce_ms=200"], "abstain": false}
+{"id": "ss-021", "dim": "single_session", "query": "quartz-ui ERR_TZ_OFFSET", "expect_sids": ["cv_bench_quartz-date-picker_v04"], "expect_facts": ["ERR_TZ_OFFSET"], "abstain": false}
+{"id": "ss-022", "dim": "single_session", "query": "quartz-ui utc_only=true", "expect_sids": ["cv_bench_quartz-date-picker_v04"], "expect_facts": ["utc_only=true"], "abstain": false}
+{"id": "ss-023", "dim": "single_session", "query": "quartz-ui heartbeat_ms=15000", "expect_sids": ["cv_bench_quartz-websocket-feed_v05"], "expect_facts": ["heartbeat_ms=15000"], "abstain": false}
+{"id": "ss-024", "dim": "single_session", "query": "quartz-ui ERR_SOCKET_STALE", "expect_sids": ["cv_bench_quartz-websocket-feed_v05"], "expect_facts": ["ERR_SOCKET_STALE"], "abstain": false}
+{"id": "ss-025", "dim": "single_session", "query": "quartz-ui chunk_warn=250kb", "expect_sids": ["cv_bench_quartz-build-pipeline_v04"], "expect_facts": ["chunk_warn=250kb"], "abstain": false}
+{"id": "ss-026", "dim": "single_session", "query": "quartz-ui ERR_CHUNK_BLOAT", "expect_sids": ["cv_bench_quartz-build-pipeline_v04"], "expect_facts": ["ERR_CHUNK_BLOAT"], "abstain": false}
+{"id": "ss-027", "dim": "single_session", "query": "cobalt-sync clock_depth=16", "expect_sids": ["cv_bench_cobalt-conflict-resolve_v05"], "expect_facts": ["clock_depth=16"], "abstain": false}
+{"id": "ss-028", "dim": "single_session", "query": "cobalt-sync ERR_CONFLICT_LOOP", "expect_sids": ["cv_bench_cobalt-conflict-resolve_v05"], "expect_facts": ["ERR_CONFLICT_LOOP"], "abstain": false}
+{"id": "ss-029", "dim": "single_session", "query": "cobalt-sync ckpt_interval=30s", "expect_sids": ["cv_bench_cobalt-checkpoint-store_v04"], "expect_facts": ["ckpt_interval=30s"], "abstain": false}
+{"id": "ss-030", "dim": "single_session", "query": "cobalt-sync ERR_CKPT_GAP", "expect_sids": ["cv_bench_cobalt-checkpoint-store_v04"], "expect_facts": ["ERR_CKPT_GAP"], "abstain": false}
+{"id": "ss-031", "dim": "single_session", "query": "cobalt-sync probe_cron=0 */6 * * *", "expect_sids": ["cv_bench_cobalt-schema-drift_v04"], "expect_facts": ["probe_cron=0 */6 * * *"], "abstain": false}
+{"id": "ss-032", "dim": "single_session", "query": "cobalt-sync ERR_DRIFT_DETECTED", "expect_sids": ["cv_bench_cobalt-schema-drift_v04"], "expect_facts": ["ERR_DRIFT_DETECTED"], "abstain": false}
+{"id": "ss-033", "dim": "single_session", "query": "cobalt-sync batch_rows=20000", "expect_sids": ["cv_bench_cobalt-batch-export_v05"], "expect_facts": ["batch_rows=20000"], "abstain": false}
+{"id": "ss-034", "dim": "single_session", "query": "cobalt-sync ERR_PARQUET_TRUNCATED", "expect_sids": ["cv_bench_cobalt-batch-export_v05"], "expect_facts": ["ERR_PARQUET_TRUNCATED"], "abstain": false}
+{"id": "ss-035", "dim": "single_session", "query": "cobalt-sync refresh_skew=120s", "expect_sids": ["cv_bench_cobalt-connector-auth_v04"], "expect_facts": ["refresh_skew=120s"], "abstain": false}
+{"id": "ss-036", "dim": "single_session", "query": "cobalt-sync ERR_TOKEN_EXPIRED", "expect_sids": ["cv_bench_cobalt-connector-auth_v04"], "expect_facts": ["ERR_TOKEN_EXPIRED"], "abstain": false}
+{"id": "ss-037", "dim": "single_session", "query": "phoenix-api err_502_relay_timeout 命名", "expect_sids": ["cv_bench_phoenix-relay-retry_v05"], "expect_facts": ["err502RelayTimeout"], "abstain": false}
+{"id": "ss-038", "dim": "single_session", "query": "phoenix-api sig_v2_hmac 命名", "expect_sids": ["cv_bench_phoenix-webhook-sign_v04"], "expect_facts": ["sigV2Hmac"], "abstain": false}
+{"id": "ss-039", "dim": "single_session", "query": "phoenix-api recon_batch=5000 命名", "expect_sids": ["cv_bench_phoenix-refund-recon_v04"], "expect_facts": ["reconBatch=5000"], "abstain": false}
+{"id": "ss-040", "dim": "single_session", "query": "phoenix-api idem_key_ttl=86400 命名", "expect_sids": ["cv_bench_phoenix-idempotency_v05"], "expect_facts": ["idemKeyTtl=86400"], "abstain": false}
+{"id": "ss-041", "dim": "single_session", "query": "phoenix-api backfill_chunk=10000 命名", "expect_sids": ["cv_bench_phoenix-ledger-migration_v06"], "expect_facts": ["backfillChunk=10000"], "abstain": false}
+{"id": "ss-042", "dim": "single_session", "query": "phoenix-api bucket_cap=200 命名", "expect_sids": ["cv_bench_phoenix-rate-limiter_v04"], "expect_facts": ["bucketCap=200"], "abstain": false}
+{"id": "ss-043", "dim": "single_session", "query": "phoenix-api sdk_max_retries=3 命名", "expect_sids": ["cv_bench_phoenix-sdk-client_v04"], "expect_facts": ["sdkMaxRetries=3"], "abstain": false}
+{"id": "ss-044", "dim": "single_session", "query": "quartz-ui rowheight=36 命名", "expect_sids": ["cv_bench_quartz-virtual-table_v05"], "expect_facts": ["rowheight=36"], "abstain": false}
+{"id": "ss-045", "dim": "single_session", "query": "quartz-ui token_prefix=qz- 命名", "expect_sids": ["cv_bench_quartz-theme-tokens_v04"], "expect_facts": ["tokenPrefix=qz-"], "abstain": false}
+{"id": "ss-046", "dim": "single_session", "query": "quartz-ui err_schema_invalid 命名", "expect_sids": ["cv_bench_quartz-form-validation_v05"], "expect_facts": ["errSchemaInvalid"], "abstain": false}
+{"id": "ss-047", "dim": "single_session", "query": "quartz-ui err_tz_offset 命名", "expect_sids": ["cv_bench_quartz-date-picker_v04"], "expect_facts": ["errTzOffset"], "abstain": false}
+{"id": "ss-048", "dim": "single_session", "query": "quartz-ui heartbeat_ms=15000 命名", "expect_sids": ["cv_bench_quartz-websocket-feed_v05"], "expect_facts": ["heartbeatMs=15000"], "abstain": false}
+{"id": "ss-049", "dim": "single_session", "query": "quartz-ui chunk_warn=250kb 命名", "expect_sids": ["cv_bench_quartz-build-pipeline_v04"], "expect_facts": ["chunkWarn=250kb"], "abstain": false}
+{"id": "ss-050", "dim": "single_session", "query": "cobalt-sync clock_depth=16 命名", "expect_sids": ["cv_bench_cobalt-conflict-resolve_v05"], "expect_facts": ["clockDepth=16"], "abstain": false}
+{"id": "ss-051", "dim": "single_session", "query": "cobalt-sync ckpt_interval=30s 命名", "expect_sids": ["cv_bench_cobalt-checkpoint-store_v04"], "expect_facts": ["ckptInterval=30s"], "abstain": false}
+{"id": "ss-052", "dim": "single_session", "query": "cobalt-sync probe_cron=0 */6 * * * 命名", "expect_sids": ["cv_bench_cobalt-schema-drift_v04"], "expect_facts": ["probeCron=0 */6 * * *"], "abstain": false}
+{"id": "ss-053", "dim": "single_session", "query": "cobalt-sync batch_rows=20000 命名", "expect_sids": ["cv_bench_cobalt-batch-export_v05"], "expect_facts": ["batchRows=20000"], "abstain": false}
+{"id": "ss-054", "dim": "single_session", "query": "cobalt-sync refresh_skew=120s 命名", "expect_sids": ["cv_bench_cobalt-connector-auth_v04"], "expect_facts": ["refreshSkew=120s"], "abstain": false}

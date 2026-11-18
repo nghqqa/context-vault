@@ -18,11 +18,13 @@ Your AI coding sessions are your most valuable work asset — yet they're locked
 ## ✨ Features
 
 - **Snapshot vault** — export Codex / Claude Code / ZCode / Antigravity / 18 bridged harnesses into the vendor-neutral [context-snapshot](docs/snapshot-format.md) format: content-addressed, immutable, idempotent, with automatic lineage (`parent_snapshot` trees & forks) and daily retention pruning (`cv prune`).
-- **Handoff brief** — `--target markdown` emits a ≤48KB portable brief (where it stopped / recent actions / live-context tail) that any agent can consume.
+- **Handoff brief** — `--target markdown --budget-tokens 4000` assembles a utility-maximized brief under an explicit token budget (stop state / active decisions / disproven dead-ends / touched-file topology / live-context tail), folding repeated file reads and duplicate errors, with compression stats.
 - **Vault backup** — `cv backup`: consistent sqlite snapshot + rotated zips; optional `CV_SERVE_TOKEN` auth for the resident console.
 - **Honest migration & bidirectional sync** — bidirectional Codex ⇄ Claude Code, native Antigravity `.db`/Proto round-trip & project-tree batch sync/cleanup, experimental ZCode write-back (with auto-backup), dry-run by default, and a per-migration report of exactly what survives and what doesn't.
+- **Deep retrieval core** — code-aware tokenization (camelCase/snake_case/path/error-code composite+subword dual indexing), block-role-weighted BM25 (global IDF + length normalization), lineage folding (chain hits collapse to the latest version), time decay and optional dense-vector RRF; a compact SQLite inverted index replaces the giant pickle.
+- **Open reproducible benchmark** — `python benchmarks/run_bench.py` reproduces a 144-query, 5-dimension ablation (full v0→v2 evolution) in ~30s; see [docs/BENCHMARK.md](docs/BENCHMARK.md).
 - **Token ledger** — per-model costs, cache hit rates aggregated from usage records *inside your own session files*. No proxy required.
-- **Cross-session memory** — decisions, preferences and summaries auto-extracted from history behind a swappable `MemoryEngine` interface; every memory cites its source snapshot.
+- **Cross-session temporal memory** — decisions, preferences, summaries, pitfalls and hard constraints auto-extracted from history with exact provenance (snapshot#block + real session time) and topic signatures; when a decision is superseded, stale memories are marked and hidden by default (`include_history` traces the full evolution chain).
 - **MCP backend** — 6 tools (`vault_remember` etc.) turn any MCP client (Claude Code / Codex / Cursor) into a remembering agent. One command to install everywhere.
 - **Upstream sentinel** — probes relay `/v1/models`, alerts and leaves an audit trail when a model silently disappears.
 
@@ -86,7 +88,7 @@ Two rules that don't bend: **snapshots are immutable** (any derived data lives i
 - 195 MB Codex rollout → 12 MB snapshot in **1.5 s**; 39 compaction boundaries, 224M tokens of usage, 838 tool-call pairs intact.
 - **Bidirectional migration, both directions real-machine verified**: Codex→Claude resumes and continues accurately in Claude 2.1.181; Claude→Codex restores **373,160 tokens of full context** in Codex 0.153.4.
 - Reverse-engineered and dodged the two-generation Codex format trap (numeric vs string `ordinal`, resume reading the SQLite thread-store, misleading "rollout is empty").
-- Test suite: **88+ tests** including a hot/cold equivalence test — the resident index and the file-scan fallback must return identical results ("the daemon accelerates; it is never a dependency"). CI also runs JS syntax/runtime/unit checks and a real-browser layout probe (380–2560px × four sections, page-overflow detection).
+- Test suite: **124+ tests** including a hot/cold equivalence test — the resident index and the file-scan fallback must return identical results ("the daemon accelerates; it is never a dependency"). CI also runs JS syntax/runtime/unit checks and a real-browser layout probe (380–2560px × four sections, page-overflow detection).
 
 ## Design principles
 
@@ -106,7 +108,7 @@ Two rules that don't bend: **snapshots are immutable** (any derived data lives i
 | Immutable content-addressed store + lineage | ✅ | — | — | — |
 | Bidirectional migration | ✅ native 2 + bridged 18 | ✅ | — | — |
 | Token ledger from session files | ✅ | — | — | own traffic only |
-| Memory with provenance | ✅ (rule engine v0, pluggable) | — | ✅ | — |
+| Memory with provenance | ✅ (temporal engine v2, with conflict superseding; pluggable) | — | ✅ | — |
 | Open format spec | ✅ [CC-BY](docs/snapshot-format.md) (txcript mapping included) | txcript `Simple` | — | — |
 
 Porters are upstream adapters, not competitors — `cv ingest` and `cv export-harness` literally shell out to session-migrate for 18 formats. The vault owns what they don't: storage, lineage, ledger, audit.
@@ -127,7 +129,8 @@ Porters are upstream adapters, not competitors — `cv ingest` and `cv export-ha
 - **M1 ✅** SQLite vault · bidirectional migration (verified both ways) · diff preview
 - **M2 ✅** resident service + web console · MCP backend · cache warming · sentry/watch · 18-format bridged intake
 - **M3 ✅** memory layer (pluggable engine) · fork/tree lineage · audit timeline
-- **Next** launch & feedback · memory provenance spans · optional encryption
+- **M4 ✅** deep retrieval core (code-aware BM25 + lineage folding + SQLite inverted index) · temporal memory (superseded conflict resolution) · budgeted handoff compression · CodingVault-Bench open ablation
+- **Next** launch & feedback · optional dense vectors by default · optional encryption
 
 ## FAQ
 

@@ -900,7 +900,7 @@ def test_index_incremental_cache_and_removal(isolated):
     idx2.rebuild()
     assert len(idx2.meta) == 3 and "cv_aaaa" not in idx2.meta
     assert idx2.stats["full"] == 1 and idx2.stats["cache_load"] == 1  # 全量恰好 +1
-    assert (vault / "index_cache.pkl").exists()  # 落盘缓存已生成
+    assert (vault / "search_index.db").exists()  # 落盘缓存已生成 (v2: SQLite 倒排取代 pickle)
 
 
 def test_index_regression_guards(isolated):
@@ -921,8 +921,8 @@ def test_index_regression_guards(isolated):
     assert idx.load_env("cv_good1") is not None
     assert isinstance(idx._env_cache, collections.OrderedDict)
     assert len(idx._env_cache) <= cv.VaultIndex.ENV_CACHE_MAX
-    # H2: 损坏的 index_cache.pkl 必须静默回退全量, 不让 UnpicklingError 逃出启动
-    (vault / "index_cache.pkl").write_bytes(b"definitely not a pickle \x80\x04\x95")
+    # H2: 损坏的 search_index.db 必须静默回退全量, 不让 DatabaseError 逃出启动
+    (vault / "search_index.db").write_bytes(b"definitely not a sqlite db \x00garbage")
     idx2 = cv.VaultIndex(vault, bt)
     assert idx2.stats["cache_load"] == 0 and idx2.stats["full"] == 1
     assert len(idx2.meta) == 1  # bad1 被跳过, good1 在
