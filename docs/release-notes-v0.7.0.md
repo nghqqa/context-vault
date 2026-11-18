@@ -34,4 +34,4 @@
 - 生产割接实测（2,010 快照 / 1.8GB）：索引 779.8MB → 100.9MB；记忆 2,078 → 2,751 条（active 2,747 / superseded 4，全带出处）
 - 割接前完整备份：`cv-backup-20261118-*.zip`（533MB，随 keep=10 轮换）
 
-**Full diff**: https://github.com/nghqqa/context-vault/compare/v0.4.2...v0.7.0
+**Full diff**: https://github.com/nghqqa/context-vault/compare/v0.6.0...v0.7.0
