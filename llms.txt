@@ -1,6 +1,6 @@
 # Context Vault
 
-> Local-first asset vault for AI coding sessions: immutable content-addressed snapshots, honest bidirectional Codex⇄Claude Code migration, token ledger from session usage records, cross-session memory with provenance, MCP backend. Pure Python stdlib, zero dependencies, all data stays on the machine.
+> Local-first asset vault for AI coding sessions: immutable content-addressed snapshots, honest bidirectional Codex⇄Claude Code migration, token ledger from session usage records, code-aware weighted BM25 retrieval with lineage folding (-87% index size at thousand-snapshot scale, P95 39ms), temporal memory with automatic conflict superseding (stale-memory intrusion 0.0; --history traces the evolution chain), budgeted five-slot handoff brief, MCP backend, and a reproducible 162-query ablation benchmark. Pure Python stdlib, zero dependencies, all data stays on the machine.
 
 Rules for agents using this tool: never modify source session files (read-only); migration is dry-run by default — write to real session dirs only with explicit `--apply` after showing the user the diff; every memory cites its source snapshot — verify important decisions by re-reading the snapshot; the resident service on 127.0.0.1:8791 is an accelerator only, file-scan fallback returns identical results.
 
@@ -12,7 +12,8 @@ Rules for agents using this tool: never modify source session files (read-only);
 - `python tools/cv.py migrate <file> --target codex|claude` — export → honest diff → import (dry-run by default; `--apply` writes real dirs)
 - `python tools/cv.py ingest <file> [--format X]` — bridged read via session-migrate (18 formats)
 - `python tools/cv.py export-harness <sid> --to X` — bridged write (18 targets)
-- `python tools/cv.py memory extract` / `memory search "query"` — cross-session memory
+- `python tools/cv.py memory extract` / `memory search "query"` — temporal memory (decisions/preferences/pitfalls/constraints; active-only by default, `--history` traces superseded chains; every item cites snapshot#block + real session time)
+- `python benchmarks/run_bench.py` — reproducible 162-query ablation (CodingVault-Bench)
 - `python tools/cv.py ledger stats` — token ledger from embedded usage records
 - `python tools/cv.py backup [--out DIR] [--keep N]` — consistent vault zip with rotation
 - `python tools/cv.py serve` — web console + hot-index HTTP API at 127.0.0.1:8791 (loopback-guarded)
@@ -20,7 +21,7 @@ Rules for agents using this tool: never modify source session files (read-only);
 
 ## MCP tools
 
-- `vault_remember(query)` — long-term memory (decisions/preferences, with source snapshot)
+- `vault_remember(query[, include_history])` — long-term memory (decisions/preferences/pitfalls/constraints with snapshot#block + time provenance; stale memories are superseded and hidden by default, include_history traces the chain)
 - `vault_context(query)` — relevant history excerpts for the current task
 - `vault_search(query)` — full-text search over all snapshots
 - `vault_recent(limit)` / `vault_snapshot(id)` / `vault_stats()`
@@ -29,4 +30,5 @@ Rules for agents using this tool: never modify source session files (read-only);
 
 - [Snapshot format spec v0.1](https://github.com/nghqqa/context-vault/blob/main/docs/snapshot-format.md): the vendor-neutral envelope, block types, what migrates and what cannot (incl. txcript six-block mapping)
 - [README](https://github.com/nghqqa/context-vault/blob/main/README.md): fidelity table ("what survives"), comparison with porters/memory layers, dependency boundary
+- [BENCHMARK](https://github.com/nghqqa/context-vault/blob/main/docs/BENCHMARK.md): CodingVault-Bench — 162 gold queries, 5 dimensions, full v0→v2 ablation tables + thousand-snapshot scale numbers (all script-generated)
 - [Releases](https://github.com/nghqqa/context-vault/releases): notes include verification receipts (tests, real-machine checks)

@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="light dark">
 <script>try{document.querySelector('meta[name="color-scheme"]').content=localStorage.getItem('cv-color-scheme')??'light dark'}catch(e){}</script>
 <title>Context Vault — 本地优先的 AI 会话资产库</title>
-<meta name="description" content="把 Codex / Claude Code / ZCode / Antigravity 等会话导出为供应商中立快照：双向迁移、token 账本、跨会话记忆、MCP 后端。纯标准库零依赖，数据不出机器。">
+<meta name="description" content="把 Codex / Claude Code / ZCode / Antigravity 等会话导出为供应商中立快照：双向迁移、深度检索、token 账本、双时态记忆、MCP 后端。纯标准库零依赖，数据不出机器。">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M8 4.5h11a1.8 1.8 0 0 1 1.8 1.8v7.4' fill='none' stroke='%230e7568' stroke-width='1.9' opacity='.45' stroke-linecap='round'/%3E%3Crect x='2.8' y='10.2' width='15' height='10' rx='2' fill='none' stroke='%230e7568' stroke-width='1.9'/%3E%3Crect x='5.6' y='13.8' width='6.2' height='2.8' rx='.9' fill='%230e7568'/%3E%3C/svg%3E">
 <style>
 /* ============ Design Tokens — 与 tools/ui/console.css 同源 (Mineral Slate × Forest Teal) ============ */
@@ -305,9 +305,9 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
   <!-- ============ Hero ============ -->
   <section class="hero" aria-label="简介">
     <div class="wrap">
-      <span class="badge"><span class="dot" aria-hidden="true"></span>v0.6 · 本地优先 · MIT 开源</span>
+      <span class="badge"><span class="dot" aria-hidden="true"></span>v0.7 · 检索内核 v2 · 本地优先 · MIT 开源</span>
       <h1>换模型、换工具，<br>会话上下文<em>不再清零</em></h1>
-      <p class="lede">Context Vault 把 AI 编程会话导出为<b>你自己机器上的中立快照</b>：内容寻址、不可变、带谱系。双向迁移、token 账本、跨会话记忆、MCP 后端——agent 来来去去，vault 一直在。</p>
+      <p class="lede">Context Vault 把 AI 编程会话导出为<b>你自己机器上的中立快照</b>：内容寻址、不可变、带谱系。双向迁移、深度检索、token 账本、双时态记忆、MCP 后端——agent 来来去去，vault 一直在。</p>
       <div class="cta">
         <a class="btn primary" href="#quickstart">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14m0 0-5-5m5 5-5 5"/></svg>
@@ -327,7 +327,7 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
     <div class="wrap">
       <div class="sec-head">
         <span class="kicker">01 · 核心能力</span>
-        <h2>六个能力，一个位置</h2>
+        <h2>七个能力，一个位置</h2>
         <p class="sub">市面上的迁移工具是一次性搬运工；Context Vault 是资产库——存储、谱系、账本、审计。</p>
       </div>
       <div class="cards">
@@ -337,9 +337,14 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
           <p><code>Codex</code> / <code>Claude Code</code> / <code>ZCode</code> / <code>Antigravity</code> 与 18 种桥接 harness 的会话，导出为供应商中立 context-snapshot 格式：内容寻址、不可变、幂等，自动 lineage 会话树与按天保留裁剪。</p>
         </article>
         <article class="card">
+          <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/><path d="M8 10.5h5m-2.5-2.5v5"/></svg></div>
+          <h3>深度检索内核</h3>
+          <p>代码感知分词（<code>camelCase</code> / <code>snake_case</code> / 路径 / 错误码 复合+子词双索引）× 块角色加权 BM25 × Lineage 折叠——同一演进链只回最新版命中。SQLite 紧凑倒排让千级快照索引体积降 <strong>87%</strong>，检索 P95 <strong>39ms</strong>。</p>
+        </article>
+        <article class="card">
           <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 8H19m0 0-3-3m3 3-3 3M19.5 16H5m0 0 3-3m-3 3 3 3"/></svg></div>
           <h3>双向迁移</h3>
-          <p><code>Codex ⇄ Claude Code</code> 双向真机验证，Antigravity 原生 <code>.db</code> 双向迁回，实验性 ZCode 写回。默认 dry-run，逐字段报告什么保住了、什么搬不走；另可产出 ≤48KB Markdown 交接简报。</p>
+          <p><code>Codex ⇄ Claude Code</code> 双向真机验证，Antigravity 原生 <code>.db</code> 双向迁回，实验性 ZCode 写回。默认 dry-run，逐字段报告什么保住了、什么搬不走；另可按 token 预算产出五槽位交接简报（停靠态 / 裁决 / 已证伪死路 / 文件拓扑 / 活上下文）。</p>
         </article>
         <article class="card">
           <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7.5h8M8 11h8M8 14.5h5"/></svg></div>
@@ -348,8 +353,8 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
         </article>
         <article class="card">
           <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3.5h10A1.5 1.5 0 0 1 18.5 5v15.5L12 17l-6.5 3.5V5A1.5 1.5 0 0 1 7 3.5Z"/></svg></div>
-          <h3>跨会话记忆</h3>
-          <p>决策、偏好、摘要从历史自动提取，<code>MemoryEngine</code> 接口可插拔；每条记忆标注来源快照，随时回读核实。</p>
+          <h3>双时态记忆</h3>
+          <p>决策、偏好、踩坑、架构红线自动提取，每条带 <code>快照#块</code> 与真实时间出处。方案被推翻时旧记忆自动标记 <code>superseded</code> 并默认隐藏（过期记忆入侵率 <strong>0.0</strong>），<code>--history</code> 追溯完整演变链。</p>
         </article>
         <article class="card">
           <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 2.5v5m6-5v5M6.5 7.5h11v3.5a5.5 5.5 0 0 1-11 0V7.5ZM12 16.5V21"/></svg></div>
@@ -429,17 +434,17 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
       <div class="sec-head">
         <span class="kicker">03 · 实测</span>
         <h2>真机验证记录</h2>
-        <p class="sub">2026-10-27/29 本机实测；数字与 README 一致，不挑选、不修饰。</p>
+        <p class="sub">2026-10-27 ~ 11-18 本机实测；与 docs/BENCHMARK.md、benchmarks/results 同源，不挑选、不修饰。</p>
       </div>
       <div class="stats">
-        <div class="stat"><span class="v">88+</span><span class="k">测试用例 · 含冷热双路径等价</span></div>
-        <div class="stat"><span class="v">1.5<small>s</small></span><span class="k">195MB rollout → 12MB 快照导出</span></div>
-        <div class="stat"><span class="v">373,160</span><span class="k">tokens 全量上下文恢复（Claude → Codex 真机）</span></div>
-        <div class="stat"><span class="v">838</span><span class="k">工具调用配对保真迁移</span></div>
-        <div class="stat"><span class="v">6</span><span class="k">MCP 工具 · 一条命令全客户端接入</span></div>
+        <div class="stat"><span class="v">124+</span><span class="k">测试用例 · 含冷热双路径等价</span></div>
+        <div class="stat"><span class="v">-87<small>%</small></span><span class="k">千级快照索引体积（801MB → 101MB）</span></div>
+        <div class="stat"><span class="v">39<small>ms</small></span><span class="k">千级快照检索 P95（加权 BM25 + Lineage 折叠）</span></div>
+        <div class="stat"><span class="v">0.0</span><span class="k">过期记忆入侵率（双时态冲突覆盖）</span></div>
+        <div class="stat"><span class="v">162</span><span class="k">金标评测题 · 五维度消融一键复现（CodingVault-Bench）</span></div>
         <div class="stat"><span class="v">0</span><span class="k">第三方依赖 · 纯 Python 标准库</span></div>
       </div>
-      <p class="note">双向迁移在 Claude Code <code>2.1.181</code> 与 Codex <code>0.153.4</code> 真机 resume 续写验证；桥接读 / 写各覆盖 18 种 harness 格式；39 个压缩边界、2.24 亿 token 用量记录全部保真。</p>
+      <p class="note">双向迁移在 Claude Code <code>2.1.181</code> 与 Codex <code>0.153.4</code> 真机 resume 续写验证；桥接读 / 写各覆盖 18 种 harness 格式。<strong>CodingVault-Bench</strong>：162 题五维度金标消融（v0 词集交集 → v2 全演进链对照）随仓库开源，<code>python benchmarks/run_bench.py</code> 一键复现，详见 <a href="https://github.com/nghqqa/context-vault/blob/main/docs/BENCHMARK.md">docs/BENCHMARK.md</a>。</p>
     </div>
   </section>
 

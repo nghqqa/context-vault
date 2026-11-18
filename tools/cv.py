@@ -67,7 +67,7 @@ from cv_index import (  # noqa: F401 — re-exported as public engine API
 
 FORMAT_VERSION = "0.1"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # noconsole 进程 spawn 控制台程序不弹窗   # context-snapshot 格式版本
-VERSION = "0.6.0"          # 工具版本 (发布节奏独立于格式)
+VERSION = "0.7.0"  # 检索引擎 v2 / 双时态记忆 v2 / 预算简报 / CodingVault-Bench          # 工具版本 (发布节奏独立于格式)
 TOOL_RESULT_LIMIT = 256 * 1024  # spec §8.2 裁决: 单块截断阈值 256KB
 HOME = Path.home()
 HEADROOM_DIR = HOME / ".headroom"
