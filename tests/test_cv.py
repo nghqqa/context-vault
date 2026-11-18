@@ -426,6 +426,45 @@ def test_memory_extract_and_search(isolated, monkeypatch, tmp_path):
     assert all(h["snapshot"] == sid for h in hits)
 
 
+def test_memory_noise_gates_and_dedup(isolated, tmp_path):
+    """rule 引擎 v0.1 提精度闸门: 围栏内/列表项/问句/标记词出句首窗口的行不入库;
+    memory_dedup 合并 (kind, content) 跨快照重复; counts 带 unique。"""
+    _, vault = isolated
+    sid = "cv_noisegt1"
+    env = make_env(tmp_path, "codex-rollout")
+    env["conversation"] += [
+        {"type": "text", "role": "assistant",
+         "content": "```python\n# 采用递归下降解析\nresult = parse(src)\n```", "ts": ""},
+        {"type": "text", "role": "assistant", "content": "- 采用缓存方案减少重复计算的开销", "ts": ""},
+        {"type": "text", "role": "assistant", "content": "你觉得这里应该采用哪种方案更好？", "ts": ""},
+        {"type": "text", "role": "assistant",
+         "content": "在这个问题上我们经过了相当多轮的对比与讨论，最终才在很靠后的位置提到采用增量水位方案", "ts": ""},
+        {"type": "text", "role": "assistant", "content": "结论：采用增量水位做记忆提取", "ts": ""},
+    ]
+    (vault / "snapshots").mkdir(exist_ok=True)
+    (vault / "snapshots" / f"{sid}.json").write_text(json.dumps(env), encoding="utf-8")
+    import cv as _cv
+    items = _cv.extract_memories({**env, "_sid": sid, "capture": {"cwd": "D:\\proj"}})
+    contents = "\n".join(i["content"] for i in items)
+    assert "递归下降" not in contents     # ``` 围栏内是代码
+    assert "缓存方案减少" not in contents  # 列表项
+    assert "哪种方案更好" not in contents  # 问句
+    assert "靠后的位置" not in contents   # 标记词在句首 32 字窗口外
+    assert any("增量水位做记忆提取" in i["content"] for i in items)  # 句首窗口内正常提取
+
+    conn = _cv.db(vault)
+    conn.executescript(_cv.SCHEMA + _cv.MEMORY_TABLE)
+    for c in ("结论：采用增量水位做记忆提取", "结论：采用增量水位做记忆提取", "另一条独立记忆的完整内容样例"):
+        conn.execute("INSERT INTO memory_items(created_at,snapshot_id,kind,content,project)"
+                     " VALUES(?,?,?,?,?)", ("t", sid, "decision", c, "proj"))
+    conn.commit()
+    conn.close()
+    res = _cv.memory_dedup(vault)
+    assert res["removed"] == 1 and res["total"] == 2
+    cnts = _cv.memory_counts_api(vault)
+    assert cnts["unique"] == 2 and cnts["total"] == 2
+
+
 # ---------------- M3 收尾: fork / audit / 引擎接口 ----------------
 
 def test_fork_lineage(isolated, monkeypatch, capsys, tmp_path):

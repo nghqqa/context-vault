@@ -2584,6 +2584,16 @@ PREFERENCE_MARKERS = ("不要", "必须", "总是", "记住", "以后都", "每�
 MAX_MEMORY_PER_SNAPSHOT = 40
 
 
+def _memory_line_noise(s: str) -> bool:
+    """行级噪音闸门 (rule 引擎 v0.1 提精度): 列表项/标题/引用行、重行内代码行与问句
+    不构成可长期复用的决策/偏好叙述; summary (压缩摘要) 不适用此闸门。"""
+    if s.endswith(("?", "？")):
+        return True
+    if s[0] in "-*+#>" or (len(s) > 1 and s[0].isdigit() and s[1] in ".、)）"):
+        return True
+    return s.count("`") >= 2  # 行内代码密度高 (命令/标识符罗列), 非叙述句
+
+
 def extract_memories(env: dict) -> list:
     """从单个快照提取记忆条目: decision (assistant 决策句) / summary (压缩摘要)
     / preference (user 指令模式)。每条带块索引溯源 (raw 里 idx)。"""
@@ -2605,13 +2615,23 @@ def extract_memories(env: dict) -> list:
             kind = "preference" if any(m in text.lower() for m in PREFERENCE_MARKERS) else None
         if not kind or not text:
             continue
-        # 句级切分: 只取命中标记的句子 (±上下文一句), 控制颗粒度
+        # 句级切分: 只取命中标记的句子, 控制颗粒度; ``` 围栏内是代码不是叙述
+        in_fence = False
         for sent in text.replace("\r", "").split("\n"):
             s = sent.strip()
+            if s.startswith("```"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
             if not (12 <= len(s) <= 400):
                 continue
+            if kind != "summary" and _memory_line_noise(s):
+                continue
             low = s.lower()
-            if kind == "summary" or any(m in low for m in DECISION_MARKERS) \
+            # decision 标记词须落在句首 32 字窗口: 排除"如果采用…"条件句与长段落顺带命中
+            if kind == "summary" \
+               or (kind == "decision" and any(m in low[:32] for m in DECISION_MARKERS)) \
                or (kind == "preference" and any(m in low[:24] for m in PREFERENCE_MARKERS)):
                 key = s[:120]
                 if key in seen:
@@ -2707,6 +2727,25 @@ def extract_memories_incremental(
     return {"engine": engine.name, "scanned": scanned, "added": added, "total": total, "by_kind": by}
 
 
+def memory_dedup(vault: Path) -> dict:
+    """合并 (kind, content) 完全相同的跨快照重复摘录: 保留最早一条 (引用最早快照),
+    其余删除。快照不可变, memory_items 是纯派生数据, 随时可 --force 重建。
+    (CLI memory dedup / 控制台"去重合并"/ POST /memory/dedup 共用。)"""
+    conn = db(vault)
+    try:
+        conn.executescript(SCHEMA + MEMORY_TABLE)
+        cur = conn.execute(
+            "DELETE FROM memory_items WHERE id NOT IN"
+            " (SELECT MIN(id) FROM memory_items GROUP BY kind, content)")
+        removed = max(0, cur.rowcount)
+        conn.commit()
+        total = conn.execute("SELECT COUNT(*) FROM memory_items").fetchone()[0]
+        by = {r[0]: r[1] for r in conn.execute("SELECT kind, COUNT(*) FROM memory_items GROUP BY kind")}
+    finally:
+        conn.close()
+    return {"removed": removed, "total": total, "by_kind": by}
+
+
 def cmd_memory(args):
     if not hasattr(args, "engine"):
         args.engine = None  # search/list 子命令未注册 --engine, 统一兜底
@@ -2721,6 +2760,11 @@ def cmd_memory(args):
         )
         print(f"记忆提取完成: {res['total']} 条 (新增处理 {res['scanned']} 快照 / +{res['added']} 条,"
               f" engine={res['engine']}) · "
+              + " · ".join(f"{k}×{v}" for k, v in sorted(res["by_kind"].items())))
+        return
+    if args.memory_cmd == "dedup":
+        res = memory_dedup(vault)
+        print(f"记忆去重完成: 合并 -{res['removed']} 条重复摘录, 剩余 {res['total']} 条 · "
               + " · ".join(f"{k}×{v}" for k, v in sorted(res["by_kind"].items())))
         return
     conn = db(vault)
@@ -2772,18 +2816,20 @@ def load_all_snapshots_pub(vault: Path) -> list:
 
 
 def memory_counts_api(vault: Path) -> dict:
-    """统计各类型跨会话记忆数量 (无库时不建库)。"""
+    """统计各类型跨会话记忆数量 (无库时不建库)。unique = 去重后条数。"""
     if not (vault / "vault.db").exists():
-        return {"total": 0, "by_kind": {}}
+        return {"total": 0, "unique": 0, "by_kind": {}}
     conn = db(vault)
     try:
         try:
             by = {r[0]: r[1] for r in conn.execute("SELECT kind, COUNT(*) FROM memory_items GROUP BY kind")}
+            unique = conn.execute("SELECT COUNT(*) FROM"
+                                  " (SELECT DISTINCT kind, content FROM memory_items)").fetchone()[0]
         except sqlite3.OperationalError:
-            by = {}
+            by, unique = {}, 0
     finally:
         conn.close()
-    return {"total": sum(by.values()), "by_kind": by}
+    return {"total": sum(by.values()), "unique": unique, "by_kind": by}
 
 
 def memory_search_api(vault: Path, query: str, limit: int = 8, kind: str | None = None) -> list:
@@ -5064,7 +5110,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                                        "/snapshot?id=", "/messages?id=", "/memory", "/ledger", "/probe_events",
                                        "/antigravity/sync", "/antigravity/batch",
                                        "POST /sync", "POST /migrate", "POST /migrate_project",
-                                       "POST /fork", "POST /memory/extract",
+                                       "POST /fork", "POST /memory/extract", "POST /memory/dedup",
                                        "POST /antigravity/sync", "POST /antigravity/batch", "POST /probe"]}, 404)
             except Exception as e:
                 self._json({"error": str(e)}, 500)
@@ -5188,6 +5234,8 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                 if u.path == "/memory/extract":
                     mres = extract_memories_incremental(vault, force=bool(body.get("force")))
                     return self._json(mres)
+                if u.path == "/memory/dedup":
+                    return self._json(memory_dedup(vault))
                 if u.path == "/fork":
                     fid = str(body.get("id") or "")
                     if not self._sid_ok(fid):
@@ -5493,6 +5541,8 @@ def main(argv=None):
     ml = msub.add_parser("list", help="最近记忆")
     ml.add_argument("--limit", type=int, default=20)
     ml.set_defaults(func=cmd_memory)
+    mdd = msub.add_parser("dedup", help="合并 (kind, content) 完全相同的跨快照重复摘录")
+    mdd.set_defaults(func=cmd_memory)
 
     mc = sub.add_parser("mcp", help="MCP 记忆后端一键接入客户端")
     msub = mc.add_subparsers(dest="mcp_cmd", required=True)

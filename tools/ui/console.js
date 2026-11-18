@@ -479,6 +479,17 @@ async function extractMemoriesNow(force){
   }
   if(btn){btn.disabled=false;btn.textContent=old}
 }
+async function dedupMemoriesNow(){
+  try{
+    const r=await api("/memory/dedup",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+    if(!r.removed){toast("没有可合并的重复摘录，记忆库已是最简");return}
+    toast("已合并重复摘录 −"+num(r.removed||0)+" 条 · 剩余 "+num(r.total||0)+" 条");
+    loadOv();
+    if(snapMemMode)await loadMemoryView();
+  }catch(e){
+    toast("去重失败："+e.message,1);
+  }
+}
 async function loadMemoryView(){
   snapMemMode=true;snapTreeMode=false;updateSnapTreeBtn();
   const q=($("#snap-q")&&$("#snap-q").value||"").trim();
@@ -490,8 +501,10 @@ async function loadMemoryView(){
     const arr=(d&&d.memories)||[];
     const cnts=(d&&d.counts&&d.counts.by_kind)||{};
     const totAll=(d&&d.counts&&d.counts.total)||arr.length;
+    const uq=(d&&d.counts&&d.counts.unique);
     $("#snap-meta").innerHTML=(q?('记忆检索「'+esc(q)+'」· '):'跨会话长期记忆库 · ')+
-      "展示 <b class='num'>"+num(arr.length)+"</b> 条去重记忆（库内共 <b class='num'>"+num(totAll)+"</b> 条原始摘录 · 每条点击来源快照可核实原话）"+
+      "展示 <b class='num'>"+num(arr.length)+"</b> 条去重记忆（库内原始 <b class='num'>"+num(totAll)+"</b> 条"+
+      (uq!=null?(" · 合并后 <b class='num'>"+num(uq)+"</b> 条"):"")+" · 每条点击来源快照可核实原话）"+
       (q?' <button class="xbtn" onclick="$(\'#snap-q\').value=\'\';loadMemoryView()">清空检索 ×</button>':"");
     const pill=(k,lbl,n)=>'<button type="button" class="btn sm'+(memKind===k?' on':'')+'" onclick="setMemKind(\''+k+'\')">'+lbl+(n!=null?(' <span class="mono">('+num(n)+')</span>'):'')+'</button>';
     const dock='<div class="mem-dock">'+
@@ -503,6 +516,7 @@ async function loadMemoryView(){
       '</div>'+
       '<div class="mem-acts">'+
         '<button class="btn sm primary" id="mem-ext-btn" onclick="extractMemoriesNow(false)">增量提取记忆</button>'+
+        '<button class="btn sm" onclick="dedupMemoriesNow()" title="合并 (类型, 内容) 完全相同的跨快照重复摘录，保留最早一条">去重合并</button>'+
         '<button class="btn sm" onclick="extractMemoriesNow(true)" title="忽略已提取水位，重新扫描全库快照提取记忆">全量重提</button>'+
       '</div></div>';
     if(!arr.length){
