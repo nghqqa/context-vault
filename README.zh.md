@@ -22,7 +22,7 @@
 - **vault 备份**——`cv backup`：一致性快照 + 轮换 zip；常驻控制台可选 `CV_SERVE_TOKEN` 鉴权。
 - **诚实迁移与双向同步**——Codex ⇄ Claude Code 双向（双端真机验证）、Antigravity 原生 `.db`/Proto 双向迁回与项目树批量清理/补齐、实验性 ZCode 写回（自动备份），默认 dry-run，每次迁移产出"什么保住了/什么丢了"的完整报告。
 - **深度检索内核**——代码感知分词（camel/snake/路径/错误码复合+子词双索引）、块角色加权 BM25（全局 IDF + 长度归一）、Lineage 折叠（演进链命中折叠到最新版）、时间衰减与可选稠密向量 RRF；SQLite 紧凑倒排取代巨型 pickle。
-- **公开可复现 Benchmark**——`python benchmarks/run_bench.py` 30 秒复现 144 题五维度消融（v0→v2 全演进链），见 [docs/BENCHMARK.md](docs/BENCHMARK.md)。
+- **公开可复现 Benchmark**——`python benchmarks/run_bench.py` 30 秒复现 162 题五维度消融（v0→v2 全演进链），见 [docs/BENCHMARK.md](docs/BENCHMARK.md)。
 - **token 账本**——从你自己会话文件内嵌的 usage 记录聚合出按模型成本、缓存命中率，不需要任何代理。
 - **跨会话双时态记忆**——从历史自动提取决策/偏好/摘要/踩坑/架构红线，每条带精确出处（快照#块 + 会话真实时间）与主题签名；方案被推翻时旧记忆自动标记 `superseded` 并默认不再返回，`include_history` 可追溯完整演变链。
 - **MCP 记忆后端**——6 个工具让任意 MCP 客户端（Claude Code / Codex / Cursor）变成"记得住的 agent"，一条命令全客户端接入。

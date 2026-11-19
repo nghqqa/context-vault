@@ -489,6 +489,19 @@ def backfill_lineage(conn, force: bool = False) -> int:
     return changed
 
 
+def _parent_chain_reaches(conn, start: str, target: str, cap: int = 256) -> bool:
+    """沿 parent_snapshot 上溯, 判断是否会回到 target (挂链前的防环终检)。
+    cap 封顶: 链上已有环或病态长链时停止深走, 只做低成本前置判断。"""
+    seen, node = set(), start
+    while node and node not in seen and len(seen) < cap:
+        if node == target:
+            return True
+        seen.add(node)
+        r = conn.execute("SELECT parent_snapshot FROM snapshots WHERE id=?", (node,)).fetchone()
+        node = r[0] if r else None
+    return False
+
+
 def cmd_export(args):
     src = Path(args.source).expanduser()
     fmt = detect_format(first_jsonl(src), src)
@@ -523,13 +536,23 @@ def cmd_export(args):
     try:  # 同会话已有演进链 (手动 export 落在 sync 链之后 / vault.db 重建后重注册) → 挂为最新版本
         c0 = envelope["capture"]
         if c0.get("session_ref") and c0.get("agent"):
-            sib = conn.execute("SELECT id FROM snapshots WHERE agent=? AND session_ref=? AND id<>?"
+            sib = conn.execute("SELECT id, created_at FROM snapshots WHERE agent=? AND session_ref=? AND id<>?"
                                " ORDER BY created_at DESC LIMIT 1",
                                (c0.get("agent"), c0.get("session_ref"), sid)).fetchone()
-            row = conn.execute("SELECT parent_snapshot FROM snapshots WHERE id=?", (sid,)).fetchone()
+            row = conn.execute("SELECT parent_snapshot, created_at FROM snapshots WHERE id=?",
+                               (sid,)).fetchone()
             if sib and row and not row[0]:  # 只补缺失的 parent, 不动既有链 (H1)
-                conn.execute("UPDATE snapshots SET parent_snapshot=? WHERE id=?", (sib[0], sid))
-                envelope["lineage"]["parent_snapshot"] = sib[0]
+                # 时序守卫 (sync_one H1 同款思路): 候选兄弟须严格旧于本次导出 (created_at 比
+                # 较, 平局按 sid) 才挂链 — 旧版本内容重导时最新兄弟比自己还新, 无条件挂链会
+                # 成双向环 (V1.parent=V2 且 V2.parent=V1), 叶子去重清零且 storm_relink 只认
+                # ≥2 NULL 根, 无法自愈。防环终检兜住平局边角: 兄弟链已能回到本次 sid 即放弃。
+                if ((sib[1] or "", sib[0]) < (row[1] or "", sid)
+                        and not _parent_chain_reaches(conn, sib[0], sid)):
+                    conn.execute("UPDATE snapshots SET parent_snapshot=? WHERE id=?", (sib[0], sid))
+                    envelope["lineage"]["parent_snapshot"] = sib[0]
+                elif sib[0] != sid:  # sib 查询已排除 sid, 此处恒真: 守卫拦截时给可读提示
+                    print(f"提示: 同会话已有更新版本 {sib[0]} ({(sib[1] or '')[:19]}),"
+                          f" 本次导出内容较旧 → 不挂链, 保留为独立快照 (防演进链成环)")
     except sqlite3.Error:
         pass
     conn.commit()
@@ -1715,7 +1738,12 @@ def cmd_migrate(args):
     cmd_diff(a)
     print()
     if not args.yes:
-        ans = input("继续导入? [y/N] ").strip().lower()
+        try:
+            ans = input("继续导入? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            # 非交互管道 (< /dev/null) 或 Ctrl+C: 按"取消"处理 — 保留已导出快照, 干净退出不抛栈
+            print("已取消 (无交互输入; 快照已留存于 vault)")
+            return
         if ans != "y":
             print("已中止 (快照已留存于 vault)")
             return
@@ -1727,12 +1755,14 @@ def cmd_migrate(args):
 # ------------------------------------------------- probe: 上游可用性探测
 
 def load_profiles() -> list:
+    env = os.environ.get("CV_RELAY_PROFILES")
+    if env:
+        # 显式设置的环境变量优先于 ~/.headroom 文件 (覆盖语义): 测试/CI 传隔离配置时
+        # 不得被真实机器的 profiles 文件反超, 误触真实上游 (复核员曾实际误发请求)
+        return json.loads(env)
     p = HEADROOM_DIR / "switcher-profiles.json"
     if p.exists():
         return json.loads(p.read_text(encoding="utf-8"))
-    env = os.environ.get("CV_RELAY_PROFILES")
-    if env:
-        return json.loads(env)
     print("提示: 未找到 relay profiles (~/.headroom/switcher-profiles.json);"
           "可用 CV_RELAY_PROFILES='[{\"id\":\"myrelay\",\"openai_api_url\":\"https://host\",\"default_model\":\"m\"}]' 配置",
           file=sys.stderr)
@@ -1840,7 +1870,12 @@ def cmd_probe(args):
     key = resolve_key(args)
     profiles = load_profiles()
     if args.profile:
-        profiles = [p for p in profiles if p["id"] == args.profile] or profiles
+        # 对齐 cmd_warm: 不存在的 profile 报错退出, 不许静默兜底探测全部
+        # (曾 `or profiles` 把 --profile nope 变成全量探测, 误发真实上游请求)
+        matched = [p for p in profiles if p["id"] == args.profile]
+        if not matched:
+            raise SystemExit(f"profile 不存在: {args.profile} (可用: {[p['id'] for p in profiles]})")
+        profiles = matched
     while True:
         probe_once(vault, profiles, key, baseline)
         atomic_write_text(baseline_p, json.dumps(baseline, ensure_ascii=False, indent=1))
@@ -1973,7 +2008,17 @@ def fmt_usd(x):
 
 
 def cmd_ledger_stats(args):
-    conn = db(vault_dir(args))
+    vault = vault_dir(args)
+    if not (vault / "vault.db").exists():
+        # 无库不建库 (owned_stats 同原则, 二轮 mcp-3): 空目录裸查曾抛 no such table: ledger_events
+        # 并凭空留下零表 vault.db, 把冷路径"先 init/export"的诚实指引永久毒化
+        print("vault 尚无数据库 (账本为空) — 先运行 cv init 或 cv export <会话文件> 建库入账")
+        return
+    conn = db(vault)
+    try:  # 库文件在但零表 (如中断创建): 兜底建表, 与 owned_stats 同防御
+        conn.executescript(SCHEMA)
+    except sqlite3.OperationalError:
+        pass
     row = conn.execute("SELECT tokens_saved, cost_usd FROM ledger_events WHERE source='headroom-lifetime'").fetchone()
     if row:
         raw = json.loads(conn.execute("SELECT raw FROM ledger_events WHERE source='headroom-lifetime'").fetchone()[0])
@@ -2707,9 +2752,19 @@ def storm_relink(conn) -> int:
         groups.setdefault((r["agent"], r["session_ref"], r["fork_of"] or ""), []).append((mt, r))
     n = 0
     for lst in groups.values():
+        if len(lst) < 2:
+            continue
         roots = [x for x in lst if not x[1]["parent_snapshot"]]
-        if len(roots) < 2:
+        if roots and len(roots) < 2:
             continue  # 一链一叶是健康态
+        if not roots:
+            # 0 根 = 链上有环 (旧版 export 曾把旧内容重导挂到更新的兄弟下: V1.parent=V2 且
+            # V2.parent=V1, 叶子去重清零且无人自愈)。父指针越组的 (fork 副本合法指回源链)
+            # 语义不明, 不动; 全员父均在组内则有限集合必有环, 与风暴同法按 mtime 重链,
+            # 最旧者置根, 环自然断开
+            member_ids = {x[1]["id"] for x in lst}
+            if not all(x[1]["parent_snapshot"] in member_ids for x in lst):
+                continue
         lst = sorted(lst, key=lambda x: x[0])
         prev = None
         for mt, r in lst:
@@ -4373,6 +4428,17 @@ def find_smigrate() -> str | None:
     return None
 
 
+def _deterministic_ingest_id(src_path: Path) -> str:
+    """同一源文件内容恒定派生 uuid4 格式 session id (喂给 smigrate --session-id)。
+    smigrate 对无内禀会话 id 的源会随机生成 → 同文件重复 ingest 的 session_ref 每次不同,
+    内容寻址 sid 随之漂移, 快照重复堆积。uuid4 版本位改写同 _deterministic_session_id。"""
+    digest = hashlib.sha256(src_path.read_bytes()).hexdigest()
+    b = bytearray(uuid.uuid5(uuid.NAMESPACE_URL, f"context-vault:ingest:{digest}").bytes)
+    b[6] = (b[6] & 0x0F) | 0x40
+    b[8] = (b[8] & 0x3F) | 0x80
+    return str(uuid.UUID(bytes=bytes(b)))
+
+
 def cmd_ingest(args):
     """任意 harness 会话 → 快照。链路: smigrate convert --to claude → claude-projects 适配器。
     覆盖 smigrate 支持的 17+ harness (opencode/cursor/qwen/kimi/grok/antigravity/pi/omp/...)。"""
@@ -4384,8 +4450,11 @@ def cmd_ingest(args):
         raise SystemExit("未找到 smigrate。安装: uv tool install session-migrate (MIT, Python>=3.11 独立环境)")
     vault = vault_dir(args)
     (vault / "ingest").mkdir(parents=True, exist_ok=True)
+    (vault / "snapshots").mkdir(parents=True, exist_ok=True)  # 曾只建 ingest: 全新 vault 落快照裸 FileNotFoundError
     tmp_out = vault / "ingest" / f"sm_{int(time.time())}_{uuid.uuid4().hex[:8]}.jsonl"
-    cmd = [exe, "convert", str(src_path), "--to", "claude", "--output", str(tmp_out)]
+    det_ref = _deterministic_ingest_id(src_path)
+    cmd = [exe, "convert", str(src_path), "--to", "claude", "--output", str(tmp_out),
+           "--session-id", det_ref]  # 确定性 id: 同文件重 convert 产物一致 (对照 _export_one_harness)
     if args.format:
         cmd += ["--format", args.format]
     if args.cwd:
@@ -4398,19 +4467,26 @@ def cmd_ingest(args):
     exported["capture"]["source_format"] = f"via-smigrate:{origin}"
     exported["capture"]["agent"] = origin  # 归属原始 harness, 而非 claude 中转层
     exported["capture"]["origin_path"] = str(src_path)
+    exported["capture"]["session_ref"] = det_ref  # 适配器拿 tmp 文件名 stem (sm_<ts>_<rand>)
+    # 当 session_ref: 不固定则同文件重 ingest 的内容寻址 sid 每次漂移, 快照重复堆积
     envelope = build_envelope(exported)
     sid = snapshot_id(envelope)
     out = vault / "snapshots" / f"{sid}.json"
-    if out.exists():
+    conn = db(vault)
+    conn.executescript(SCHEMA + SYNC_TABLE)  # 曾只建 SCHEMA: 全新 vault 上 register 直接
+    if out.exists():                          # no such table 崩 (二轮 migrate-1)
         print(f"已存在 (幂等跳过): {out.name}")
+        if conn.execute("SELECT 1 FROM snapshots WHERE id=?", (sid,)).fetchone() is None:
+            # 库里没这行 (如 vault.db 重建过): 用磁盘文件重注册 (cmd_export 同款)
+            register_snapshot(conn, json.loads(out.read_text(encoding="utf-8")), sid, out)
+        # 已在库则不重注册: INSERT OR REPLACE 会用 parent=None 的新 envelope 抹掉链上
+        # parent_snapshot, 演进链断裂后同会话 usage 双计 (对齐 cmd_export 的 H1 守卫)
     else:
         atomic_write_text(out, json.dumps(envelope, ensure_ascii=False, indent=1))
         s = exported["stats"]
         print(f"已接入 {out.name}  源={exported['capture']['source_format']}  "
               f"块={s['blocks_total']}  入token={s['tokens_in']}")
-    conn = db(vault)
-    conn.executescript(SCHEMA + SYNC_TABLE)  # 曾只建 SCHEMA: 全新 vault 上 export 向 sync_sources
-    register_snapshot(conn, envelope, sid, out)  # INSERT 直接 no such table 崩 (二轮 migrate-1)
+        register_snapshot(conn, envelope, sid, out)
     conn.commit()
     if not args.keep_temp:
         tmp_out.unlink(missing_ok=True)
@@ -4934,7 +5010,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     return self._json(idx.context(q.get("q", ""), lim))
                 if u.path == "/recent":
                     idx.request_rebuild(60)  # 后台单飞重建; 分页总数与徽章同源同新鲜度且秒回
-                    meta, sids = idx.meta, idx.sids  # 单次引用读取 (换装是整体换装, 属性读自洽)
+                    meta, sids = idx.recent_pair()  # 锁内同代一次读取 (两次独立属性读可能跨代撕裂)
                     total = len(meta)  # 可列出库存 = 唯一对外口径: 徽章/资产卡/分页同一数字
                     try:
                         lim = max(1, min(int(q.get("limit", 5)), 200))
@@ -5353,11 +5429,19 @@ def cmd_backup(args):
 
 # ------------------------------------------------- doctor: 环境体检
 
+def _force_utf8_stdio():
+    """中文 Windows 默认 GBK 控制台: 📁/✓ 等字符在 list --top 管道等场景崩 UnicodeEncodeError
+    (曾只有 doctor 一处 reconfigure, 其余子命令裸奔)。main() 入口统一 stdin/stdout/stderr
+    → utf-8, errors=replace 防御个别窄字符集环境; MCP 侧 reconfigure 在 mcp_server.py 自理。"""
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass  # 流已被接管/无 reconfigure (如测试捕获对象): 保底原样
+
+
 def cmd_doctor(args):
-    try:  # 中文 Windows GBK 控制台下 ✓/✗ 会 UnicodeEncodeError
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+    _force_utf8_stdio()  # ✓/✗ 需要 utf-8 (main 入口已统一, 直调 doctor 的路径在此兜底)
     vault = vault_dir(args)
     db_ok = (vault / "vault.db").exists()
     own = owned_stats(vault) if db_ok else {"snapshots": 0, "disk_snapshots": 0, "sessions": 0}
@@ -5405,6 +5489,7 @@ def cmd_doctor(args):
 # ------------------------------------------------- main
 
 def main(argv=None):
+    _force_utf8_stdio()  # 全子命令统一 (曾仅 doctor 有: env -u PYTHONUTF8 下 list --top 管道崩)
     ap = argparse.ArgumentParser(prog="cv", description="Context Vault — 本地优先上下文资产库")
     ap.add_argument("--version", action="version", version=f"context-vault {VERSION}")
     ap.add_argument("--vault", default="vault", help="vault 目录 (默认 ./vault)")

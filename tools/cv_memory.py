@@ -138,23 +138,87 @@ def _norm_ts(ts, fallback: str = "") -> str:
 
 _FILE_RE = re.compile(r"[A-Za-z0-9_]+\.[A-Za-z0-9_]{1,6}")
 _SUBJ_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{3,}")
+_LETTER_RE = re.compile(r"[A-Za-z]")
+
+# 决策值引入词: 其后的标识符是「被选中的值」(daily/weekly/mtime/SQLite…) 而非主语,
+# 绝不入键 — 否则 A→B→C 槽位永不匹配 (决定：调度策略采用 daily → proj|daily 缺陷),
+# 或不同主题的值互相串槽。英文形态按词匹配 (左右各垫一空格后再 find)。
+_VALUE_MARKERS = ("采用", "改为", "改用", "换成", "换用", "改成", "替换为", "选择", "选定",
+                  "选型", "定为", "定了", "弃用", "废弃", "使用", "方案是",
+                  " use ", " using ", " used ", " uses ", " chose ", " chosen ",
+                  " picked ", " adopted ", " switch to ", " switched to ",
+                  " switch from ", " replaced by ", " replace with ", " instead of ",
+                  " go with ", " went with ", " moved to ", " migrated to ",
+                  " deprecate ", " deprecated ", " drop ", " dropped ",
+                  " prefer ", " settled on ", " opted for ", " opt for ", " no longer ")
+
+# 句首决策引导语 (可安全剥离): 剥掉之后其后的名词性成分才是主语。
+# 中文头标记 (决定：/结论：) 只剥前缀; 英文剥离 we agreed to / decided on / let's go with…
+# (修复3: 不剥则动词 agreed 成锚 → proj|agreed 跨主题误推翻)。
+_HEAD_STRIP_RE = re.compile(
+    r"^(?:(?:决定|决策|结论|定案)\s*[：:，,、]?\s*"
+    r"|(?:we|they|i|team)\s+(?:have\s+|had\s+)?"
+    r"(?:agreed|decided|chose|chosen|opted|settled)\s+(?:to|on|upon|for)\b[,:]?\s*"
+    r"|(?:agreed|decided|chose|chosen|opted|settled)\s+(?:to|on|upon|for)\b[,:]?\s*"
+    r"|(?:lets|let's)\s+go\s+with\s+"
+    r"|final\s+answer\s*[：:,]?\s*"
+    r"|the\s+plan\s+is\s*[：:,]?\s*)",
+    re.IGNORECASE)
+
+# 英文动词不作主语锚点 (句首动词塌缩 → proj|agreed 类伪槽位; 宁可空键不误覆盖)。
+_ANCHOR_VERBS = frozenset(
+    "agree agreed decide decided chose choose chosen opt opted picked pick "
+    "went go going switched switch replaced replace revert reverted adopted "
+    "adopt moved move migrated migrate dropped drop kept keep prefer preferred "
+    "removed remove added add changed change tried try let plan planned want "
+    "wanted need needed propose proposed suggest suggested settled settle "
+    "finalize finalized".split())
+
+
+def _file_anchor_match(core: str):
+    """首个合法文件名锚点 (修复4): 名与扩展名都必须含字母 — 纯数字段 (20.11 /
+    3.9 / 127.0.0.1) 是版本号或 IP, 不构成锚点 (真库 goai|1270 槽实证挂 4 条
+    互不相关记忆); config.yaml / run.py / v2.py / test_1.py 照常命中。"""
+    for m in _FILE_RE.finditer(core):
+        stem, _, ext = m.group(0).partition(".")
+        if _LETTER_RE.search(stem) and _LETTER_RE.search(ext):
+            return m
+    return None
 
 
 def _topic_key(project, content: str) -> str:
     """主题签名 (槽位键): project + 单一主语锚点。
     锚点优先级: ① 文件名模式 (`deploy.yaml` → deployyaml, 工程裁决最经典的主语);
-    ② 句首 24 字主语位的首个标识符 (camel/snake 归一)。
-    决策值 (daily/weekly/mtime/ordinal…) 不得入键 — 否则 A→B→C 槽位永不匹配,
-    覆盖关系失效。无主语锚点返回空串 (该条只参与精确去重, 不参与跨句覆盖 — 保守不误杀)。"""
-    core = str(content or "")
-    m = _FILE_RE.search(core)
+    ② 剥离句首决策引导语 (决定：/we agreed to…) 后、首个决策值引入词之前的
+    标识符主语 (camel/snake 归一)。
+    决策值 (采用/改为/use 之后的 daily/weekly/SQLite…) 与句首动词 (agreed/decided…)
+    绝不入键 — 否则 A→B→C 槽位永不匹配, 或不同主题塌缩到同一伪槽互相误覆盖。
+    取不到可靠主语返回空串 (该条只参与精确去重, 不参与跨句覆盖 — 宁可漏覆盖,
+    不可误覆盖)。有文件名的路径完全不受影响。"""
+    core = str(content or "").strip()
+    m = _file_anchor_match(core)
     if m:
         anchor = re.sub(r"[^A-Za-z0-9]", "", m.group(0)).lower()
         return f"{project or ''}|{anchor}"
+    core = _HEAD_STRIP_RE.sub("", core, count=1)  # 剥句首引导语, 其后才是主语区
+    low = core.lower()
+    # 主语区 = 首个决策值引入词之前; 其后全是值 (绝不入键)。
+    # 英文标记按词匹配: 左垫空格使句首 "Use x" 与句中 "we use x" 同样命中。
+    cut = len(core)
+    padded = " " + low
+    for mk in _VALUE_MARKERS:
+        i = padded.find(mk)
+        if i >= 0:
+            cut = min(cut, max(0, i - 1))  # 回映射 padded→core 下标 (左垫 1 空格)
     for m2 in _SUBJ_IDENT_RE.finditer(core[:24]):
+        if m2.start() >= cut:
+            break  # 主语区之后全是决策值, 不再找锚
         tok = m2.group(0).lower()
-        if tok not in _TOPIC_STOP:
-            return f"{project or ''}|{tok}"
+        if tok in _TOPIC_STOP:
+            continue
+        if tok in _ANCHOR_VERBS:
+            return ""  # 句首动词塌缩 (we agreed to…): 不造 proj|agreed 伪槽
+        return f"{project or ''}|{tok}"
     return ""
 
 
@@ -453,9 +517,13 @@ def extract_memories_incremental(
 
 
 def memory_dedup(vault: Path) -> dict:
-    """合并 (kind, content) 完全相同的跨快照重复摘录: 保留最早一条 (引用最早快照),
-    其余删除。快照不可变, memory_items 是纯派生数据, 随时可 --force 重建。
-    (CLI memory dedup / 控制台"去重合并"/ POST /memory/dedup 共用。)"""
+    """合并 (kind, content) 完全相同的跨快照重复摘录: 组内优先保留 status='active'
+    的最新一条 (多个 active 取 id 最大); 组内无 active 才回退最早一条 MIN(id)。
+    旧规则盲取 MIN(id) 会删掉 active 副本、留下 superseded 旧行 — 该内容从默认
+    检索消失 (真实缺陷: A(daily) 被 B 推翻后新快照重申 daily 产生新 active 行,
+    去重删掉的恰是新 active)。去重后全量重放 recompute_supersession (幂等),
+    修复被删行牵动的覆盖链。快照不可变, memory_items 是纯派生数据, 随时可
+    --force 重建。(CLI memory dedup / 控制台"去重合并"/ POST /memory/dedup 共用。)"""
     from cv import db, SCHEMA
     conn = db(vault)
     try:
@@ -463,14 +531,16 @@ def memory_dedup(vault: Path) -> dict:
         ensure_memory_schema(conn)
         cur = conn.execute(
             "DELETE FROM memory_items WHERE id NOT IN"
-            " (SELECT MIN(id) FROM memory_items GROUP BY kind, content)")
+            " (SELECT COALESCE(MAX(CASE WHEN status='active' THEN id END), MIN(id))"
+            "  FROM memory_items GROUP BY kind, content)")
         removed = max(0, cur.rowcount)
         conn.commit()
+        resuperseded = recompute_supersession(conn)  # 幂等重放, 顺带清悬挂 superseded_by
         total = conn.execute("SELECT COUNT(*) FROM memory_items").fetchone()[0]
         by = {r[0]: r[1] for r in conn.execute("SELECT kind, COUNT(*) FROM memory_items GROUP BY kind")}
     finally:
         conn.close()
-    return {"removed": removed, "total": total, "by_kind": by}
+    return {"removed": removed, "total": total, "by_kind": by, "resuperseded": resuperseded}
 
 
 def memory_counts_api(vault: Path) -> dict:
@@ -503,16 +573,22 @@ def memory_search_api(vault: Path, query: str, limit: int = 8, kind: str | None 
     from cv import db, now_iso, SCHEMA
     conn = db(vault)
     try:
-        conn.executescript(SCHEMA)
-        ensure_memory_schema(conn)
+        try:
+            conn.executescript(SCHEMA)
+            ensure_memory_schema(conn)
+        except sqlite3.OperationalError:
+            pass  # MCP 修复6: 只读挂载 vault.db 时建表/补列必失败 — 不致命, 表已在则照常检索
         terms = tokenize(query)
         k_norm = (kind or "").strip().lower()
         status_clause = "" if include_history else " AND status='active'"
-        if k_norm and k_norm != "all":
-            rows = conn.execute("SELECT * FROM memory_items WHERE kind=?" + status_clause,
-                                (k_norm,)).fetchall()
-        else:
-            rows = conn.execute("SELECT * FROM memory_items WHERE 1=1" + status_clause).fetchall()
+        try:
+            if k_norm and k_norm != "all":
+                rows = conn.execute("SELECT * FROM memory_items WHERE kind=?" + status_clause,
+                                    (k_norm,)).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM memory_items WHERE 1=1" + status_clause).fetchall()
+        except sqlite3.OperationalError:
+            return []  # 只读且零表: 无记忆可检索, 与空库同口径 (修复6)
         if not terms:  # 速览模式: 按 id 倒序取最新且按 (kind, content) 去重
             rows.sort(key=lambda r: r["id"], reverse=True)
             out, seen = [], set()
@@ -539,11 +615,18 @@ def memory_search_api(vault: Path, query: str, limit: int = 8, kind: str | None 
                 continue
             seen.add(key)
             out.append(_memory_row_api(r, n))
-            conn.execute("UPDATE memory_items SET hits=hits+1, last_used=? WHERE id=?",
-                         (now_iso(), r["id"]))
+            try:  # MCP 修复6: hits/last_used 是纯遥测, 只读挂载下写失败静默放弃, 检索结果照常返回
+                conn.execute("UPDATE memory_items SET hits=hits+1, last_used=? WHERE id=?",
+                             (now_iso(), r["id"]))
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
             if len(out) >= limit:
                 break
-        conn.commit()
+        try:
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # 同修复6: 只读挂载下无写入可提交
         return out
     finally:
         conn.close()

@@ -80,8 +80,10 @@
 复现命令: `python benchmarks/bench_scale_local.py --vault <你的vault>` (只读硬链接/拷贝副本, 绝不改写原库;
 本机落盘样例 `benchmarks/results/scale_local.json`)。
 
-实测环境: 本机生产 vault (2,006 快照 / 1.8GB 原始 JSON / 最长演进链 164 版);
-下表数字与 `benchmarks/results/scale_local.json` 逐字一致。
+实测环境: 本机生产 vault (2,006 快照 / 1.8GB 原始 JSON / 最长演进链 164 版)。
+本节核心指标（快照数 / 索引体积 / 全量构建耗时 / 冷启动耗时 / 查询延迟 P50·P95 / 查询条数 /
+唯一块数）与 `benchmarks/results/scale_local.json` 逐字一致; 块总量 1,497,299 / 4.2× 去重 /
+≈25 MB 常驻内存 / 1.8GB 原始 JSON / 最长演进链 164 版为同轮实测的补充记录（不在该 JSON 中）。
 
 | 指标 | v0 (升级前) | v2 (本版) | 变化 |
 |---|---|---|---|
