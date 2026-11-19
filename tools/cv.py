@@ -4423,7 +4423,15 @@ def cmd_sync_antigravity(args):
 
 def find_smigrate() -> str | None:
     for cand in SMIGRATE_CANDIDATES:
-        if subprocess.run(["cmd", "/c", "where", cand], capture_output=True, creationflags=NO_WINDOW).returncode == 0            or Path(cand).exists():
+        if os.name == "nt":
+            # Windows: cmd /c where 探 PATH (smigrate 是 uv tool 外部命令, 常不在裸 Path 里)
+            found = subprocess.run(["cmd", "/c", "where", cand],
+                                   capture_output=True, creationflags=NO_WINDOW).returncode == 0
+        else:
+            # POSIX: 没有 cmd, 曾直接 FileNotFoundError 崩 (CI ubuntu job 的 doctor 实证) —
+            # shutil.which 等价覆盖 PATH 探测
+            found = shutil.which(cand) is not None
+        if found or Path(cand).exists():
             return cand
     return None
 
