@@ -14,7 +14,9 @@ Rules for agents using this tool: never modify source session files (read-only);
 - `python tools/cv.py export-harness <sid> --to X` — bridged write (18 targets)
 - `python tools/cv.py memory extract` / `memory search "query"` — temporal memory (decisions/preferences/pitfalls/constraints; active-only by default, `--history` traces superseded chains; every item cites snapshot#block + real session time)
 - `python benchmarks/run_bench.py` — reproducible 162-query ablation (CodingVault-Bench)
-- `python tools/cv.py ledger stats` — token ledger from embedded usage records
+- `python tools/cv.py ledger sync [--recompute]` — direct local read-only usage intake across Claude Code / Codex / ZCode / Antigravity (incl. exact per-model `gen_metadata` parsing)
+- `python tools/cv.py ledger quota [--window 5h|24h|7d|30d]` — 5h rolling window, cooldown/recovery ETA, real-time provider/IDE quotas, and per-model/project/client breakdown
+- `python tools/cv.py ledger stats` — local multi-client token ledger & cache hit-rate summary
 - `python tools/cv.py backup [--out DIR] [--keep N]` — consistent vault zip with rotation
 - `python tools/cv.py serve` — web console + hot-index HTTP API at 127.0.0.1:8791 (loopback-guarded)
 - `python tools/cv.py mcp install --all` — register the MCP backend in claude/codex/cursor
