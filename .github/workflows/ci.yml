@@ -36,4 +36,4 @@ jobs:
           if [ "$RUNNER_OS" = "Linux" ]; then python -m playwright install --with-deps chromium; else python -m playwright install chromium; fi
           python tools/check_console_overflow.py
       - name: stdlib-only check (引擎零第三方依赖)
-        run: python -c "import sys; sys.path.insert(0, 'tools'); import cv, mcp_server; print('engine imports OK, zero third-party deps')"
+        run: python -c "import sys; sys.path.insert(0, 'tools'); import cv, cv_ledger, mcp_server; print('engine imports OK, zero third-party deps')"

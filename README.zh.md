@@ -23,7 +23,7 @@
 - **诚实迁移与双向同步**——Codex ⇄ Claude Code 双向（双端真机验证）、Antigravity 原生 `.db`/Proto 双向迁回与项目树批量清理/补齐、实验性 ZCode 写回（自动备份），默认 dry-run，每次迁移产出"什么保住了/什么丢了"的完整报告。
 - **深度检索内核**——代码感知分词（camel/snake/路径/错误码复合+子词双索引）、块角色加权 BM25（全局 IDF + 长度归一）、Lineage 折叠（演进链命中折叠到最新版）、时间衰减与可选稠密向量 RRF；SQLite 紧凑倒排取代巨型 pickle。
 - **公开可复现 Benchmark**——`python benchmarks/run_bench.py` 30 秒复现 162 题五维度消融（v0→v2 全演进链），见 [docs/BENCHMARK.md](docs/BENCHMARK.md)。
-- **token 账本**——从你自己会话文件内嵌的 usage 记录聚合出按模型成本、缓存命中率，不需要任何代理。
+- **token 账本**——从你自己会话文件内嵌的 usage 记录聚合出按模型成本、缓存命中率，不需要任何代理。`cv ledger sync` 直接只读采集 Claude Code / Codex / ZCode / Antigravity 四端本地日志（幂等去重）形成 `usage_events` 事件流，`cv ledger quota` 输出 5 小时滚动窗口、恢复 ETA、7d/月跑道（可选 `vault/accounts.json` 账号额度池）与按模型/项目/账号排行——纯本地离线，无需 headroom。
 - **跨会话双时态记忆**——从历史自动提取决策/偏好/摘要/踩坑/架构红线，每条带精确出处（快照#块 + 会话真实时间）与主题签名；方案被推翻时旧记忆自动标记 `superseded` 并默认不再返回，`include_history` 可追溯完整演变链。
 - **MCP 记忆后端**——6 个工具让任意 MCP 客户端（Claude Code / Codex / Cursor）变成"记得住的 agent"，一条命令全客户端接入。
 - **上游哨兵**——定时探测 relay `/v1/models`，模型静默消失即刻告警并留审计痕。
@@ -78,7 +78,7 @@ python tools/cv.py import cv_xxxx --target codex --apply
 ```
 vault/
 ├── snapshots/cv_*.json   # 不可变, 内容寻址 (sha256 → id); lineage 在信封内
-├── vault.db              # 索引: 搜索词项/账本/记忆/审计/同步水位
+├── vault.db              # 索引: 搜索词项/账本/usage_events 多端用量/记忆/审计/同步水位
 ├── outbox/               # dry-run 迁移产物 (绝不碰真实目录)
 └── backups/              # cv backup: 一致性 zip, 自动轮换
 ```

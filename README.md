@@ -23,7 +23,7 @@ Your AI coding sessions are your most valuable work asset — yet they're locked
 - **Honest migration & bidirectional sync** — bidirectional Codex ⇄ Claude Code, native Antigravity `.db`/Proto round-trip & project-tree batch sync/cleanup, experimental ZCode write-back (with auto-backup), dry-run by default, and a per-migration report of exactly what survives and what doesn't.
 - **Deep retrieval core** — code-aware tokenization (camelCase/snake_case/path/error-code composite+subword dual indexing), block-role-weighted BM25 (global IDF + length normalization), lineage folding (chain hits collapse to the latest version), time decay and optional dense-vector RRF; a compact SQLite inverted index replaces the giant pickle.
 - **Open reproducible benchmark** — `python benchmarks/run_bench.py` reproduces a 162-query, 5-dimension ablation (full v0→v2 evolution) in ~30s; see [docs/BENCHMARK.md](docs/BENCHMARK.md).
-- **Token ledger** — per-model costs, cache hit rates aggregated from usage records *inside your own session files*. No proxy required.
+- **Token ledger** — per-model costs, cache hit rates aggregated from usage records *inside your own session files*. No proxy required. `cv ledger sync` directly harvests Claude Code / Codex / ZCode / Antigravity local logs (read-only, idempotent) into a `usage_events` time series, and `cv ledger quota` reports the 5-hour rolling window, recovery ETA, 7d/monthly runway (optional `vault/accounts.json` quota pools) and per-model/project/account rankings — fully offline, no headroom required.
 - **Cross-session temporal memory** — decisions, preferences, summaries, pitfalls and hard constraints auto-extracted from history with exact provenance (snapshot#block + real session time) and topic signatures; when a decision is superseded, stale memories are marked and hidden by default (`include_history` traces the full evolution chain).
 - **MCP backend** — 6 tools (`vault_remember` etc.) turn any MCP client (Claude Code / Codex / Cursor) into a remembering agent. One command to install everywhere.
 - **Upstream sentinel** — probes relay `/v1/models`, alerts and leaves an audit trail when a model silently disappears.
@@ -76,7 +76,7 @@ Ask your agent at the start of a task: *"what did we decide about X before?"* �
 ```
 vault/
 ├── snapshots/cv_*.json   # immutable, content-addressed (sha256 → id); lineage inside
-├── vault.db              # index: search terms, ledger, memories, audit, sync watermarks
+├── vault.db              # index: search terms, ledger + usage_events, memories, audit, sync watermarks
 ├── outbox/               # dry-run migration output (never touches real dirs)
 └── backups/              # cv backup: consistent zips, rotated
 ```

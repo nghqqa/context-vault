@@ -233,31 +233,60 @@ def t_snapshot(args_vault, sid: str) -> str:
     return "\n".join(lines)[:8000]
 
 
-def _format_stats_text(s: dict, own: dict | None, via_hot: bool = False) -> str:
+def _format_stats_text(s: dict, own: dict | None, usage: dict | None = None,
+                       via_hot: bool = False) -> str:
+    """s=headroom/snapshots 汇总, own=owned_stats, usage=cv_ledger 本地多端直采块 (可空)。"""
     usd = lambda v: f"${v:,.2f}" if isinstance(v, (int, float)) else "-"
     hdr = "token 账本 (context-vault, via 热索引):" if via_hot else "token 账本 (context-vault):"
     own = own or {}
+    usage = usage or {}
     snaps = own.get("snapshots") if own.get("snapshots") is not None else s.get("snapshots", 0)
     sessions = own.get("sessions", 0)
     in_eff = own.get("input_effective") or own.get("tokens_in") or 0
     hit_pct = (own.get("cache_hit_rate") or 0.0) * 100
-    return "\n".join([
+    lines = [
         hdr,
         f"  快照数: {snaps} (独立会话 {sessions})",
         f"  自有累计输入: {in_eff:,} tokens (缓存命中率 {hit_pct:.1f}%)",
-        f"  压缩节省: {s.get('lifetime_tokens_saved', 0):,} tokens = {usd(s.get('lifetime_compression_saved_usd'))}",
-        f"  缓存节省: {usd(s.get('lifetime_cache_saved_usd'))}",
-        f"  历史总输入: {s.get('lifetime_total_input_tokens', 0):,} tokens",
-    ])
+    ]
+    if usage.get("events_total"):
+        # 本地多端直采账本: 无 headroom 也完整可用 (与 /ledger/usage 同源同口径)
+        hit = usage.get("cache_hit_rate")
+        hit_s = f"{hit * 100:.1f}%" if isinstance(hit, (int, float)) else "—"
+        srcs = usage.get("sources") or {}
+        lines += [
+            f"  本地多端直采 ({usage['events_total']} 事件"
+            + (", 来源 " + " · ".join(f"{k} {v}" for k, v in sorted(srcs.items())) if srcs else "")
+            + "):",
+            f"    近 5 小时: 总输入 {usage.get('window_5h_total_input', 0):,} · "
+            f"输出 {usage.get('window_5h_tokens_out', 0):,} · 费用估算 {usd(usage.get('window_5h_cost_est_usd'))}",
+            f"    近 24 小时: 总输入 {usage.get('window_24h_total_input', 0):,} · "
+            f"输出 {usage.get('window_24h_tokens_out', 0):,} · 费用估算 {usd(usage.get('window_24h_cost_est_usd'))}",
+            f"    缓存命中率 {hit_s} · 缓存节省约 {usd(usage.get('cache_save_est_usd'))} · "
+            f"估算事件占比 {(usage.get('estimated_share') or 0) * 100:.0f}%",
+        ]
+    if s.get("lifetime_tokens_saved") is not None:
+        lines += [
+            f"  headroom 压缩节省: {s.get('lifetime_tokens_saved', 0):,} tokens = {usd(s.get('lifetime_compression_saved_usd'))}",
+            f"  headroom 缓存节省: {usd(s.get('lifetime_cache_saved_usd'))}",
+            f"  headroom 历史总输入: {s.get('lifetime_total_input_tokens', 0):,} tokens",
+        ]
+    return "\n".join(lines)
 
 
 def t_stats(args_vault) -> str:
-    s = ledger_summary(args_vault)
-    if not s:
-        return "账本为空。先运行: python tools/cv.py ledger import-headroom"
     sys.path.insert(0, str(Path(__file__).parent))
     import cv as _cv
-    return _format_stats_text(s, _cv.owned_stats(args_vault), via_hot=False)
+    import cv_ledger as _cl
+    s = ledger_summary(args_vault)
+    own = _cv.owned_stats(args_vault)
+    usage = _cl.usage_stats_summary(args_vault)
+    if (not usage.get("events_total") and not own.get("snapshots")
+            and not s.get("snapshots") and s.get("lifetime_tokens_saved") is None):
+        # 全空 (无库/零表 + 无 usage_events + 无快照 + 无 headroom) 诚实回退 — 按值判断:
+        # 零表库返回的 {"snapshots": 0} 是真值字典, 不能用 not s 判空 (修正5)
+        return "账本为空。先运行: python tools/cv.py ledger sync (本地多端直采) 或 cv export 建库"
+    return _format_stats_text(s, own, usage=usage, via_hot=False)
 
 
 # ---------------- MCP 工具表 ----------------
@@ -407,9 +436,10 @@ def _via_service(name: str, args_dict: dict):
         if name == "vault_stats":
             full = _svc_get("/stats")
             r = full.get("stats") or {}
-            if not r:
+            usage = full.get("usage") or {}
+            if not r and not usage.get("events_total"):
                 return None  # 空库交冷路径输出一致的"账本为空"提示
-            return _format_stats_text(r, full.get("owned"), via_hot=True)
+            return _format_stats_text(r, full.get("owned"), usage=usage, via_hot=True)
     except OSError:  # 连接拒绝/超时 = 服务失活: 记负缓存, TTL 内不再逐调用重试 (修复3)
         _svc_mark_down()
         return None

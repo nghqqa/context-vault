@@ -243,6 +243,9 @@ async function loadOv(){
         hit==null?"尚无缓存样本":"近库加权命中");
     $("#ov-band").innerHTML=band;
 
+    let u=null;try{u=await api("/ledger/usage?window=5h")}catch(e){u=null}
+    renderQuota(u);
+
     let rc=null;try{rc=await api("/recent?limit=10&leaves=1")}catch(e){}
     const total=(rc&&rc.total)||0;
     const arr=(rc&&rc.rows)||[];
@@ -309,7 +312,7 @@ async function loadOv(){
       '</div>'
       :'<div class="hint" style="padding:10px 14px">—</div>';
 
-    renderUsage(d);
+    renderUsage(d,u);
   }catch(e){
     if(e&&e.stale)return;
     $("#ov-band").innerHTML=errEmpty("概览加载失败："+e.message,"loadOv()");
@@ -321,7 +324,90 @@ const kpi=(v,k,tip,sub)=>'<div class="kpi"'+(tip?' title="'+esc(tip)+'"':"")+'>'
   '<div class="v">'+v+'</div>'+
   (sub?'<div class="exact">'+sub+'</div>':'')+'</div>';
 
-function renderUsage(d){
+/* ================= 额度与用量窗口 (本地多端账本, 无 headroom 依赖) ================= */
+let usageRankKey="by_model",usageRankData=null;
+const USAGE_RANKS=[["by_model","模型"],["by_project","项目"],["by_account","账号"],["by_client","客户端"]];
+const aCell=(l,v)=>'<div class="audit-cell"><span class="al">'+l+'</span><span class="av">'+v+"</span></div>";
+const estTag=n=>n>0?' <span class="mini-tag" title="该分组含估算事件 (无精确 usage 的来源)">含估算</span>':"";
+const etaRel=iso=>{if(!iso)return"—";const d=(new Date(iso).getTime()-Date.now())/1e3;
+  if(!(d>0))return"已恢复";const h=Math.floor(d/3600),m=Math.floor(d%3600/60);
+  return h>0?h+"h"+String(m).padStart(2,"0")+"m 后":m+"m 后"};
+function quotaRankRows(u,key){
+  const rows=(u&&u[key])||[];
+  return table(["名称","事件","总输入 tok","输出 tok","费用估算"],
+    rows.map(x=>{const r=['<span class="mono" title="'+esc(x.name)+'">'+esc(x.name||"(未知)")+"</span>"+estTag(x.estimated_events),
+      {t:num(x.events),num:1},
+      {t:numT(x.total_input),num:1},
+      {t:numT(x.total_output),num:1},
+      {t:x.cost_est_usd?usd(x.cost_est_usd)+'<span class="hint"> 估</span>':"未提供价目",num:1}];
+      return r}));
+}
+function renderUsageRank(){
+  const el=$("#ov-quota-ranks");if(!el)return;
+  el.innerHTML=quotaRankRows(usageRankData,usageRankKey)
+    ||'<div class="hint" style="padding:6px 0">窗口内暂无数据</div>';}
+function setUsageRank(k){usageRankKey=k;
+  $$("#ov-quota-rankseg button").forEach(b=>b.classList.toggle("on",b.dataset.k===k));
+  renderUsageRank();}
+function renderQuota(u){
+  const el=$("#ov-quota");if(!el)return;
+  const sumEl=$("#ov-quota-sum");
+  if(!u||!u.events_total){
+    el.innerHTML='<div class="hint" style="padding:4px 0">usage_events 为空 — 运行 <code>cv ledger sync</code> 采集本地多端 (Claude/Codex/ZCode/Antigravity) 用量后, 这里展示 5 小时滚动窗口、恢复 ETA 与跑道。</div>';
+    if(sumEl)sumEl.textContent="（未采集 · 运行 cv ledger sync 后展示）";
+    usageRankData=null;renderUsageRank();return}
+  const t=u.totals||{};
+  const hit=u.cache_hit_rate;
+  const srcs=Object.entries(u.sources||{}).map(([k,v])=>k+" "+v).join(" · ");
+  let h='<div class="audit-grid">'+
+    aCell("窗口事件",num(t.events)+" <span class=\"hint\">"+esc(srcs)+"</span>")+
+    aCell("总输入",numT(t.total_input)+" <small>tokens</small>")+
+    aCell("费用估算",t.cost_est_usd?usd(t.cost_est_usd)+' <span class="mini-tag">按公开列表价折算</span>':"未提供价目")+
+    aCell("缓存命中率",hit==null?"—":'<span>'+(hit*100).toFixed(1)+"%</span> · 节省约 "+usd(u.cache_save_est_usd))+
+    '</div>';
+  const pre=u.precision||{};
+  h+='<div class="hint" style="margin:4px 0 8px">精确事件 '+(pre.exact_events||0)+" · 估算事件 "+(pre.estimated_events||0)+
+    " ("+((pre.estimated_share||0)*100).toFixed(0)+"% 估算) · 窗口 "+esc(u.window||"5h")+
+    ' · 跑道/上限需在 vault/accounts.json 配置额度池</div>';
+  h+='<div class="hint" style="margin:8px 0 2px"><b>5 小时滚动窗口</b> — 按账号额度池; 未配置上限则展示纯消耗</div>';
+  const accs=(u.fiveh&&u.fiveh.accounts)||[];
+  h+=accs.length?accs.map(a=>{
+    const pct=a.limit?a.pct:null;
+    const barCls=pct!=null&&pct>=1?"winbar hot":"winbar";
+    const pctS=pct!=null?(pct*100).toFixed(1)+"%":"—";
+    let line='<div class="quota-row"><span class="qn" title="'+esc(a.account)+'">'+esc(a.account)+"</span>"+
+      '<span class="'+barCls+'"><i style="width:'+(pct!=null?Math.min(100,pct*100):0)+'%"></i></span>'+
+      '<span class="mono">'+pctS+"</span>"+
+      '<span class="hint">'+num(a.used_weighted)+" / "+(a.limit?num(a.limit):"未配置上限")+" ("+esc(a.weight||"total_tokens")+")</span></div>";
+    if(a.limit&&a.eta){
+      line+='<div class="quota-eta" style="padding:0 0 6px 130px">恢复至 50%: '+etaRel(a.eta["50%"])+
+        " · 80%: "+etaRel(a.eta["80%"])+" · 100%: "+etaRel(a.eta["100%"])+"</div>"}
+    return line}).join("")
+    :'<div class="hint" style="padding:2px 0">近 5 小时无消耗</div>';
+  const rw=u.runway||[];
+  if(rw.length){
+    h+='<div class="hint" style="margin:8px 0 2px"><b>跑道</b> — 按近 24h 消耗速率外推距 7d/月上限的剩余天数</div>';
+    h+=rw.map(r=>{const cap=r.metric==="tokens"?num(r.cap)+" tok":usd(r.cap);
+      const used=r.metric==="tokens"?num(r.used_tokens)+" tok":usd(r.used_usd);
+      const dl=r.days_left!=null?r.days_left.toFixed(1)+" 天":"∞ (近 24h 零消耗)";
+      return '<div class="quota-row"><span class="qn" title="'+esc(r.account)+'">'+esc(r.account)+"</span>"+
+        '<span class="mini-tag">'+esc(r.kind)+"</span>"+
+        '<span class="hint">上限 '+cap+" · 本期已用 "+used+" · 剩余跑道 <b>"+dl+"</b></span></div>"}).join("")}
+  h+='<div class="hint" style="margin:10px 0 6px"><b>消耗排行</b> — 窗口 '+esc(u.window||"5h")+
+    ' · 精确/估算已标注 <span class="mini-tag">含估算=来源无精确 usage</span></div>';
+  h+='<div id="ov-quota-rankseg" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px">'+
+    USAGE_RANKS.map(([k,l])=>'<button class="btn sm'+(usageRankKey===k?" on":"")+'" data-k="'+k+
+      '" onclick="setUsageRank(\''+k+'\')">'+l+"</button>").join("")+"</div>";
+  h+='<div id="ov-quota-ranks"></div>';
+  el.innerHTML=h;
+  usageRankData=u;
+  renderUsageRank();
+  if(sumEl){const a0=accs[0];
+    sumEl.textContent="（"+num(u.events_total)+" 事件 · 5h 已用 "+num(a0?a0.used_weighted:0)+
+      (a0&&a0.limit?" / "+num(a0.limit):"")+" · 费用估 "+usd(t.cost_est_usd)+" · 点击展开明细）"}
+}
+
+function renderUsage(d,u){
   const lt=d.lifetime||{};
   const zu=d.zcode_usage||{};
   const zrows=Object.entries(zu);
@@ -339,7 +425,15 @@ function renderUsage(d){
   const ms=d.monthly||[];
   h+='<div class="hint" style="margin:14px 0 6px"><b>headroom 通路节省</b> — 仅在导入 headroom 账本时展示</div>';
   if(!hasLt&&!ms.length){
-    h+='<div class="hint" style="padding:2px 0">未接入 — 运行 <code>cv ledger import-headroom</code> 导入；未连接时不虚构金额。</div>';
+    const ut=(u&&u.events_total)?(u.totals||{}):null;
+    if(ut){  // 无 headroom: 以本地多端直采账本为主, 不再展示空态
+      h+='<div class="hint" style="padding:2px 0">headroom 未接入 — 本地多端账本 (usage_events 直采) 为主账本: 窗口 '+
+        esc(u.window||"5h")+" 总输入 "+num(ut.total_input)+" · 输出 "+num(ut.total_output)+" · 费用估算 "+
+        (ut.cost_est_usd?usd(ut.cost_est_usd):"未提供价目")+" · 缓存节省约 "+usd(u.cache_save_est_usd)+
+        "。5h 窗口恢复 ETA 与排行见上方「额度与用量窗口」卡。</div>";
+    }else{
+      h+='<div class="hint" style="padding:2px 0">未接入 — 运行 <code>cv ledger sync</code> 采集本地多端用量, 或 <code>cv ledger import-headroom</code> 导入通路层账本；未连接时不虚构金额。</div>';
+    }
   }else{
     if(ms.length){
       const mx=Math.max(...ms.map(m=>m.c||0),1);
@@ -369,7 +463,8 @@ function renderUsage(d){
         pts.push("ZCode "+num(zrows.length)+" 模型 · "+num(zCalls)+" 次调用");
       }
       if(hasLt)pts.push("headroom 压缩省 "+usd(lt.saved_usd||0)+" · 缓存省 "+usd(lt.cache_savings_usd||0));
-      sumEl.textContent=pts.length?("（"+pts.join(" · ")+" · 点击展开明细）"):"（暂未接入计费明细 · 点击查看接入说明）";
+      if(!hasLt&&u&&u.events_total)pts.push("本地多端 "+num(u.events_total)+" 事件 · 费用估 "+usd(u.totals&&u.totals.cost_est_usd));
+      sumEl.textContent=pts.length?("（"+pts.join(" · ")+" · 点击展开明细）"):"（未采集 — 运行 cv ledger sync · 点击查看接入说明）";
     }
   }catch(e){}
 }

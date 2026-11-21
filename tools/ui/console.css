@@ -575,3 +575,10 @@ details[open]>.proj-head .tw,details.card[open]>summary .tw{transform:rotate(90d
   .gsearch{flex:1 1 100%}
   .top-actions{width:100%;justify-content:space-between}
 }
+/* ================= 额度与用量窗口卡 (本地多端账本, 无 headroom 依赖) ================= */
+.winbar{flex:1;min-width:110px;max-width:340px;height:7px;background:var(--bg-inset);border-radius:4px;overflow:hidden}
+.winbar i{display:block;height:100%;background:var(--acc);border-radius:4px;transition:width .25s ease}
+.winbar.hot i{background:var(--err)}
+.quota-row{display:flex;align-items:center;gap:10px;font-size:12.5px;padding:5px 0;flex-wrap:wrap}
+.quota-row .qn{font-family:var(--mono);min-width:120px;max-width:36%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.quota-eta{font-size:var(--fs-xs);color:var(--ink-3);font-family:var(--mono)}

@@ -2007,6 +2007,17 @@ def fmt_usd(x):
     return f"${x:,.2f}" if isinstance(x, (int, float)) else "-"
 
 
+def cv_ledger_sync_cmd(args):
+    """薄接线 (延迟导入防循环: cv_ledger 顶层 import cv)。"""
+    import cv_ledger
+    cv_ledger.cmd_ledger_sync(args)
+
+
+def cv_ledger_quota_cmd(args):
+    import cv_ledger
+    cv_ledger.cmd_ledger_quota(args)
+
+
 def cmd_ledger_stats(args):
     vault = vault_dir(args)
     if not (vault / "vault.db").exists():
@@ -2042,6 +2053,23 @@ def cmd_ledger_stats(args):
         print(f"== zcode 用量 ({tot['n']} 次调用, 审计直读) ==")
         print(f"  入 {tot['i'] or 0:,} · cache读 {tot['cr'] or 0:,}"
               f" · 模型: {', '.join(r['model'] for r in zx[:3])}")
+    try:  # 本地多端直采账本 (usage_events): 无 headroom 时的主账本段
+        import cv_ledger
+        us = cv_ledger.usage_stats_summary(vault)
+        if us.get("events_total"):
+            print(f"== 本地多端账本 ({us['events_total']} 事件直采, 无需 headroom,"
+                  f" 来源 {json.dumps(us.get('sources') or {}, ensure_ascii=False)}) ==")
+            print(f"  近 5h:  总输入 {us['window_5h_total_input']:,} · 输出 {us['window_5h_tokens_out']:,}"
+                  f" · 费用估算 {fmt_usd(us['window_5h_cost_est_usd'])}")
+            print(f"  近 24h: 总输入 {us['window_24h_total_input']:,} · 输出 {us['window_24h_tokens_out']:,}"
+                  f" · 费用估算 {fmt_usd(us['window_24h_cost_est_usd'])}")
+            hit = us.get("cache_hit_rate")
+            if hit is not None:
+                print(f"  缓存命中率 {hit * 100:.1f}% · 缓存节省约 {fmt_usd(us['cache_save_est_usd'])}"
+                      f" · 估算事件占比 {(us.get('estimated_share') or 0) * 100:.0f}%")
+            print("  (cv ledger quota 看 5h 窗口恢复 ETA 与跑道; cv ledger sync 采集)")
+    except sqlite3.OperationalError:
+        pass  # 老库无 usage_events 表: 跳过该段, 不影响其余输出
     own = owned_stats(vault_dir(args))
     if own["snapshots"]:
         print(f"== vault 自有账本 ({own['sessions']} 独立会话 / {own['snapshots']} 快照版本,"
@@ -4749,7 +4777,8 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
     ThreadingHTTPServer.allow_reuse_address = False
     from urllib.parse import urlparse, parse_qs
     sys.path.insert(0, str(Path(__file__).parent))
-    from mcp_server import ledger_summary  # ledger_summary: /stats 端点 (曾漏导入致 500)
+    from mcp_server import ledger_summary
+    import cv_ledger  # 本地多端账本 (usage_events); 延迟导入防循环 (cv_ledger 顶层 import cv)  # ledger_summary: /stats 端点 (曾漏导入致 500)
     idx = VaultIndex(vault, block_text)  # block_text 用本模块规范实现, 与 mcp 冷回退同源
 
     class H(BaseHTTPRequestHandler):
@@ -4967,8 +4996,15 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                                                     "saved_usd": lt["cost_usd"] if lt else 0, **raw},
                                        "by_model": [dict(r) for r in by_model],
                                        "monthly": [dict(r) for r in monthly],
-                                       "owned": owned_stats(vault), "memories": mem_n,
-                                       "zcode_usage": zcode_usage, "zcode_snapshots": zcode_snapshots})
+                       "owned": owned_stats(vault), "memories": mem_n,
+                       "zcode_usage": zcode_usage, "zcode_snapshots": zcode_snapshots})
+                if u.path == "/ledger/usage":
+                    # 本地多端账本滚动窗口 (无 headroom 主账本): 5h 进度/恢复 ETA/跑道/多维聚合
+                    w = q.get("window", "5h") or "5h"
+                    if w not in cv_ledger.WINDOW_CHOICES:
+                        return self._json({"error": "invalid window: 可选 5h|24h|7d|30d"}, 400)
+                    return self._json(cv_ledger.usage_payload(
+                        vault, window=w, account=q.get("account") or None))
                 if u.path == "/preview":
                     qid = q.get("id", "")
                     if not self._sid_ok(qid):
@@ -5083,7 +5119,8 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                                        "days": [{"day": d, "versions": days[d]}
                                                 for d in sorted(days)]})
                 if u.path == "/stats":
-                    return self._json({"stats": ledger_summary(vault), "owned": owned_stats(vault)})
+                    return self._json({"stats": ledger_summary(vault), "owned": owned_stats(vault),
+                                       "usage": cv_ledger.usage_stats_summary(vault)})
                 if u.path == "/projects":
                     return self._json(group_conversations_by_project(
                         vault,
@@ -5152,7 +5189,8 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                 self._json({"error": "unknown route",
                             "routes": ["/", "/healthz", "/search?q=", "/context?q=", "/preview?id=",
                                        "/recent", "/projects", "/timeline?session=", "/stats",
-                                       "/snapshot?id=", "/messages?id=", "/memory", "/ledger", "/probe_events",
+                                       "/snapshot?id=", "/messages?id=", "/memory", "/ledger",
+                                       "/ledger/usage?window=", "/probe_events",
                                        "/antigravity/sync", "/antigravity/batch",
                                        "POST /sync", "POST /migrate", "POST /migrate_project",
                                        "POST /fork", "POST /memory/extract", "POST /memory/dedup",
@@ -5638,6 +5676,19 @@ def main(argv=None):
     lr.add_argument("--days", type=int, default=30)
     lr.add_argument("--key")
     lr.set_defaults(func=cmd_ledger_import_relay)
+    lsy = lsub.add_parser("sync", help="多端直采入账: Claude/Codex/ZCode/Antigravity 本地日志 → usage_events (幂等, 脱离 headroom)")
+    lsy.add_argument("--sources", default="all",
+                     help="all|claude|codex|zcode|antigravity (可逗号组合, 默认 all)")
+    lsy.add_argument("--from-agm",
+                     help="可选外部管理器统计快照 URL (如本机 Antigravity-Manager; 尽力而为, 失败静默跳过)")
+    lsy.add_argument("--recompute", action="store_true",
+                     help="按当前 pricing.json/accounts.json 强制重算全部存量事件的账号与费用")
+    lsy.set_defaults(func=cv_ledger_sync_cmd)
+    lq = lsub.add_parser("quota", help="5h 滚动窗口 / 恢复 ETA / 跑道 / Top 模型与项目")
+    lq.add_argument("--window", default="5h", choices=["5h", "24h", "7d", "30d"])
+    lq.add_argument("--account", help="账号过滤 (accounts.json 具名账号或 client:x 伪账号)")
+    lq.add_argument("--json", action="store_true", help="输出 JSON (供脚本消费)")
+    lq.set_defaults(func=cv_ledger_quota_cmd)
     lsub.add_parser("stats").set_defaults(func=cmd_ledger_stats)
 
     w = sub.add_parser("warm", help="缓存预热: 切换上游前预发历史前缀 (M2/Pro)")
