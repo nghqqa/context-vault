@@ -47,7 +47,6 @@ import json
 import os
 import re
 import sqlite3
-import ssl
 import subprocess
 import time
 from pathlib import Path
@@ -568,7 +567,11 @@ def _ssl_unverified():
     """https 自签证书上下文 (language_server 本地端口实测为自签 https + 明文 http 双栈)。"""
     global _SSL_UNVERIFIED
     if _SSL_UNVERIFIED is None:
-        _SSL_UNVERIFIED = ssl._create_unverified_context()
+        try:
+            import ssl
+            _SSL_UNVERIFIED = ssl._create_unverified_context()
+        except Exception:
+            return None
     return _SSL_UNVERIFIED
 
 
