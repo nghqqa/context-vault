@@ -437,6 +437,26 @@ def _netstat_out() -> str:
         return ""
 
 
+def _ps_env_out() -> str:
+    """POSIX: ps -E 环境变量进程列表 (独立助手便于测试 mock, 与 nt 的 _powershell_out 对称)。"""
+    try:
+        r = subprocess.run(["ps", "-ww", "-E", "-e", "-o", "pid,command"],
+                           capture_output=True, timeout=8)
+        return (r.stdout or b"").decode("utf-8", errors="replace")
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _lsof_out(pid: int) -> str:
+    """POSIX: lsof 单进程 LISTEN 端口 (独立助手便于测试 mock, 与 nt 的 _netstat_out 对称)。"""
+    try:
+        r = subprocess.run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-p", str(pid)],
+                           capture_output=True, timeout=8)
+        return (r.stdout or b"").decode("utf-8", errors="replace")
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
 def discover_agv_lsp_credentials():
     """发现本机 Antigravity language_server → (pid, csrf_token, port) 或 None。
     Windows: Get-CimInstance 查命令行 (--csrf_token) + netstat LISTENING 探端口;
@@ -455,19 +475,14 @@ def discover_agv_lsp_credentials():
                 cands.append((int(m.group(1)), mc.group(1),
                               "--standalone" in m.group(2)))
     else:
-        try:
-            r = subprocess.run(["ps", "-ww", "-E", "-e", "-o", "pid,command"],
-                               capture_output=True, timeout=8)
-            for line in (r.stdout or b"").decode("utf-8", errors="replace").splitlines():
-                if "language_server" not in line or "--csrf_token" not in line:
-                    continue
-                mc = re.search(r"--csrf_token[= ]([0-9a-fA-F-]{8,})", line)
-                mp = re.match(r"^\s*(\d+)", line)
-                if mc and mp:
-                    cands.append((int(mp.group(1)), mc.group(1),
-                                  "--standalone" in line))
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+        for line in _ps_env_out().splitlines():
+            if "language_server" not in line or "--csrf_token" not in line:
+                continue
+            mc = re.search(r"--csrf_token[= ]([0-9a-fA-F-]{8,})", line)
+            mp = re.match(r"^\s*(\d+)", line)
+            if mc and mp:
+                cands.append((int(mp.group(1)), mc.group(1),
+                              "--standalone" in line))
     if not cands:
         return None
     cands.sort(key=lambda c: not c[2])  # standalone 优先
@@ -483,15 +498,10 @@ def discover_agv_lsp_credentials():
                     if m:
                         ports.append(int(m.group(1)))
         else:
-            try:
-                r = subprocess.run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-p", str(pid)],
-                                   capture_output=True, timeout=8)
-                for line in (r.stdout or b"").decode("utf-8", errors="replace").splitlines():
-                    m = re.search(r":(\d+)\s+\(LISTEN\)", line)
-                    if m:
-                        ports.append(int(m.group(1)))
-            except (OSError, subprocess.TimeoutExpired):
-                pass
+            for line in _lsof_out(pid).splitlines():
+                m = re.search(r":(\d+)\s+\(LISTEN\)", line)
+                if m:
+                    ports.append(int(m.group(1)))
         return ports[:12]
 
     for pid, csrf, _std in cands:

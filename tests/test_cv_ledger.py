@@ -670,19 +670,31 @@ def test_remote_quota_cached_and_merge(env, monkeypatch):
 
 
 def test_agv_quota_discovery_and_fetch(monkeypatch):
-    """Antigravity 本机 RPC: 发现 (进程/netstat mock) + 双轨解析 + 未运行负缓存。"""
-    monkeypatch.setattr(cl, "_AGV_Q", {"at": 0.0, "data": None})
+    """Antigravity 本机 RPC: 双平台发现分支 (nt=PowerShell/netstat, posix=ps/lsof) 都可 mock
+    且语义一致 (修复前 posix 分支不可 mock → CI ubuntu 走真实 ps 找不到 IDE 而挂) + 双轨解析 + 负缓存。"""
+    import os as _os
+    native_name = _os.name
+    PS_LINES = ("1234\tC:\\agv\\language_server.exe --csrf_token abcd1234-5678 --standalone\n"
+                "5678\tC:\\x\\language_server.exe --csrf_token deadbeef-1111\n")
+    NETSTAT_LINES = ("  TCP    127.0.0.1:51024     0.0.0.0:0    LISTENING    1234\n"
+                     "  TCP    127.0.0.1:51025     0.0.0.0:0    LISTENING    9999\n")
 
-    def fake_ps(script, timeout=None):
-        if "Get-CimInstance" in script:
-            return ("1234\tC:\\agv\\language_server.exe --csrf_token abcd1234-5678 --standalone\n"
-                    "5678\tC:\\x\\language_server.exe --csrf_token deadbeef-1111\n")
-        return ""
+    def patch_discovery(empty=False):
+        ps = "" if empty else PS_LINES
+        ns = "" if empty else NETSTAT_LINES
 
-    monkeypatch.setattr(cl, "_powershell_out", fake_ps)
-    monkeypatch.setattr(cl, "_netstat_out", lambda: (
-        "  TCP    127.0.0.1:51024     0.0.0.0:0    LISTENING    1234\n"
-        "  TCP    127.0.0.1:51025     0.0.0.0:0    LISTENING    9999\n"))
+        def fake_lsof(pid):
+            if not empty and pid == 1234:
+                return f"cmd {pid} u TCP 127.0.0.1:51024 (LISTEN)\n"
+            return ""
+
+        if _os.name == "nt":
+            monkeypatch.setattr(cl, "_powershell_out",
+                                lambda s, timeout=None: ps if "Get-CimInstance" in s else "")
+            monkeypatch.setattr(cl, "_netstat_out", lambda: ns)
+        else:
+            monkeypatch.setattr(cl, "_ps_env_out", lambda: ps)
+            monkeypatch.setattr(cl, "_lsof_out", fake_lsof)
 
     def fake_rpc(port, csrf, method, timeout=None):
         assert csrf == "abcd1234-5678"  # standalone 进程优先
@@ -699,6 +711,8 @@ def test_agv_quota_discovery_and_fetch(monkeypatch):
         return {"userStatus": {"userTier": {"id": "free", "name": "Free"}}}
 
     monkeypatch.setattr(cl, "_agv_rpc", fake_rpc)
+    # 1) 当前平台真实分支
+    patch_discovery()
     r = cl.fetch_agv_quota()
     assert r["ok"] and r["plan"] == "Antigravity Free"
     types = {l["type"]: l for l in r["limits"]}
@@ -706,9 +720,15 @@ def test_agv_quota_discovery_and_fetch(monkeypatch):
     assert types["gemini weekly"]["pct_used"] == 10.0
     assert types["claude/gpt 5h"]["pct_used"] == 0.0
     assert r["source"] == "antigravity-lsp"
-    # 未运行: 进程扫描为空 → ok False 负缓存
-    monkeypatch.setattr(cl, "_powershell_out", lambda s, timeout=None: "")
-    monkeypatch.setattr(cl, "_netstat_out", lambda: "")
+    # 2) 模拟对侧平台分支: 两条发现路径语义一致 (跨平台互测, ubuntu CI 也全绿)
+    monkeypatch.setattr(_os, "name", "posix" if native_name == "nt" else "nt")
+    patch_discovery()
+    monkeypatch.setattr(cl, "_AGV_Q", {"at": 0.0, "data": None})
+    r_b = cl.fetch_agv_quota()
+    assert r_b["ok"] and r_b["plan"] == "Antigravity Free"
+    # 3) 未运行: 进程扫描为空 → ok False 负缓存
+    monkeypatch.setattr(_os, "name", native_name)
+    patch_discovery(empty=True)
     monkeypatch.setattr(cl, "_AGV_Q", {"at": 0.0, "data": None})
     r2 = cl.agv_quota_cached(now=1000.0)
     assert not r2["ok"] and "未发现" in r2["error"]
