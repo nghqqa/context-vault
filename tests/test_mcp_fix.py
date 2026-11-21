@@ -471,3 +471,31 @@ def test_f6_remember_writable_mount_still_scores(tmp_path):
     row = conn.execute("SELECT hits, last_used FROM memory_items").fetchone()
     conn.close()
     assert row["hits"] >= 1 and row["last_used"]      # 遥测仍在写
+
+
+def test_f7_snapshot_corrupt_json_and_ledger_summary_robustness(tmp_path):
+    """损坏/缺字段快照返回可读错误不抛异常; ledger_summary 遇到坏 raw JSON 仍安全返回且关闭连接;
+    SERVER_VERSION 与 cv.VERSION 对齐。"""
+    import sqlite3
+    assert mcp_server.SERVER_VERSION == cv.VERSION
+    vault, _ = mk_vault(tmp_path)
+    bad_sid = "cv_bad00000000001"
+    (vault / "snapshots" / f"{bad_sid}.json").write_text("{corrupt json", encoding="utf-8")
+    text1, is_err1 = call_tool(vault, "vault_snapshot", id=bad_sid)
+    assert is_err1 is False and "损坏" in text1
+
+    inc_sid = "cv_1c000000000001"
+    (vault / "snapshots" / f"{inc_sid}.json").write_text(json.dumps({"only": 1}), encoding="utf-8")
+    text2, is_err2 = call_tool(vault, "vault_snapshot", id=inc_sid)
+    assert is_err2 is False and "不完整" in text2
+
+    conn = cv.db(vault)
+    conn.executescript(cv.SCHEMA)
+    conn.execute("INSERT INTO ledger_events(source,tokens_saved,cost_usd,raw) VALUES(?,?,?,?)",
+                 ("headroom-lifetime", 100, 1.5, "{bad raw"))
+    conn.commit()
+    conn.close()
+    summary = mcp_server.ledger_summary(vault)
+    assert summary["lifetime_tokens_saved"] == 100 and summary["lifetime_compression_saved_usd"] == 1.5
+    # 若 ledger_summary 泄漏连接, Windows 下删除 vault.db 会抛 PermissionError
+    (vault / "vault.db").unlink()

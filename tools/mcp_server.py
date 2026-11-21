@@ -8,6 +8,7 @@
     vault_search(query, limit)   全库文本搜索, 词频评分
     vault_context(query, limit)  记忆检索: 命中块 + 前后文摘录 (记忆后端核心)
     vault_snapshot(id)           单快照详情 (capture/stats/块分布/活上下文)
+    vault_remember(query, limit) 跨会话长期记忆检索 (含演变链)
     vault_stats()                token 账本汇总 (含 headroom lifetime)
 
 接入 (任一 MCP 客户端):
@@ -27,7 +28,7 @@ import urllib.parse
 from pathlib import Path
 
 SERVER_NAME = "context-vault"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.7.0"
 PROTO = "2025-06-18"
 SEARCH_CONTEXT_CHARS = 400  # vault_context 每个命中块返回的摘录长度
 MAX_TEXT_LEN = 2000
@@ -69,24 +70,28 @@ def ledger_summary(vault: Path) -> dict:
     db = vault / "vault.db"
     if not db.exists():
         return {}
-    conn = sqlite3.connect(db)
+    conn = sqlite3.connect(db, timeout=10)
     conn.row_factory = sqlite3.Row
     out = {}
     try:
         row = conn.execute("SELECT tokens_saved, cost_usd, raw FROM ledger_events "
                            "WHERE source='headroom-lifetime'").fetchone()
+        if row:
+            out["lifetime_compression_saved_usd"] = row["cost_usd"]
+            out["lifetime_tokens_saved"] = row["tokens_saved"]
+            try:
+                raw = json.loads(row["raw"]) if row["raw"] else {}
+            except (ValueError, TypeError):
+                raw = {}
+            if isinstance(raw, dict):
+                out["lifetime_cache_saved_usd"] = raw.get("cache_savings_usd")
+                out["lifetime_total_input_tokens"] = raw.get("total_input_tokens")
+        r2 = conn.execute("SELECT COUNT(*) n FROM snapshots").fetchone()
+        out["snapshots"] = r2["n"] if r2 else 0
     except sqlite3.OperationalError:
-        conn.close()
         return {}  # 零表空库 (曾由只 connect 不建表的 /stats 路径造出): 诚实按无账本处理, 不毒化冷路径
-    if row:
-        out["lifetime_compression_saved_usd"] = row["cost_usd"]
-        out["lifetime_tokens_saved"] = row["tokens_saved"]
-        raw = json.loads(row["raw"])
-        out["lifetime_cache_saved_usd"] = raw.get("cache_savings_usd")
-        out["lifetime_total_input_tokens"] = raw.get("total_input_tokens")
-    r2 = conn.execute("SELECT COUNT(*) n FROM snapshots").fetchone()
-    out["snapshots"] = r2["n"]
-    conn.close()
+    finally:
+        conn.close()
     return out
 
 
@@ -195,26 +200,33 @@ def t_snapshot(args_vault, sid: str) -> str:
     p = vault / "snapshots" / f"{sid}.json"
     if not p.exists():
         return f"快照不存在: {sid}"
-    env = json.loads(p.read_text(encoding="utf-8"))
+    try:
+        env = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return f"快照文件损坏或不可读: {sid}"
+    if not isinstance(env, dict) or not isinstance(env.get("capture"), dict) \
+            or not isinstance(env.get("stats"), dict) or not isinstance(env.get("conversation"), list):
+        return f"快照结构不完整: {sid}"
     from collections import Counter
-    dist = Counter(b["type"] for b in env["conversation"])
+    dist = Counter(b.get("type", "unknown") for b in env["conversation"] if isinstance(b, dict))
     c, s = env["capture"], env["stats"]
     lines = [f"快照 {sid}",
              f"  来源: {c.get('agent')} ({c.get('source_format')}), session_ref={c.get('session_ref')}",
              f"  完整性: {c.get('completeness')} | cwd: {c.get('cwd')} | 创建: {env.get('created_at')}",
              f"  块分布: {dict(dist)}",
-             f"  token: 入={s['tokens_in']:,} 出={s['tokens_out']:,} cache读={s['cache_read']:,} (events={s['usage_events']})"]
+             f"  token: 入={s.get('tokens_in', 0):,} 出={s.get('tokens_out', 0):,} "
+             f"cache读={s.get('cache_read', 0):,} (events={s.get('usage_events', 0)})"]
     # 活上下文开头
     last = -1
     for i, b in enumerate(env["conversation"]):
-        if b["type"] == "compaction":
+        if isinstance(b, dict) and b.get("type") == "compaction":
             last = i
-    live = env["conversation"][last + 1:]
+    live = [b for b in env["conversation"][last + 1:] if isinstance(b, dict)]
     head = []
     for b in live[:8]:
         t = block_text(b)[:200]
         if t:
-            head.append(f"    [{b.get('role') or b['type']}] {t}")
+            head.append(f"    [{b.get('role') or b.get('type', '?')}] {t}")
     if head:
         lines.append(f"  活上下文前 {len(live)} 块 (压缩边界后), 开头:")
         lines += head

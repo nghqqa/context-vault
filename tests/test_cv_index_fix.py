@@ -211,10 +211,13 @@ def test_locked_db_construction_preserves_file(tmp_path):
     expected = db.read_bytes()
     ext = sqlite3.connect(db)
     ext.execute("BEGIN EXCLUSIVE")  # 模拟他进程独占持锁
+    t0 = time.monotonic()
     try:
         idx2 = VaultIndex(tmp_path)  # 构造不得抛异常, 不得动库文件
     except Exception as exc:  # noqa: BLE001
         raise AssertionError(f"持锁构造必须干净回退, 实际抛出: {exc!r}")
+    elapsed = time.monotonic() - t0
+    assert elapsed < 10.0, f"持锁构造回退不应阻塞数十秒, 实耗时 {elapsed:.2f}s"
     assert db.read_bytes() == expected, "持锁期间库文件必须字节级完好"
     assert idx2.search("locksafe7", 5)["hits"], "内存兜底代必须功能正常"
 

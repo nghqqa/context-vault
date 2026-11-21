@@ -5002,10 +5002,10 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     if q.get("hybrid") == "1":  # 可选稠密重排 (CV_EMBEDDINGS_URL 配置时生效;
                         # 未配置/故障时 hybrid_search 内部回退纯结构化, 行为不变)
                         try:
-                            from cv_dense import DenseProvider, EmbeddingCache, hybrid_search
+                            from cv_dense import DenseProvider, hybrid_search
                             return self._json(hybrid_search(
                                 idx, vault, q.get("q", ""), lim,
-                                provider=DenseProvider(), cache=EmbeddingCache(vault)))
+                                provider=DenseProvider()))
                         except Exception:
                             pass
                     return self._json(idx.search(q.get("q", ""), lim))

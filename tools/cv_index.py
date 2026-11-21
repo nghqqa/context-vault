@@ -816,6 +816,7 @@ class VaultIndex:
         self._store_lock = threading.RLock()  # 多线程 serve 共用一条 sqlite 连接 (写临界区内可嵌套)
         self._env_lock = threading.Lock()     # 快照 LRU 缓存专用锁 (读者并发)
         self._mem_only = False  # 当前代是否为 :memory: 兜底 (锁释放后需换回文件连接)
+        self._init_locked = False  # 构造期 _load_db 命中外部锁: 本轮重建直接回退内存, 不再重复撞锁
         self._env_cache = OrderedDict()
         self._rebuild_lock = threading.Lock()
         self._rebuild_pending = False
@@ -916,10 +917,20 @@ class VaultIndex:
     def _db_path(self) -> Path:
         return self.vault / INDEX_NAME
 
+    @staticmethod
+    def _busy_timeout() -> float:
+        """派生索引 SQLite 锁等待上限 (秒): 派生层有完备的旧代保留/内存兜底机制,
+        短超时避免他进程持锁时构造或重建阻塞数十秒 (支持 CV_INDEX_LOCK_TIMEOUT 覆盖)。"""
+        try:
+            v = float(os.environ.get("CV_INDEX_LOCK_TIMEOUT", "1.5"))
+            return max(0.1, min(v, 30.0))
+        except ValueError:
+            return 1.5
+
     def _open_conn(self):
         """新建库文件连接 (不读 _state; 须持 _store_lock)。"""
         new_db = not self._db_path().exists()
-        conn = sqlite3.connect(self._db_path(), timeout=10, check_same_thread=False)
+        conn = sqlite3.connect(self._db_path(), timeout=self._busy_timeout(), check_same_thread=False)
         if new_db:
             try:  # postings blob 偏大: 8K 页减少页开销 (仅新库首建生效)
                 conn.execute("PRAGMA page_size=8192")
@@ -1007,11 +1018,12 @@ class VaultIndex:
             return False
         conn = None
         try:
-            conn = (sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True, timeout=10,
+            tmo = self._busy_timeout()
+            conn = (sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True, timeout=tmo,
                                     check_same_thread=False)
                     if readonly else
                     # 装载路径同样要放开跨线程 (serve 工作线程共用此连接; 与 _conn 一致)
-                    sqlite3.connect(p, timeout=10, check_same_thread=False))
+                    sqlite3.connect(p, timeout=tmo, check_same_thread=False))
             row = conn.execute("SELECT value FROM meta WHERE key='hdr'").fetchone()
             if not row:
                 conn.close()
@@ -1055,11 +1067,14 @@ class VaultIndex:
                     conn.close()
                 except sqlite3.Error:
                     pass
-            if not self._readonly and not _is_transient_db_error(exc):
-                # 仅结构性损坏 (malformed / not-a-database / blob 失配) 才删派生文件;
-                # 瞬时错误 (他进程 BEGIN EXCLUSIVE 持锁 / busy / OOM) 下库文件可能完全
-                # 健康 — 绝不 purge/truncate, 放弃装载走内存重建, 指纹不落账下次追赶
-                self._purge_db_file()
+            if not self._readonly:
+                if _is_transient_db_error(exc):
+                    self._init_locked = True
+                else:
+                    # 仅结构性损坏 (malformed / not-a-database / blob 失配) 才删派生文件;
+                    # 瞬时错误 (他进程 BEGIN EXCLUSIVE 持锁 / busy / OOM) 下库文件可能完全
+                    # 健康 — 绝不 purge/truncate, 放弃装载走内存重建, 指纹不落账下次追赶
+                    self._purge_db_file()
             self._reset_arrays()
             return False
 
@@ -1369,13 +1384,19 @@ class VaultIndex:
             self._index_one(files[sid], staging, dedup=dedup)
         fp_ok = _fp_from(staging["mtimes"])
         hashes = dedup.rows
-        try:
-            self._commit_staging(staging, hashes, fp_ok)
-        except sqlite3.OperationalError:
-            if self._state[1]:
-                return  # 运行期重建撞外部锁: 已有健康旧代, 保留 (指纹未动, 下次再试)
-            # 构造期撞外部锁: 派生索引换装到 :memory: 兜底, 构造不失败、库文件不动
+        if self._init_locked and not self._state[1]:
+            # 构造期 _load_db 刚撞到外部独占锁: 直接落内存兜底, 避免紧接着再撞一次锁超时
+            self._init_locked = False
             self._fallback_memory_install(staging, hashes, fp_ok)
+        else:
+            self._init_locked = False
+            try:
+                self._commit_staging(staging, hashes, fp_ok)
+            except sqlite3.OperationalError:
+                if self._state[1]:
+                    return  # 运行期重建撞外部锁: 已有健康旧代, 保留 (指纹未动, 下次再试)
+                # 构造期撞外部锁: 派生索引换装到 :memory: 兜底, 构造不失败、库文件不动
+                self._fallback_memory_install(staging, hashes, fp_ok)
         self.stats["full"] += 1
         self._last_rebuild = time.monotonic()
         self._rm_legacy_pkl()

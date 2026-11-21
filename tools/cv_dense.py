@@ -150,10 +150,13 @@ def hybrid_search(idx, vault: Path, query: str, limit: int,
                   provider: DenseProvider | None = None, cache: EmbeddingCache | None = None) -> dict:
     """RRF 混合检索: BM25 候选池 × 稠密语义排序 → 融合。任何环节失败都优雅回退纯 BM25。
     idx: 已 warmed 的 VaultIndex; provider/cache 未传则按环境构造。"""
-    base = idx.search(query, max(limit, RRF_CANDIDATES))
+    lim = max(1, int(limit))
+    base = idx.search(query, max(lim, RRF_CANDIDATES))
+    fallback_hits = base["hits"][:lim]
     provider = provider or DenseProvider()
     if not provider.available or not base["hits"]:
-        return {**base, "hybrid": False}
+        return {**base, "hits": fallback_hits, "hybrid": False}
+    owned_cache = cache is None
     try:
         cache = cache or EmbeddingCache(vault)
         model = provider.model
@@ -168,10 +171,11 @@ def hybrid_search(idx, vault: Path, query: str, limit: int,
             texts.append(_snapshot_repr(env))
         cached, missing = cache.get_many(model, texts)
         if missing:
-            fresh = provider.embed(missing)
-            by_text = dict(zip(missing, fresh))
+            uniq_missing = list(dict.fromkeys(missing))
+            fresh = provider.embed(uniq_missing)
+            by_text = dict(zip(uniq_missing, fresh))
             cached = [v if v is not None else by_text[t] for v, t in zip(cached, texts)]
-            cache.put_many(model, missing, [by_text[t] for t in missing])
+            cache.put_many(model, uniq_missing, [by_text[t] for t in uniq_missing])
         qvec = provider.embed([query])[0]
 
         def dot(a, b):
@@ -187,8 +191,8 @@ def hybrid_search(idx, vault: Path, query: str, limit: int,
         dense_order = [sid for _, sid in dense_ranked]
         bm25_order = sids
         fused = rrf_fuse([bm25_order, dense_order], k=HYBRID_K)
-        keep = set(sids[:limit * 3])
-        order = [sid for sid, _ in fused if sid in keep][:limit]
+        keep = set(sids[:lim * 3])
+        order = [sid for sid, _ in fused if sid in keep][:lim]
         by_sid = {h["sid"]: h for h in base["hits"]}
         hits = []
         for rank, sid in enumerate(order):
@@ -197,4 +201,7 @@ def hybrid_search(idx, vault: Path, query: str, limit: int,
             hits.append(h)
         return {**base, "hits": hits, "hybrid": True}
     except Exception:
-        return {**base, "hybrid": False}  # 稠密层任何故障 → 优雅回退, 结构化检索绝不失效
+        return {**base, "hits": fallback_hits, "hybrid": False}  # 稠密层任何故障 → 优雅回退, 结构化检索绝不失效
+    finally:
+        if owned_cache and cache is not None:
+            cache.close()

@@ -170,6 +170,30 @@ def test_dense_hybrid_cache_and_fallback(tmp_path, monkeypatch):
     assert r3.get("hybrid") is False and r3["hits"], "故障必须回退纯 BM25 结果"
 
 
+def test_dense_hybrid_fallback_respects_limit_and_closes_cache(tmp_path):
+    """回退路径 (未配置 URL / 端点故障) 必须严格按 limit 截断, 且内部创建的 EmbeddingCache
+    必须在返回前关闭句柄 (Windows 上立刻可删 embeddings.db)。"""
+    for i in range(6):
+        _write(tmp_path, f"cv_lim{i:02d}0000000001",
+               [{"type": "text", "role": "user", "content": f"共同锚词 fallbacklimit7 快照 {i}"}])
+    idx = VaultIndex(tmp_path)
+    try:
+        unconfigured = cv_dense.DenseProvider(url="")
+        r_unconf = cv_dense.hybrid_search(idx, tmp_path, "fallbacklimit7", 2, provider=unconfigured)
+        assert r_unconf["hybrid"] is False
+        assert len(r_unconf["hits"]) == 2, f"未配置回退不得越过 limit=2, 实得 {len(r_unconf['hits'])}"
+
+        bad = cv_dense.DenseProvider(url="http://127.0.0.1:1/v1/embeddings")
+        r_err = cv_dense.hybrid_search(idx, tmp_path, "fallbacklimit7", 2, provider=bad)
+        assert r_err["hybrid"] is False
+        assert len(r_err["hits"]) == 2, f"故障回退不得越过 limit=2, 实得 {len(r_err['hits'])}"
+        emb_db = tmp_path / "embeddings.db"
+        if emb_db.exists():
+            emb_db.unlink()  # 若句柄泄漏, Windows 下此处必抛 PermissionError
+    finally:
+        idx._close()
+
+
 # ---------------- cmd_memory 老库迁移 (P0-4 回归) ----------------
 
 def test_cmd_memory_on_legacy_schema(tmp_path, capsys, monkeypatch):
