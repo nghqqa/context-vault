@@ -759,12 +759,12 @@ def fetch_agv_quota(timeout: float = 2.0, creds=None) -> dict:
         if not limits:
             limits = per_model
         else:
-            existing_types = {l["type"].lower() for l in limits}
-            existing_vals = {(round(float(l.get("pct_used") or 0), 1), l.get("reset_at"))
-                             for l in limits}
+            covered_resets = {l.get("reset_at") for l in limits if l.get("reset_at")}
+            covered_descs = " ".join(str(l.get("desc") or "").lower() for l in limits)
             for pm in per_model:
-                if pm["pct_used"] > 0 and pm["type"].lower() not in existing_types \
-                        and (round(float(pm["pct_used"]), 1), pm.get("reset_at")) not in existing_vals:
+                base_m = re.sub(r"\s+(5h|weekly)$", "", pm["type"], flags=re.I).strip().lower()
+                if pm["pct_used"] > 0 and pm.get("reset_at") not in covered_resets \
+                        and (not base_m or base_m not in covered_descs):
                     limits.append(pm)
     except Exception as e:
         errs.append(f"GetUserStatus: {e}")
