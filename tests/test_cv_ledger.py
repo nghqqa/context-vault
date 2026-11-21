@@ -669,17 +669,105 @@ def test_remote_quota_cached_and_merge(env, monkeypatch):
         srv.server_close()
 
 
-def test_agv_quota_discovery_and_fetch(monkeypatch):
-    """Antigravity 本机 RPC: 双平台发现分支 (nt=PowerShell/netstat, posix=ps/lsof) 都可 mock
-    且语义一致 (修复前 posix 分支不可 mock → CI ubuntu 走真实 ps 找不到 IDE 而挂) + 双轨解析 + 负缓存。"""
+def test_agv_hub_discovery_and_path_a(env, monkeypatch):
+    """官方发现文件路线: daemon/hub_*.json (pid/双端口/csrfToken), 陈旧 pid 跳过、
+    活实例 GetUserStatus 探活; 路径 A 解析 (真机形状): userTier.name 作 plan,
+    clientModelConfigs[].quotaInfo 按模型池去重 (档位后缀剥离), 无 quotaInfo 模型跳过。"""
+    home, _ = env
+    daemon = home / ".gemini" / "antigravity" / "daemon"
+    daemon.mkdir(parents=True)
+    (daemon / "hub_1111.json").write_text(json.dumps(
+        {"pid": 999999, "httpsPort": 1110, "httpPort": 1111, "lsVersion": "2.33.0",
+         "csrfToken": "stale-token-aaaaaaaa"}), encoding="utf-8")
+    (daemon / "hub_13802.json").write_text(json.dumps(
+        {"pid": 42424, "httpsPort": 13801, "httpPort": 13802, "lsVersion": "2.34.0",
+         "csrfToken": "live-token-bbbbbbbb"}), encoding="utf-8")
+    STATUS_RESP = {"userStatus": {
+        "userTier": {"id": "g1-pro-tier", "name": "Google AI Pro"},
+        "cascadeModelConfigData": {"clientModelConfigs": [
+            {"label": "Gemini 4 Neon (High)",
+             "quotaInfo": {"remainingFraction": 1, "resetTime": "2026-11-21T15:11:29Z"}},
+            {"label": "Gemini 4 Neon (Medium)",
+             "quotaInfo": {"remainingFraction": 1, "resetTime": "2026-11-21T15:11:29Z"}},
+            {"label": "Gemini 4 Argon (High)",
+             "quotaInfo": {"remainingFraction": 0.8598132, "resetTime": "2026-11-28T08:55:05Z"}},
+            {"label": "Claude 4.5 Sonnet",
+             "quotaInfo": {"remainingFraction": 0.5, "resetTime": "2026-11-21T16:00:00Z"}},
+            {"label": "Legacy Model", "modelOrAlias": {"model": "M_OLD"}},  # 无 quotaInfo
+        ]}}}
+    calls = []
+
+    def fake_call(port, csrf, method, body=None, timeout=None, scheme=None):
+        calls.append((port, csrf, method))
+        assert csrf == "live-token-bbbbbbbb"  # 陈旧 hub 文件的 token 绝不出手
+        if method == cl.AGV_LSP_STATUS:
+            assert body == cl.AGV_STATUS_BODY  # GetUserStatus 带 metadata 标准体
+            return STATUS_RESP, "http"
+        return {"response": {"groups": []}}, "http"
+
+    monkeypatch.setattr(cl, "_agv_call", fake_call)
+    monkeypatch.setattr(cl, "_pid_alive", lambda pid: pid == 42424)
+    creds = cl.discover_agv_lsp_credentials()
+    assert creds == (42424, "live-token-bbbbbbbb", 13802, "http")
+    r = cl.fetch_agv_quota(creds=creds)
+    assert r["ok"] and r["plan"] == "Antigravity Google AI Pro"
+    types = {l["type"]: l for l in r["limits"]}
+    # 档位后缀剥离 + 同池去重: Neon (High/Medium) 同 (池,1.0,reset) 合一行
+    assert "Gemini 4 Neon 5h" in types and types["Gemini 4 Neon 5h"]["pct_used"] == 0.0
+    assert types["Gemini 4 Argon weekly"]["pct_used"] == pytest.approx(14.0, abs=0.01)
+    assert types["claude/gpt 5h"]["pct_used"] == 50.0
+    assert len(r["limits"]) == 3 and "Legacy Model" not in "".join(types)
+    assert r["limits"][0]["pct_used"] >= r["limits"][-1]["pct_used"]  # 用得多在前
+    assert calls and calls[0][2] == cl.AGV_LSP_STATUS
+
+
+def test_agv_quota_path_b_groups(monkeypatch):
+    """路径 B: RetrieveUserQuotaSummary groups/buckets — 顶层与 response 包装都兼容;
+    proto3 零值省略: remainingFraction 键缺省 = 0.0 剩余 (已用 100%);
+    路径 A 无 quotaInfo 时自动落 B; 双路径全空 → ok:false 带原因。"""
+    STATUS_EMPTY = {"userStatus": {"userTier": {"name": "Free"}}}
+    calls = {"quota": 0}
+
+    def fake_call(port, csrf, method, body=None, timeout=None, scheme=None):
+        if method == cl.AGV_LSP_STATUS:
+            return STATUS_EMPTY, "http"
+        calls["quota"] += 1
+        if calls["quota"] == 1:  # 顶层 groups (无 response 包装)
+            return {"groups": [{"displayName": "Claude & GPT (3p)", "buckets": [
+                {"bucketId": "3p-5h", "window": "5h", "remainingFraction": 0.5,
+                 "resetTime": "2026-11-21T16:00:00Z"},
+                {"bucketId": "3p-weekly", "window": "weekly"}]}]}, "http"
+        if calls["quota"] == 2:  # response 包装 (真机形状)
+            return {"response": {"groups": [{"displayName": "Gemini Models", "buckets": [
+                {"bucketId": "gemini-5h", "remainingFraction": 1}]}]}}, "https"
+        return {"success": False}, None
+
+    monkeypatch.setattr(cl, "_agv_call", fake_call)
+    creds = (55836, "tok-aaaa", 13802, "http")
+    r1 = cl.fetch_agv_quota(creds=creds)
+    assert r1["ok"] and r1["plan"] == "Antigravity Free"
+    types = {l["type"]: l for l in r1["limits"]}
+    assert types["claude/gpt 5h"]["pct_used"] == 50.0
+    assert types["claude/gpt weekly"]["pct_used"] == 100.0  # proto3 缺省 = 剩余 0
+    r2 = cl.fetch_agv_quota(creds=creds)
+    assert r2["limits"][0]["type"] == "gemini 5h" and r2["limits"][0]["pct_used"] == 0.0
+    r3 = cl.fetch_agv_quota(creds=creds)
+    assert not r3["ok"] and "无 quota" in r3["error"]  # 双路径全空 → 诚实失败
+
+
+def test_agv_legacy_cmdline_discovery(monkeypatch):
+    """旧版 IDE 发现分支 (nt=PowerShell/netstat, posix=ps/lsof) 双平台可 mock 且语义一致;
+    正则放宽 (含大小写字母/点/下划线 token) + 命令行端口补充 + --standalone 优先。"""
     import os as _os
+    import tempfile
+    monkeypatch.setattr(cv, "HOME", Path(tempfile.mkdtemp()))  # 隔离真机 hub 文件 (路线 1 不介入)
     native_name = _os.name
-    PS_LINES = ("1234\tC:\\agv\\language_server.exe --csrf_token abcd1234-5678 --standalone\n"
+    PS_LINES = ("1234\tC:\\agv\\language_server.exe --csrf_token abcd.1234_x --standalone\n"
                 "5678\tC:\\x\\language_server.exe --csrf_token deadbeef-1111\n")
     NETSTAT_LINES = ("  TCP    127.0.0.1:51024     0.0.0.0:0    LISTENING    1234\n"
                      "  TCP    127.0.0.1:51025     0.0.0.0:0    LISTENING    9999\n")
 
-    def patch_discovery(empty=False):
+    def patch_discovery(monkeypatch, empty=False):
         ps = "" if empty else PS_LINES
         ns = "" if empty else NETSTAT_LINES
 
@@ -690,50 +778,32 @@ def test_agv_quota_discovery_and_fetch(monkeypatch):
 
         if _os.name == "nt":
             monkeypatch.setattr(cl, "_powershell_out",
-                                lambda s, timeout=None: ps if "Get-CimInstance" in s else "")
+                                lambda s, timeout=None: ps if "language_server" in s else "")
             monkeypatch.setattr(cl, "_netstat_out", lambda: ns)
         else:
             monkeypatch.setattr(cl, "_ps_env_out", lambda: ps)
             monkeypatch.setattr(cl, "_lsof_out", fake_lsof)
 
-    def fake_rpc(port, csrf, method, timeout=None):
-        assert csrf == "abcd1234-5678"  # standalone 进程优先
-        if method == cl.AGV_LSP_RPC:
-            return {"response": {"groups": [
-                {"displayName": "Gemini Models", "buckets": [
-                    {"bucketId": "gemini-5h", "window": "5h", "remainingFraction": 0.62,
-                     "resetTime": "2026-11-21T18:00:00Z"},
-                    {"bucketId": "gemini-weekly", "window": "weekly", "remainingFraction": 0.9,
-                     "resetTime": "2026-11-23T01:58:04Z"}]},
-                {"displayName": "Claude & GPT (3p)", "buckets": [
-                    {"bucketId": "3p-5h", "window": "5h", "remainingFraction": 1.0,
-                     "resetTime": "2026-11-21T19:00:00Z"}]}]}}
-        return {"userStatus": {"userTier": {"id": "free", "name": "Free"}}}
+    def fake_call(port, csrf, method, body=None, timeout=None, scheme=None):
+        assert csrf == "abcd.1234_x"  # standalone 优先 + 放宽字符集 token
+        if port == 51024 and method == cl.AGV_LSP_STATUS:
+            return {"userStatus": {}}, "http"
+        return None, None
 
-    monkeypatch.setattr(cl, "_agv_rpc", fake_rpc)
+    monkeypatch.setattr(cl, "_agv_call", fake_call)
     # 1) 当前平台真实分支
-    patch_discovery()
-    r = cl.fetch_agv_quota()
-    assert r["ok"] and r["plan"] == "Antigravity Free"
-    types = {l["type"]: l for l in r["limits"]}
-    assert types["gemini 5h"]["pct_used"] == 38.0  # 1-0.62
-    assert types["gemini weekly"]["pct_used"] == 10.0
-    assert types["claude/gpt 5h"]["pct_used"] == 0.0
-    assert r["source"] == "antigravity-lsp"
-    # 2) 模拟对侧平台分支: 两条发现路径语义一致 (跨平台互测, ubuntu CI 也全绿)
+    patch_discovery(monkeypatch)
+    creds = cl.discover_agv_lsp_credentials()
+    assert creds[0] == 1234 and creds[1] == "abcd.1234_x" and creds[2] == 51024
+    # 2) 模拟对侧平台分支 (跨平台互测, ubuntu CI 也全绿)
     monkeypatch.setattr(_os, "name", "posix" if native_name == "nt" else "nt")
-    patch_discovery()
-    monkeypatch.setattr(cl, "_AGV_Q", {"at": 0.0, "data": None})
-    r_b = cl.fetch_agv_quota()
-    assert r_b["ok"] and r_b["plan"] == "Antigravity Free"
-    # 3) 未运行: 进程扫描为空 → ok False 负缓存
+    patch_discovery(monkeypatch)
+    creds_b = cl.discover_agv_lsp_credentials()
+    assert creds_b[0] == 1234 and creds_b[2] == 51024
+    # 3) 未运行: 全空 → None
     monkeypatch.setattr(_os, "name", native_name)
-    patch_discovery(empty=True)
-    monkeypatch.setattr(cl, "_AGV_Q", {"at": 0.0, "data": None})
-    r2 = cl.agv_quota_cached(now=1000.0)
-    assert not r2["ok"] and "未发现" in r2["error"]
-    r3 = cl.agv_quota_cached(now=1030.0)  # TTL 内负缓存命中, 不重复扫描
-    assert r3 is r2
+    patch_discovery(monkeypatch, empty=True)
+    assert cl.discover_agv_lsp_credentials() is None
 
 
 def test_plan_token_cmd(env, monkeypatch, capsys):
@@ -1190,3 +1260,145 @@ def test_mcp_stats_no_headroom(env, monkeypatch):
     cl.cmd_ledger_sync(SimpleNamespace(vault=str(vault)))
     out2 = mcp_server.t_stats(vault)
     assert "本地多端直采" in out2 and "headroom" not in out2
+
+
+# ---------------------------------------------------------------- gen_metadata 精确记账 (2026-11-21 逆向)
+
+def varint_b(v):
+    out = b""
+    while True:
+        b7 = v & 0x7F
+        v >>= 7
+        out += bytes([b7 | (0x80 if v else 0)])
+        if not v:
+            return out
+
+
+def gen_meta_row(tin, tout, cr, model_name, model_id, step_idx):
+    """按真机逆向布局构造 gen_metadata.data:
+    \x12<len> usage 子消息 (f2=tin 零值省略 / f3=tout 锚 / f5=cr 零值省略)
+    + f7 'bot-<uuid>' (tag+len 恰为 ':​(bot-' 字节序列, 值 40 字节)
+    + f21 可读模型名 + f19 模型 id + f20 KV (last_step_index)。"""
+    usage = b""
+    if tin:
+        usage += b"\x10" + varint_b(tin)
+    usage += b"\x18" + varint_b(tout)
+    if cr:
+        usage += b"\x28" + varint_b(cr)
+    sub = b"\x08" + varint_b(1526) + usage + b"\x30" + varint_b(24)
+    bot_value = b"bot-" + b"baa83c47-57a9-4331-9c47-1022ba833c47"  # 恰 40 字节
+    kv = (b"\x0a" + varint_b(len(b"last_step_index")) + b"last_step_index"
+          + b"\x12" + varint_b(len(str(step_idx))) + str(step_idx).encode())
+    data = (b"\x12" + varint_b(len(sub)) + sub
+            + b"\x3a" + varint_b(len(bot_value)) + bot_value
+            + b"\xaa\x01" + varint_b(len(model_name)) + model_name.encode()
+            + b"\x9a\x01" + varint_b(len(model_id)) + model_id.encode()
+            + b"\xa2\x01" + varint_b(len(kv)) + kv)
+    return data
+
+
+def test_antigravity_gen_metadata_exact(env):
+    """gen_metadata 精确主路径: 拆分具体模型名 + 精确 tin/tout/cache_read
+    (is_estimated=0), 时间戳经 last_step_index 关联 steps; 无 gen_metadata 行的
+    老库仍走字节估算兜底 (is_estimated=1), 两条路径不重叠计费。"""
+    home, _ = env
+    d = home / ".gemini" / "antigravity" / "conversations"
+    d.mkdir(parents=True)
+    f = d / "convGM.db"
+    db = sqlite3.connect(f)
+    db.execute("CREATE TABLE steps(idx INTEGER PRIMARY KEY, step_type INTEGER, status INTEGER,"
+               " has_subtrajectory NUMERIC, metadata BLOB, error_details BLOB,"
+               " step_payload BLOB, step_format INTEGER)")
+    t_old = NOW - 9 * 3600
+    t_now = NOW - 600
+
+    def meta_pb(sec):
+        def vint(v):
+            v = int(v)
+            out = b""
+            while True:
+                b7 = v & 0x7F
+                v >>= 7
+                out += bytes([b7 | (0x80 if v else 0)])
+                if not v:
+                    return out
+        ts = b"\x08" + vint(sec) + b"\x10" + vint(500_000_000)
+        return b"\x0a" + bytes([len(ts)]) + ts
+
+    db.execute("INSERT INTO steps VALUES(1,14,2,0,?,?,?,0)", (meta_pb(t_old), None, b"a" * 400))
+    db.execute("INSERT INTO steps VALUES(2,15,2,0,?,?,?,0)", (meta_pb(t_now), None, b"b" * 800))
+    db.execute("CREATE TABLE gen_metadata(idx INTEGER PRIMARY KEY, data BLOB, size INTEGER)")
+    rows = [
+        (0, gen_meta_row(14013, 171, 0, "Gemini 4 Neon (Medium)", "gemini-4-neon", 1)),
+        (1, gen_meta_row(2445, 141, 11959, "Gemini 4 Argon (Medium)", "gemini-4-argon-trial", 2)),
+    ]
+    for gidx, gdata in rows:
+        db.execute("INSERT INTO gen_metadata VALUES(?,?,?)", (gidx, gdata, len(gdata)))
+    db.commit()
+    db.close()
+    events, marks = cl.collect_antigravity()
+    gm = [e for e in events if e["is_estimated"] == 0]  # 精确事件 (event_key 是 sha, 无字面标记)
+    assert len(gm) == 2  # 精确路径生效, 字节估算整体让位 (无 agv|convGM|1 估算事件)
+    assert all(e["is_estimated"] == 0 for e in gm)
+    bym = {e["model"]: e for e in gm}
+    neon = bym["Gemini 4 Neon (Medium)"]
+    assert neon["tokens_in"] == 14013 and neon["tokens_out"] == 171
+    assert neon["cache_read"] == 0  # proto3 零值省略 → f5 缺省 = 0
+    assert neon["event_key"] == cl._sha("agv|convGM|gm|0")
+    assert neon["occurred_at"] == t_old  # last_step_index=1 → step1 时间戳
+    argon = bym["Gemini 4 Argon (Medium)"]
+    assert argon["tokens_in"] == 2445 and argon["cache_read"] == 11959
+    assert argon["occurred_at"] == t_now
+    assert not any(e["event_key"] == cl._sha("agv|convGM|1") for e in events)
+    # 价目: 可读模型名 (lower 匹配) 命中 Gemini 4 档
+    vault = home.parent / "vault"
+    rule = cl.price_for(cl.load_pricing(vault), "Gemini 4 Neon (Medium)")[0]
+    assert rule["input"] == 1.25
+    assert cl.price_for(cl.load_pricing(vault), "gemini-4-argon-trial")[0]["input"] == 2.0
+    assert cl.price_for(cl.load_pricing(vault), "Gemini 4 Hydrogen (Medium)")[0] is not None
+
+
+def test_agv_gen_metadata_migration(env, monkeypatch, capsys):
+    """一次性迁移 agv_gen_metadata_v1: 清旧估算事件 + 水位 → 重采为精确事件;
+    旗标幂等 (二跑不再迁移), sync 全程无重复计费。"""
+    home, vault = env
+    d = home / ".gemini" / "antigravity" / "conversations"
+    d.mkdir(parents=True)
+    f = d / "convM.db"
+    db = sqlite3.connect(f)
+    db.execute("CREATE TABLE steps(idx INTEGER PRIMARY KEY, step_payload BLOB, metadata BLOB)")
+    db.execute("INSERT INTO steps VALUES(1,?,?)", (b"x" * 400, None))
+    db.execute("CREATE TABLE gen_metadata(idx INTEGER PRIMARY KEY, data BLOB, size INTEGER)")
+    db.execute("INSERT INTO gen_metadata VALUES(?,?,?)",
+               (0, gen_meta_row(900, 60, 8000, "Gemini 4 Neon (High)", "gemini-4-neon", 1),
+                100))
+    db.commit()
+    db.close()
+    # 预置旧估算事件 + 旧水位 (升级前残留)
+    conn = cv.db(vault)
+    cl.ensure_schema(conn)
+    conn.execute("INSERT OR IGNORE INTO usage_events(event_key,source,client,model,project,"
+                 "session_ref,occurred_at,tokens_in,tokens_out,reasoning_tokens,cache_read,"
+                 "cache_write,cost_est_usd,is_estimated,price_known,raw) VALUES("
+                 "'old-est-1','antigravity','antigravity','antigravity (估算)',NULL,'convM',?,100,"
+                 "0,0,0,0,NULL,1,0,'{}')", (NOW - 3600,))
+    cl._wm_update(conn, "antigravity", f, (1.0, 2, 0.0, 0))
+    conn.commit()
+    conn.close()
+    cl.cmd_ledger_sync(SimpleNamespace(vault=str(vault)))
+    out = capsys.readouterr().out
+    assert "gen_metadata 官方精确 token" in out
+    conn = cv.db(vault)
+    rows = conn.execute("SELECT event_key, model, is_estimated, tokens_in, cache_read"
+                        " FROM usage_events WHERE source='antigravity'").fetchall()
+    conn.close()
+    assert len(rows) == 1  # 旧估算行已被迁移清除, 只剩精确行
+    r = rows[0]
+    assert r["model"] == "Gemini 4 Neon (High)" and r["is_estimated"] == 0
+    assert r["tokens_in"] == 900 and r["cache_read"] == 8000
+    cl.cmd_ledger_sync(SimpleNamespace(vault=str(vault)))
+    capsys.readouterr()
+    conn = cv.db(vault)
+    n = conn.execute("SELECT COUNT(*) FROM usage_events WHERE source='antigravity'").fetchone()[0]
+    conn.close()
+    assert n == 1  # 二跑幂等 (旗标已置, 水位不再变更)

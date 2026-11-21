@@ -402,7 +402,8 @@ function renderQuota(u,ledger){
       '<div class="audit-grid">'+(rq.limits||[]).map(l=>{
         const pct=l.pct_used||0;
         const cls=pct>=90?"q-hot":pct>=70?"q-warn":"";
-        return aCell(LT[l.type]||esc(l.type),
+        const lTitle=l.desc?('<span title="'+esc(l.desc)+'">'+(LT[l.type]||esc(l.type))+"</span>"):(LT[l.type]||esc(l.type));
+        return aCell(lTitle,
           '<span class="q-big '+cls+'">'+pct.toFixed(1)+'%</span><span class="hint"> 已用</span>'+
           '<span class="winbar'+(cls?" "+cls:"")+'" style="display:block;width:100%;margin:7px 0 4px"><i style="width:'+Math.min(100,pct)+'%"></i></span>'+
           (l.reset_at?'<div class="quota-eta">重置 '+etaRel(l.reset_at)+"</div>":""));
@@ -410,7 +411,10 @@ function renderQuota(u,ledger){
   h+=quotaRemoteBlock(u.remote_quota,"套餐余额 (智谱实时)","实时",
     "CV_PLAN_TOKEN / vault/plan_token.json 配置后由智谱额度接口返回, 服务端 60s 缓存; Token 不出本机");
   h+=quotaRemoteBlock(u.remote_quota_agv,"Antigravity 额度 (本机 IDE)","LSP 实时",
-    "调用本机 Antigravity language_server 的实时额度 RPC; IDE 登录态即凭据, 零配置");
+    "经 LSP 官方发现文件 (daemon/hub_*.json) 直连本机 language_server 实时额度; IDE 登录态即凭据, 零配置");
+  if((u.sources||{}).antigravity>0&&!(u.remote_quota_agv&&u.remote_quota_agv.ok)){
+    h+='<div class="hint" style="margin:6px 0 2px"><b>Antigravity 额度 (本机 IDE)</b> — 暂不可用 ('+
+      esc((u.remote_quota_agv||{}).error||"未发现")+') · IDE 未运行或未登录时仅显示下方本地估算消耗</div>'}
   // 5h 滚动窗口 (固定 5h 语义, 不随上方分析窗口切换): 进度条真实填充 + 冷却倒计时常显
   const accs=(u.fiveh&&u.fiveh.accounts)||[];
   const hasLimits=accs.some(a=>a.mode==="limit");
@@ -440,10 +444,14 @@ function renderQuota(u,ledger){
       '<span class="mono">'+pctS+"</span>"+
       '<span class="hint">'+usageS+"</span></div>";
     if(a.eta&&(isLim?a.eta["50%"]!=null||a.eta["80%"]!=null||a.eta["100%"]!=null:true)){
-      line+='<div class="quota-eta" style="padding:0 0 6px 130px">'+
+      line+='<div class="quota-eta" style="padding:0 0 3px 130px">'+
         (isLim?"恢复至 50%: ":"窗口回落 50%: ")+etaRel(a.eta["50%"])+
         " · 80%: "+etaRel(a.eta["80%"])+
         (isLim?" · 100%: ":" · 完全冷却: ")+etaRel(a.eta["100%"])+"</div>"}
+    if(a.models&&a.models.length){
+      line+='<div class="quota-eta" style="padding:0 0 6px 130px">模型拆分: '+
+        a.models.map(m=>esc(m.name)+" "+Math.round((m.share||0)*100)+"% ("+bn(m.used)+")").join(" · ")+
+        "</div>"}
     return line}).join("")
     :'<div class="hint" style="padding:2px 0">近 5 小时无消耗</div>';
   const rw=u.runway||[];

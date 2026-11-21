@@ -40,12 +40,14 @@ usage_events 属不同 SQLite 命名空间, 互不影响 — 既有代码均以�
 from __future__ import annotations
 
 import datetime as dt
+import bisect
 import fnmatch
 import hashlib
 import json
 import os
 import re
 import sqlite3
+import ssl
 import subprocess
 import time
 from pathlib import Path
@@ -133,30 +135,48 @@ def local_day(epoch):
 # 内置公开列表价近似口径 (2026-11 整理, $/Mtok; cache_read 取各家公开折扣档)。
 # 订阅制型号 (glm-5*/gpt-5.6*/gpt-6* 等) 按「公开 API 挂牌价等效折算」收录参考近似价 —
 # UI 标注估算非账单; 精确价以 vault/pricing.json 覆盖 (逐条生效, 不需改代码)。
-PRICING_REV = 2  # 内置表修订号: 纳入配置指纹 (_cfg_fingerprint), 表变更即自动重算存量事件
+PRICING_REV = 4  # 内置表修订号: 纳入配置指纹 (_cfg_fingerprint), 表变更即自动重算存量事件
 DEFAULT_PRICING = {
-    # Anthropic (cache 读 0.1x 输入, 写 1.25x 输入)
+    # Anthropic (cache 读 0.1x 输入, 写 1.25x 输入; 含空格可读名与连字符 id)
     "claude-opus-4*":     {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75},
     "claude-opus-3*":     {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75},
+    "claude opus*":       {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75},
     "claude-sonnet-4*":   {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
     "claude-3-7-sonnet*": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
     "claude-3-5-sonnet*": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+    "claude sonnet*":     {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
     "claude-haiku-4*":    {"input": 0.80, "output": 4.0, "cache_read": 0.08, "cache_write": 1.0},
     "claude-3-5-haiku*":  {"input": 0.80, "output": 4.0, "cache_read": 0.08, "cache_write": 1.0},
+    "claude haiku*":      {"input": 0.80, "output": 4.0, "cache_read": 0.08, "cache_write": 1.0},
     # OpenAI (cached input 折扣档)
     "gpt-5-mini*": {"input": 0.25, "output": 2.0, "cache_read": 0.025},
     "gpt-5-nano*": {"input": 0.05, "output": 0.40, "cache_read": 0.005},
     "gpt-5.6*":    {"input": 2.50, "output": 16.0, "cache_read": 0.31},
     "gpt-5*":      {"input": 1.25, "output": 10.0, "cache_read": 0.125},
     "gpt-6*":      {"input": 4.00, "output": 20.0, "cache_read": 0.50},
+    "gpt-oss*":    {"input": 0.50, "output": 2.0, "cache_read": 0.10},
     "o3*":         {"input": 2.0, "output": 8.0, "cache_read": 0.50},
     "o4-mini*":    {"input": 1.10, "output": 4.40, "cache_read": 0.275},
     "gpt-4.1*":    {"input": 2.0, "output": 8.0, "cache_read": 0.50},
     "gpt-4o*":     {"input": 2.5, "output": 10.0, "cache_read": 1.25},
-    # Google Gemini
-    "gemini-3-pro*":     {"input": 2.0, "output": 12.0, "cache_read": 0.50},
-    "gemini-3-flash*":   {"input": 0.50, "output": 3.0, "cache_read": 0.125},
-    "gemini-3*":         {"input": 2.0, "output": 12.0, "cache_read": 0.50},
+    # Google Gemini & Antigravity 模型池
+    "gemini 4 hydrogen*": {"input": 2.00, "output": 12.0, "cache_read": 0.50},
+    "gemini-4-hydrogen*": {"input": 2.00, "output": 12.0, "cache_read": 0.50},
+    "gemini 4 argon*":    {"input": 2.00, "output": 12.0, "cache_read": 0.50},
+    "gemini-4-argon*":    {"input": 2.00, "output": 12.0, "cache_read": 0.50},
+    "gemini 4 carbon*":   {"input": 1.25, "output": 10.0, "cache_read": 0.31},
+    "gemini-4-carbon*":   {"input": 1.25, "output": 10.0, "cache_read": 0.31},
+    "gemini 4 neon*":     {"input": 1.25, "output": 10.0, "cache_read": 0.31},
+    "gemini-4-neon*":     {"input": 1.25, "output": 10.0, "cache_read": 0.31},
+    "gemini 4*":          {"input": 1.25, "output": 10.0, "cache_read": 0.31},
+    "gemini-4*":          {"input": 1.25, "output": 10.0, "cache_read": 0.31},
+    "orchestrator*":      {"input": 1.25, "output": 10.0, "cache_read": 0.31},
+    "gemini 3.8 flash*":  {"input": 0.50, "output": 3.0, "cache_read": 0.125},
+    "gemini-3.8-flash*":  {"input": 0.50, "output": 3.0, "cache_read": 0.125},
+    "gemini-3-pro*":      {"input": 2.0, "output": 12.0, "cache_read": 0.50},
+    "gemini-3-flash*":    {"input": 0.50, "output": 3.0, "cache_read": 0.125},
+    "gemini 3*flash*":    {"input": 0.50, "output": 3.0, "cache_read": 0.125},
+    "gemini-3*":          {"input": 2.0, "output": 12.0, "cache_read": 0.50},
     "gemini-2.5-pro*":   {"input": 1.25, "output": 10.0, "cache_read": 0.31},
     "gemini-2.5-flash*": {"input": 0.30, "output": 2.50, "cache_read": 0.075},
     # Zhipu GLM (订阅制, 公开 API 挂牌价等效折算; flash 档按 ~1/5 输入近似)
@@ -414,6 +434,9 @@ def cmd_ledger_limit(args):
 
 AGV_LSP_RPC = "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
 AGV_LSP_STATUS = "/exa.language_server_pb.LanguageServerService/GetUserStatus"
+# GetUserStatus 标准请求体 (真机实测需要 metadata 才 200)
+AGV_STATUS_BODY = {"metadata": {"ideName": "antigravity", "extensionName": "antigravity",
+                                "locale": "en"}}
 
 
 def _powershell_out(script: str, timeout: float = 8.0) -> str:
@@ -458,36 +481,60 @@ def _lsof_out(pid: int) -> str:
 
 
 def discover_agv_lsp_credentials():
-    """发现本机 Antigravity language_server → (pid, csrf_token, port) 或 None。
-    Windows: Get-CimInstance 查命令行 (--csrf_token) + netstat LISTENING 探端口;
-    POSIX: ps -E + lsof (上游同款)。--standalone 进程优先。"""
-    cands = []  # (pid, csrf, standalone)
+    """发现本机 Antigravity language_server → (pid, csrf, port, scheme) 或 None。
+    路线 1 (官方, IDE ≥2.29 实测): LSP 自写发现文件 ~/.gemini/antigravity/daemon/
+        hub_<httpPort>.json {pid, httpsPort, httpPort, lsVersion, csrfToken} —
+        2.34 起 token 走 stdin 不再上命令行, 该文件是唯一免凭据落盘点;
+        mtime 新→旧, GetUserStatus 探活定夺 (残留死文件自然被拒)。
+    路线 2 (旧版 IDE): 命令行 --csrf_token (放宽字符集) + WMI Name 过滤 (空则回退命令行
+        匹配, 免全表扫) + netstat/lsof/命令行端口 (--extension_server_port/--port 补充)。"""
+    for c in agv_hub_candidates()[:8]:
+        if c["pid"] and not _pid_alive(c["pid"]):
+            continue
+        port = c["http_port"] or c["https_port"]
+        if not port:
+            continue
+        data, used = _agv_call(port, c["csrf"], AGV_LSP_STATUS, body=AGV_STATUS_BODY,
+                               timeout=1.5)
+        if isinstance(data, dict):
+            return c["pid"], c["csrf"], port, used or ("http" if c["http_port"] else "https")
+    cands = []  # (pid, csrf, standalone, cmd_ports)
     if os.name == "nt":
         out = _powershell_out(
-            "Get-CimInstance Win32_Process | Where-Object {$_.CommandLine -match 'language_server'}"
+            "Get-CimInstance Win32_Process -Filter \"Name LIKE '%language_server%'\""
             " | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
+        if not out.strip():  # Name 过滤没中 (个别版本进程名不同) → 回退命令行匹配 (慢)
+            out = _powershell_out(
+                "Get-CimInstance Win32_Process | Where-Object {$_.CommandLine -match"
+                " 'language_server'} | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
         for line in out.splitlines():
             m = re.match(r"^\s*(\d+)\t(.+)$", line)
             if not m:
                 continue
-            mc = re.search(r"--csrf_token[= ]([0-9a-fA-F-]{8,})", m.group(2))
+            mc = re.search(r"--csrf_token[= ][\"']?([A-Za-z0-9._-]{8,})", m.group(2))
+            arg_ports = [int(x) for x in re.findall(
+                r"--(?:https_server_port|extension_server_port|port)[= ](\d{3,5})",
+                m.group(2)) if int(x) > 0]
             if mc:
                 cands.append((int(m.group(1)), mc.group(1),
-                              "--standalone" in m.group(2)))
+                              "--standalone" in m.group(2), arg_ports))
     else:
         for line in _ps_env_out().splitlines():
             if "language_server" not in line or "--csrf_token" not in line:
                 continue
-            mc = re.search(r"--csrf_token[= ]([0-9a-fA-F-]{8,})", line)
+            mc = re.search(r"--csrf_token[= ][\"']?([A-Za-z0-9._-]{8,})", line)
             mp = re.match(r"^\s*(\d+)", line)
+            arg_ports = [int(x) for x in re.findall(
+                r"--(?:https_server_port|extension_server_port|port)[= ](\d{3,5})",
+                line) if int(x) > 0]
             if mc and mp:
                 cands.append((int(mp.group(1)), mc.group(1),
-                              "--standalone" in line))
+                              "--standalone" in line, arg_ports))
     if not cands:
         return None
     cands.sort(key=lambda c: not c[2])  # standalone 优先
 
-    def _ports(pid):
+    def _ports(pid, arg_ports):
         ports = []
         if os.name == "nt":
             for line in _netstat_out().splitlines():
@@ -502,67 +549,229 @@ def discover_agv_lsp_credentials():
                 m = re.search(r":(\d+)\s+\(LISTEN\)", line)
                 if m:
                     ports.append(int(m.group(1)))
+        ports += [p for p in arg_ports if p not in ports]  # 命令行端口补充
         return ports[:12]
 
-    for pid, csrf, _std in cands:
-        for port in _ports(pid):
-            try:
-                probe = _agv_rpc(port, csrf, AGV_LSP_RPC, timeout=1.2)
-            except Exception:
-                continue
-            if isinstance(probe, dict):
-                return pid, csrf, port
+    for pid, csrf, _std, arg_ports in cands:
+        for port in _ports(pid, arg_ports):
+            data, used = _agv_call(port, csrf, AGV_LSP_STATUS, body=AGV_STATUS_BODY,
+                                   timeout=1.2)
+            if isinstance(data, dict):
+                return pid, csrf, port, used
     return None
 
 
-def _agv_rpc(port: int, csrf: str, method: str, timeout: float = 2.0):
-    """本机 language_server Connect-RPC (JSON 帧): POST {} + X-Codeium-Csrf-Token。"""
-    url = f"http://127.0.0.1:{port}{method}"
-    req = Request(url, data=b"{}", headers={
-        "Content-Type": "application/json", "X-Codeium-Csrf-Token": csrf})
-    with urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+_SSL_UNVERIFIED = None
 
 
-def fetch_agv_quota(timeout: float = 2.0, creds=None) -> dict:
-    """Antigravity 实时额度 (尽力而为, 永不抛异常): 5h/weekly × gemini/claude-gpt 双轨。"""
-    creds = creds or discover_agv_lsp_credentials()
-    if not creds:
-        return {"ok": False, "error": "Antigravity language_server 未发现 (IDE 未运行?)"}
-    _pid, csrf, port = creds
+def _ssl_unverified():
+    """https 自签证书上下文 (language_server 本地端口实测为自签 https + 明文 http 双栈)。"""
+    global _SSL_UNVERIFIED
+    if _SSL_UNVERIFIED is None:
+        _SSL_UNVERIFIED = ssl._create_unverified_context()
+    return _SSL_UNVERIFIED
+
+
+def _agv_call(port: int, csrf: str, method: str, body=None, timeout: float = 2.0,
+              scheme: str = None):
+    """单次本机 Connect-RPC (JSON 帧): POST body + X-Codeium-Csrf-Token。
+    scheme=None → https (自签免校验) 与明文 http 双栈自动回退。返回 (data|None, scheme|None), 不抛。"""
+    if scheme not in ("https", "http"):
+        schemes = ("https", "http")
+    else:
+        schemes = (scheme,)
+    payload = json.dumps(body).encode("utf-8") if body is not None else b"{}"
+    for sch in schemes:
+        req = Request(f"{sch}://127.0.0.1:{port}{method}", data=payload, headers={
+            "Content-Type": "application/json", "X-Codeium-Csrf-Token": csrf})
+        try:
+            ctx = _ssl_unverified() if sch == "https" else None
+            with urlopen(req, timeout=timeout, context=ctx) as resp:
+                return json.loads(resp.read().decode("utf-8")), sch
+        except Exception:
+            continue
+    return None, None
+
+
+def _agv_rpc(port: int, csrf: str, method: str, body=None, timeout: float = 2.0,
+             scheme: str = None):
+    """兼容入口: 返回 dict, 失败抛 OSError (fetch 路径已带探活 scheme)。"""
+    data, _ = _agv_call(port, csrf, method, body, timeout, scheme)
+    if data is None:
+        raise OSError(f"AGV RPC 不可达: {method} (https/http 均失败)")
+    return data
+
+
+def agv_hub_candidates():
+    """LSP 自写发现文件 (~/.gemini/antigravity/daemon/hub_<httpPort>.json,
+    形状 {pid, httpsPort, httpPort, lsVersion, csrfToken}) → 候选列表 (mtime 新→旧)。
+    历史实例文件自然残留, 由调用方探活/试连定夺。"""
+    root = cv.HOME / ".gemini" / "antigravity" / "daemon"
+    if not root.is_dir():
+        return []
+    files = list(root.glob("hub_*.json"))
+    files.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+    out = []
+    for f in files[:20]:
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            continue
+        if not isinstance(d, dict) or not d.get("csrfToken"):
+            continue
+        out.append({"pid": int(_num(d.get("pid"), 0)),
+                    "csrf": str(d["csrfToken"]),
+                    "http_port": int(_num(d.get("httpPort"), 0) or 0),
+                    "https_port": int(_num(d.get("httpsPort"), 0) or 0),
+                    "version": str(d.get("lsVersion") or "")})
+    return out
+
+
+def _pid_alive(pid: int) -> bool:
+    if not pid:
+        return False
+    if os.name == "nt":
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        h = k32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        k32.CloseHandle(h)
+        return True
     try:
-        data = _agv_rpc(port, csrf, AGV_LSP_RPC, timeout)
-    except Exception as e:
-        return {"ok": False, "error": f"额度 RPC 失败: {e}"}
-    if not isinstance(data, dict):
-        return {"ok": False, "error": "额度 RPC 响应形状不符"}
-    groups = ((data.get("response") or {}).get("groups")) or []
-    limits = []
-    for g in groups:
+        os.kill(int(pid), 0)
+        return True
+    except OSError:
+        return False
+
+
+def _agv_field(d, key):
+    """Connect-RPC 响应解包: 顶层字段优先, 兼容 response/userQuotaSummary/userStatus 包装
+    (真机实测: GetUserStatus 顶层即 {userStatus}, QuotaSummary 顶层 {response:{groups}})。"""
+    if not isinstance(d, dict):
+        return None
+    for w in (d, d.get("response"), d.get("userQuotaSummary"), d.get("userStatus")):
+        if isinstance(w, dict) and w.get(key) is not None:
+            return w.get(key)
+    return None
+
+
+def _agv_pool(label):
+    """模型/分组名 → 共享配额池名 (claude/gpt 系模型共享池; 其余按原名分组)。"""
+    s = str(label or "")
+    if any(k in s.lower() for k in ("claude", "gpt", "3p", "o3", "o4")):
+        return "claude/gpt"
+    return s or "gemini"
+
+
+def _agv_track(label):
+    """路径 B 分组轨道 (官方聚合视图): claude/gpt 系 vs 其余归 gemini (保持旧口径)。"""
+    return "claude/gpt" if any(k in str(label or "").lower()
+                               for k in ("claude", "gpt", "3p")) else "gemini"
+
+
+def _parse_model_configs(configs, now: float):
+    """路径 A: GetUserStatus → userStatus.cascadeModelConfigData.clientModelConfigs[].quotaInfo
+    (真机形状: label='Gemini 4 Neon (High)', quotaInfo{remainingFraction, resetTime})。
+    同 (池, remainingFraction, resetTime) = 共享配额池 → 去重一行; 档位后缀 (High/Medium)
+    剥离。resetTime 距今 >24h 视为 weekly 周期。"""
+    limits, seen = [], set()
+    for c in configs or []:
+        if not isinstance(c, dict):
+            continue
+        qi = c.get("quotaInfo")
+        if not isinstance(qi, dict) or "remainingFraction" not in qi:
+            continue  # 无 quotaInfo 字段的模型不参与额度
+        rem = float(_num(qi.get("remainingFraction"), 0.0))
+        label = str(c.get("label") or (c.get("modelOrAlias") or {}).get("model") or "")
+        pool = re.sub(r"\s*\([^)]*\)\s*$", "", label).strip() or label
+        reset = qi.get("resetTime") or None
+        ep = ts_to_epoch(reset)
+        window = "weekly" if (ep and ep - now > 24 * 3600) else "5h"
+        key = (_agv_pool(pool), round(rem, 4), str(reset))
+        if key in seen:
+            continue
+        seen.add(key)
+        limits.append({"type": f"{key[0]} {window}",
+                       "pct_used": round(max(0.0, (1.0 - rem) * 100.0), 1),
+                       "reset_at": reset})
+    limits.sort(key=lambda x: -x["pct_used"])  # 用得最多的池排前
+    return limits
+
+
+def _parse_quota_groups(groups):
+    """路径 B: RetrieveUserQuotaSummary → groups[].buckets[] (官方聚合视图)。
+    proto3 零值省略语义: remainingFraction 键缺省 = 0.0 剩余 (全用光)。"""
+    limits, seen_types = [], set()
+    for g in groups or []:
         if not isinstance(g, dict):
             continue
-        dname = str(g.get("displayName") or "").lower()
-        track = "claude/gpt" if any(k in dname for k in ("claude", "gpt", "3p")) else "gemini"
+        dname = str(g.get("displayName") or "").strip()
+        desc = str(g.get("description") or "").strip() or None
+        track = _agv_track(dname)
         for b in (g.get("buckets") or []):
             if not isinstance(b, dict):
                 continue
             rem = float(_num(b.get("remainingFraction"), 0.0))
             b_id = str(b.get("bucketId") or "").lower()
             window = str(b.get("window") or ("weekly" if "weekly" in b_id else "5h"))
-            limits.append({"type": f"{track} {window}",
-                           "pct_used": round(max(0.0, 100.0 - rem * 100.0), 2),
-                           "reset_at": b.get("resetTime") or None})
-    plan = "Antigravity"
-    try:  # 档位名 (可选, 失败不影响额度)
-        st = _agv_rpc(port, csrf, AGV_LSP_STATUS, min(timeout, 1.5))
-        us = (st or {}).get("userStatus") or ((st or {}).get("response") or {}).get("userStatus") or {}
-        tier = (us.get("userTier") or {}) if isinstance(us.get("userTier"), dict) else {}
+            tname = f"{track} {window}"
+            if tname in seen_types and dname:
+                tname = f"{dname.lower()} {window}"
+            seen_types.add(tname)
+            item = {"type": tname,
+                    "pct_used": round(max(0.0, 100.0 - rem * 100.0), 2),
+                    "reset_at": b.get("resetTime") or None}
+            if desc:
+                item["desc"] = desc
+            limits.append(item)
+    return limits
+
+
+def fetch_agv_quota(timeout: float = 2.0, creds=None) -> dict:
+    """Antigravity 实时额度 (尽力而为, 永不抛异常)。
+    解析双路径: 先 GetUserStatus 的 clientModelConfigs[].quotaInfo (同调用顺带取
+    userTier.name 作 plan, 按模型池细分); 无结果再取 RetrieveUserQuotaSummary 的
+    官方 groups/buckets 聚合。失败返回 ok:false + 具体原因 (CLI/前端据实显示, 不静默)。"""
+    creds = creds or discover_agv_lsp_credentials()
+    if not creds:
+        return {"ok": False, "error": "Antigravity language_server 未发现 (IDE 未运行?)"}
+    creds = tuple(creds)
+    creds += (None,) * (4 - len(creds))
+    _pid, csrf, port, scheme = creds
+    limits, plan, errs = [], "Antigravity", []
+    try:  # 路径 B 优先: 专用额度端点的官方聚合 buckets (gemini / claude-gpt × 5h/weekly)
+        q = _agv_rpc(port, csrf, AGV_LSP_RPC, timeout=timeout, scheme=scheme)
+        limits = _parse_quota_groups(_agv_field(q, "groups"))
+    except Exception as e:
+        errs.append(f"QuotaSummary: {e}")
+    try:  # GetUserStatus: 档位名 + 独立扣减的具体模型子池合并 (路径 A 无 B 时全量兜底)
+        st = _agv_rpc(port, csrf, AGV_LSP_STATUS, body=AGV_STATUS_BODY, timeout=timeout,
+                      scheme=scheme)
+        us = _agv_field(st, "userStatus") or {}
+        tier = us.get("userTier") if isinstance(us.get("userTier"), dict) else {}
         if tier.get("name"):
             plan = f"Antigravity {tier['name']}"
-    except Exception:
-        pass
+        ccd = _agv_field(us, "cascadeModelConfigData") or {}
+        per_model = _parse_model_configs(
+            (ccd.get("clientModelConfigs") or []) if isinstance(ccd, dict) else [],
+            time.time())
+        if not limits:
+            limits = per_model
+        else:
+            existing_types = {l["type"].lower() for l in limits}
+            existing_vals = {(round(float(l.get("pct_used") or 0), 1), l.get("reset_at"))
+                             for l in limits}
+            for pm in per_model:
+                if pm["pct_used"] > 0 and pm["type"].lower() not in existing_types \
+                        and (round(float(pm["pct_used"]), 1), pm.get("reset_at")) not in existing_vals:
+                    limits.append(pm)
+    except Exception as e:
+        errs.append(f"GetUserStatus: {e}")
+    err = "; ".join(errs)
     if not limits:
-        return {"ok": False, "error": "额度 RPC 无 buckets (未登录或接口变更?)"}
+        return {"ok": False,
+                "error": f"额度 RPC 无 quota (未登录或接口变更?)" + (f" [{err}]" if err else "")}
     return {"ok": True, "plan": plan, "limits": limits, "source": "antigravity-lsp",
             "fetched_at": epoch_to_iso(time.time())}
 
@@ -981,6 +1190,104 @@ def _meta_step_ts(meta):
     return None
 
 
+def _pb_kv_map(val: bytes) -> dict:
+    """protobuf map<string,string> 字节 → dict (map entry: f1=key, f2=value)。"""
+    kv = {}
+    key = None
+    i = 0
+    while i < len(val):
+        tag, j = _pb_varint(val, i)
+        fno, wt = tag >> 3, tag & 7
+        if wt == 2:
+            ln, k = _pb_varint(val, j)
+            v = val[k:k + ln]
+            i = k + ln
+            if fno == 1:
+                key = v.decode("utf-8", errors="replace")
+            elif fno == 2 and key:
+                kv[key] = v.decode("utf-8", errors="replace")
+                key = None
+        elif wt == 0:
+            _, i = _pb_varint(val, j)
+        else:
+            break
+    return kv
+
+
+def _parse_gen_metadata_row(data):
+    """gen_metadata.data protobuf → (tokens_in, tokens_out, cache_read, model, step_idx)
+    或 None。官方精确 token 记账 (2026-11 真机 61 原生库 5,218 行校准, 覆盖 99.3%):
+    行内可有多个 field7 ':​(bot-…' 字符串 (首个是 bot-id, 无 usage) — 逐个出现位置尝试:
+    rfind b"\\x12" 后从其 len 字节之后 walk 至锚点 (全 varint, 干净走完才采信),
+    f2=未缓存输入 / f3=输出 / f5=缓存读 (proto3 零值省略: f2/f5 键缺省即 0, 以 f3 锚定);
+    尾部 f21=可读模型名 (如 'Gemini 4 Neon (Medium)'), f19=模型 id 兜底
+    (如 'gemini-4-neon'), f20=KV 映射 (last_step_index 关联 steps 时间戳)。"""
+    if not data:
+        return None
+    usage = None
+    anchor = None
+    pos = data.find(b":(bot-")
+    while pos >= 0:
+        chunk = data[max(0, pos - 40):pos]
+        st = chunk.rfind(b"\x12")
+        if st >= 0:
+            buf = chunk[st + 2:]
+            i = 0
+            fields = {}
+            good = True
+            while i < len(buf):
+                tag, j = _pb_varint(buf, i)
+                if tag & 7 != 0:
+                    good = False
+                    break
+                v, i = _pb_varint(buf, j)
+                fields[tag >> 3] = v
+            if good and 3 in fields:  # tokens_out 锚定 (f2/f5 允许零值省略)
+                usage = (int(fields.get(2, 0)), int(fields[3]), int(fields.get(5, 0)))
+                anchor = pos
+                break
+        pos = data.find(b":(bot-", pos + 1)
+    if usage is None:
+        return None
+    model = mid = None
+    step_idx = None
+    i = anchor
+    n = len(data)
+    while i < n:
+        tag, j = _pb_varint(data, i)
+        fno, wt = tag >> 3, tag & 7
+        if wt == 2:
+            ln, k = _pb_varint(data, j)
+            val = data[k:k + ln]
+            i = k + ln
+            if fno == 21 and model is None:
+                try:
+                    model = val.decode("utf-8")
+                except UnicodeDecodeError:
+                    pass
+            elif fno == 19 and mid is None:
+                mid = val.decode("utf-8", errors="replace")
+            elif fno == 20 and step_idx is None:
+                kv = _pb_kv_map(val)
+                try:
+                    step_idx = int(kv["last_step_index"])
+                except (KeyError, ValueError):
+                    pass
+        elif wt == 0:
+            _, i = _pb_varint(data, j)
+        elif wt == 5:
+            i = j + 4
+        elif wt == 1:
+            i = j + 8
+        else:
+            break
+    if not model:
+        model = mid
+    if not model:
+        return None
+    return usage[0], usage[1], usage[2], model, step_idx
+
+
 def agv_workspaces():
     """Antigravity 摘要索引 (conversation_summaries.db, 只读) → {conv_id: 工作区路径}。
     项目归因主源; 失败/缺库返回 {} (诚实留空, 绝不编造)。"""
@@ -1017,10 +1324,11 @@ def agv_workspaces():
 
 def collect_antigravity(base_dir=None, skip_fn=None, agv_state=None):
     """~/.gemini/antigravity/conversations/<uuid>.db (SQLite, 内容为 protobuf blob)。
-    无精确 token — 按 steps 内容列字节体积估算 (÷4), 一律 is_estimated=1。
-    时间戳优先级 (修复「老会话全量灌入近 5h」失真):
-      1) steps.metadata protobuf 步级秒级时间戳 (原生与导出产物同构) — 每步一事件,
-         各步落自己的真实时刻, 历史体积不再按 db mtime 集中进当前窗口;
+    记账主路径 (2026-11 真机逆向): gen_metadata.data 官方精确 token
+    (tokens_in/tokens_out/cache_read + 可读模型名 + last_step_index 关联 steps 时间戳),
+    is_estimated=0 — 字节估算在此类库上整体让位 (否则双重计费)。
+    回退路径 (gen_metadata 缺失/零有效行, 如 smigrate 导出库):
+      1) steps.metadata 步级时间戳 → 每步字节估算事件 (is_estimated=1);
       2) 无任何步级时间戳的老库 → 差量记账: 存量基准事件 agv|<conv>|base 锚在最早已知
          时间 (agv_state 提供快照/基准锚点, 兜底文件创建时间), 体积增长只对滚动增量事件
          agv|<conv>|delta 按 mtime 记账, 存量不再重复入窗口。
@@ -1056,12 +1364,18 @@ def collect_antigravity(base_dir=None, skip_fn=None, agv_state=None):
                 if ts_col:
                     sel += f", {ts_col}"
                 step_rows = adb.execute(sel + " FROM steps ORDER BY idx").fetchall()
+                gen_rows = []
+                try:  # gen_metadata 精确记账主路径 (官方逐调用 token)
+                    gen_rows = adb.execute("SELECT idx, data FROM gen_metadata").fetchall()
+                except sqlite3.Error:
+                    gen_rows = []
             finally:
                 adb.close()
         except sqlite3.Error:
             continue  # 活跃库锁/损坏: 跳过, 水位未推下轮重试
         blob_total = 0
         step_evs = []  # (idx, epoch, bytes) 有步级时间戳的步骤
+        step_ts = {}   # {int(idx): epoch} — gen_metadata 事件时间关联用
         leftover = 0
         for row in step_rows:
             idx, meta, blob_n = row[0], row[1], int(row[2] or 0)
@@ -1071,8 +1385,38 @@ def collect_antigravity(base_dir=None, skip_fn=None, agv_state=None):
             ts = _meta_step_ts(meta) or ts_to_epoch(ts_col_v)
             if ts:
                 step_evs.append((idx, ts, blob_n))
+                step_ts[int(idx) if str(idx).lstrip("-").isdigit() else -1] = ts
             else:
                 leftover += blob_n
+        gen_events = []
+        if gen_rows:
+            ts_keys = sorted(step_ts)
+            for gidx, gdata in gen_rows:
+                parsed = _parse_gen_metadata_row(bytes(gdata) if gdata else None)
+                if not parsed:
+                    continue  # 个别行解析不出 (0.7% 长尾) — 诚实跳过该行
+                tin, tout, cr, model, sidx = parsed
+                ep = sig[0]
+                if sidx is not None and ts_keys:
+                    k = bisect.bisect_right(ts_keys, sidx)
+                    if k:  # 该步无时间戳时取 <= last_step_index 的最近一步
+                        ep = step_ts[ts_keys[k - 1]]
+                gen_events.append({
+                    "event_key": _sha(f"agv|{conv_id}|gm|{gidx}"),
+                    "source": "antigravity", "client": "antigravity",
+                    "model": model, "project": project,
+                    "session_ref": conv_id, "occurred_at": ep,
+                    "tokens_in": max(0, tin), "tokens_out": max(0, tout),
+                    "reasoning_tokens": 0, "cache_read": max(0, cr), "cache_write": 0,
+                    "is_estimated": 0,
+                    "raw": json.dumps({"gen_meta_idx": str(gidx),
+                                       "step_idx": str(sidx) if sidx is not None else None,
+                                       "estimate_basis": "gen_metadata_exact"},
+                                      ensure_ascii=False)})
+        if gen_events:
+            events.extend(gen_events)  # 精确记账: 字节估算整体让位 (否则双重计费)
+            marks.append((f, sig))
+            continue
         if step_evs:
             for idx, ep, blob_n in step_evs:
                 events.append({
@@ -1262,8 +1606,13 @@ def _maybe_recompute(conn, vault: Path, pricing: dict, accounts: dict, force: bo
         row = conn.execute("SELECT value FROM vault_meta WHERE key=?", (CFG_FP_KEY,)).fetchone()
     except sqlite3.OperationalError:
         row = None
-    if not force and row and row[0] == fp:
-        return 0
+    if not force and row:
+        if row[0] == fp:
+            return 0
+        # 防旧驻留进程降级覆盖: 若库内记录的 builtin:<rev> 高于当前进程, 不反向抹除新模型计价
+        m_db = re.match(r"^builtin:(\d+)", str(row[0]))
+        if m_db and int(m_db.group(1)) > PRICING_REV and fp.split("|")[1:] == str(row[0]).split("|")[1:]:
+            return 0
     n = recompute_derived(conn, pricing, accounts)
     conn.execute("INSERT INTO vault_meta(key,value) VALUES(?,?)"
                  " ON CONFLICT(key) DO UPDATE SET value=excluded.value", (CFG_FP_KEY, fp))
@@ -1299,6 +1648,19 @@ def agv_perstep_migration(conn) -> int:
                      " AND raw LIKE '%\"step_idx\": \"conv\"%'").rowcount
     conn.execute("DELETE FROM usage_sync_state WHERE source='antigravity'")
     _set_meta_flag(conn, "agv_perstep_v1")
+    return n
+
+
+def agv_gen_metadata_migration(conn) -> int:
+    """一次性: AGV 记账升级为 gen_metadata 官方精确 token (此前 LENGTH(step_payload)//4
+    字节估算漏掉每轮 cache_read, 用量低估 ~75x 且模型糊成一行估算)。
+    清空旧 antigravity 事件 + 水位, 下一轮 sync 全量重采 (精确主路径;
+    gen_metadata 缺失的老库自动落字节估算兜底)。"""
+    if _meta_flag(conn, "agv_gen_metadata_v1"):
+        return 0
+    n = conn.execute("DELETE FROM usage_events WHERE source='antigravity'").rowcount
+    conn.execute("DELETE FROM usage_sync_state WHERE source='antigravity'")
+    _set_meta_flag(conn, "agv_gen_metadata_v1")
     return n
 
 
@@ -1427,6 +1789,10 @@ def cmd_ledger_sync(args):
             if n_agv:
                 print(f"  迁移: AGV 记账升级为步级时间戳/差量, 移除旧会话级全量事件 {n_agv} 条"
                       " (防历史体积污染 5h 窗口)")
+            n_gm = agv_gen_metadata_migration(conn)
+            if n_gm:
+                print(f"  迁移: AGV 记账升级为 gen_metadata 官方精确 token, 清旧估算事件 {n_gm} 条"
+                      " (含缓存读全量重采)")
         if "zcode" in srcs:
             n_proj = zcode_project_backfill(conn, vault)
             if n_proj:
@@ -1637,6 +2003,15 @@ def _fiveh_accounts(conn, now: float, accounts: dict, account: str = None):
             for th, label in ((0.5, "50%"), (0.8, "80%"), (1.0, "100%")):
                 etas[label] = _eta_slide(evs, th, now)
         peak = peaks.get(key)
+        by_m = {}
+        for x in evs:
+            mn = x["model"] or ("antigravity · 估算" if x["source"] == "antigravity" else "(未知)")
+            by_m[mn] = by_m.get(mn, 0.0) + _row_weight(x, weight)
+        models_top = [
+            {"name": mn, "used": round(mv, 1),
+             "share": round(mv / used_w, 4) if used_w else 0.0}
+            for mn, mv in sorted(by_m.items(), key=lambda kv: -kv[1])[:4]
+        ]
         out.append({"account": key, "client": evs[0]["client"] or evs[0]["source"],
                     "events": len(evs), "used": int(sum(_row_weight(x) for x in evs)),
                     "weight": weight, "used_weighted": round(used_w, 1), "limit": limit,
@@ -1645,6 +2020,7 @@ def _fiveh_accounts(conn, now: float, accounts: dict, account: str = None):
                     "peak_5h": round(peak, 1) if peak else None,
                     "pct_of_peak": round(used_w / peak, 4) if peak else None,
                     "share": round(used_w / window_total, 4) if window_total else None,
+                    "models": models_top,
                     "eta": etas, "configured": key in prof_by_name})
     return out
 
@@ -1818,7 +2194,8 @@ def _fmt_eta(v):
         if not iso:
             return "—"
     try:
-        delta = dt.datetime.fromisoformat(iso) - dt.datetime.now().astimezone()
+        norm_iso = iso[:-1] + "+00:00" if iso.endswith(("Z", "z")) else iso
+        delta = dt.datetime.fromisoformat(norm_iso) - dt.datetime.now().astimezone()
     except ValueError:
         return iso
     s = int(delta.total_seconds())
@@ -1870,6 +2247,8 @@ def cmd_ledger_quota(args):
             pct = _num(l.get("pct_used"), 0.0)
             print(f"  {l.get('type')}: 已用 {pct:.1f}% · 剩余 {100 - pct:.1f}%"
                   f" · 重置 {_fmt_eta(l.get('reset_at'))}")
+    elif aq is not None:
+        print(f"== Antigravity 额度: {aq.get('error', '不可用')} ==")
     accs = p["fiveh"]["accounts"]
     if any(a["limit"] for a in accs):
         print("== 5 小时额度窗口 (本地额度池) ==")
@@ -1890,6 +2269,12 @@ def cmd_ledger_quota(args):
             else:
                 print(f"      恢复至 50%: {_fmt_eta(a['eta'].get('50%'))} · 80%: "
                       f"{_fmt_eta(a['eta'].get('80%'))} · 100%: {_fmt_eta(a['eta'].get('100%'))}")
+        ms = a.get("models") or []
+        if ms:
+            ms_s = " · ".join(
+                f"{m['name']} {m['share'] * 100:.0f}% ({m['used']:,.0f})"
+                for m in ms)
+            print(f"      模型拆分: {ms_s}")
     if not p["fiveh"]["accounts"]:
         print("  近 5h 无消耗")
     if p["runway"]:

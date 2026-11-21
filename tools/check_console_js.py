@@ -62,7 +62,8 @@ elif out == "unit":
         'is_ungrouped:false,latest:"2026-11-01T00:00:00",count:1,conversations:[{id:"cv_abc123def45678",'
         'agent:"codex",title:"hello world",blocks_total:3,created_at:"2026-11-01T00:00:00"}]}]}};'
         'DATA.usage={now:1,generated_at:"2026-11-21T12:00:00+08:00",window:"5h",events_total:3,'
-        'accounts_configured:true,sources:{zcode:2,claude:1},window_sources:{zcode:2,claude:1},'
+        'accounts_configured:true,sources:{zcode:2,claude:1,antigravity:5},'
+        'window_sources:{zcode:2,claude:1},'
         'totals:{events:2,tokens_in:1000,tokens_out:200,reasoning_tokens:0,cache_read:800,'
         'cache_write:50,total_input:1850,total_output:200,cost_est_usd:1.234,cost_known_events:2},'
         'cache_hit_rate:0.432,cache_save_est_usd:0.12,'
@@ -186,8 +187,18 @@ elif out == "unit":
         'if(qd2.indexOf("套餐余额")<0||qd2.indexOf("42.5")<0||qd2.indexOf("重置")<0){console.error("Q4: 厂商实时额度未渲染:",qd2.slice(0,200));process.exit(22);}'
         # Q5: Antigravity 本机 RPC 实时额度区块
         'if(qd2.indexOf("Antigravity 额度")<0||qd2.indexOf("gemini 5h")<0){console.error("Q5: AGV 实时额度未渲染");process.exit(23);}'
+        # Q6: AGV 额度失败不再静默 — 本机有 antigravity 用量记录而 RPC 失败时必须显示轻提示 (含原因)
+        'DATA.usage.remote_quota_agv={ok:false,error:"Antigravity language_server 未发现 (IDE 未运行?)"};'
+        'renderQuota(DATA.usage,usageLedger);'
+        'const qd6=_el("#ov-quota").innerHTML;'
+        'if(qd6.indexOf("暂不可用")<0||qd6.indexOf("IDE 未运行")<0){console.error("Q6: AGV 失败提示未渲染 (静默吞错)");process.exit(28);}'
+        'if(qd6.indexOf("winbar")<0){console.error("Q6b: 失败提示不应挤掉额度主区块");process.exit(29);}'
+        'DATA.usage.remote_quota_agv={ok:true,plan:"Antigravity Free",limits:['
+        '{type:"gemini 5h",pct_used:12.0,reset_at:"2026-11-21T18:00:00+08:00"},'
+        '{type:"claude/gpt weekly",pct_used:5.0,reset_at:"2026-11-23T01:58:00+08:00"}]};'
+        'renderQuota(DATA.usage,usageLedger);'
         'await syncVaultNow();'
-        'console.log("console unit OK: B03 token-strip / B04 loadOv / B06 empty+hit / T4 project-tree / M1 memory / M3 dedup / M2 msg-reader / F1 fork / Q1 quota-main-card+consumption-eta / Q2 rank-switch / Q3 window-switcher-no-headroom / Q4 remote-quota / Q5 agv-lsp-quota / sync+agy");'
+        'console.log("console unit OK: B03 token-strip / B04 loadOv / B06 empty+hit / T4 project-tree / M1 memory / M3 dedup / M2 msg-reader / F1 fork / Q1 quota-main-card+consumption-eta / Q2 rank-switch / Q3 window-switcher-no-headroom / Q4 remote-quota / Q5 agv-lsp-quota / Q6 agv-failure-hint / sync+agy");'
         'process.exit(0);'
         '})().catch(e=>{console.error("unit failed:",(e&&e.message)||e);process.exit(6)});')
     Path("console_unit.js").write_text(mock + js + tests, encoding="utf-8")
