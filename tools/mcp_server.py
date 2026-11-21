@@ -9,7 +9,7 @@
     vault_context(query, limit)  记忆检索: 命中块 + 前后文摘录 (记忆后端核心)
     vault_snapshot(id)           单快照详情 (capture/stats/块分布/活上下文)
     vault_remember(query, limit) 跨会话长期记忆检索 (含演变链)
-    vault_stats()                token 账本汇总 (含 headroom lifetime)
+    vault_stats()                token 账本汇总 (本地多端直采)
 
 接入 (任一 MCP 客户端):
     claude mcp add context-vault -s user -- python /path/to/mcp_server.py --vault /path/to/vault
@@ -265,12 +265,8 @@ def _format_stats_text(s: dict, own: dict | None, usage: dict | None = None,
             f"    缓存命中率 {hit_s} · 缓存节省约 {usd(usage.get('cache_save_est_usd'))} · "
             f"估算事件占比 {(usage.get('estimated_share') or 0) * 100:.0f}%",
         ]
-    if s.get("lifetime_tokens_saved") is not None:
-        lines += [
-            f"  headroom 压缩节省: {s.get('lifetime_tokens_saved', 0):,} tokens = {usd(s.get('lifetime_compression_saved_usd'))}",
-            f"  headroom 缓存节省: {usd(s.get('lifetime_cache_saved_usd'))}",
-            f"  headroom 历史总输入: {s.get('lifetime_total_input_tokens', 0):,} tokens",
-        ]
+    # 旧 headroom 通路层 lifetime 段落已从 vault_stats 彻底移除 (控制台/CLI 同口径,
+    # 仅 cv ledger stats --legacy-headroom 可显式查看)
     return "\n".join(lines)
 
 
@@ -473,7 +469,7 @@ TOOLS = [
          "include_history": {"type": "boolean", "default": False,
                              "description": "true = 追溯决策演变链 (含已 superseded 的旧记忆及其指向)"}},
          "required": ["query"]}},
-    {"name": "vault_stats", "description": "token 账本汇总 (累计节省/缓存节省/快照数)",
+    {"name": "vault_stats", "description": "token 账本汇总 (本地多端直采: 5h/24h 窗口/缓存命中率/快照数)",
      "inputSchema": {"type": "object", "properties": {}}},
 ]
 

@@ -2018,6 +2018,16 @@ def cv_ledger_quota_cmd(args):
     cv_ledger.cmd_ledger_quota(args)
 
 
+def cv_ledger_limit_cmd(args):
+    import cv_ledger
+    cv_ledger.cmd_ledger_limit(args)
+
+
+def cv_ledger_plan_token_cmd(args):
+    import cv_ledger
+    cv_ledger.cmd_ledger_plan_token(args)
+
+
 def cmd_ledger_stats(args):
     vault = vault_dir(args)
     if not (vault / "vault.db").exists():
@@ -2025,13 +2035,14 @@ def cmd_ledger_stats(args):
         # 并凭空留下零表 vault.db, 把冷路径"先 init/export"的诚实指引永久毒化
         print("vault 尚无数据库 (账本为空) — 先运行 cv init 或 cv export <会话文件> 建库入账")
         return
+    legacy = bool(getattr(args, "legacy_headroom", False))  # 旧 headroom 通路层段落默认隐藏
     conn = db(vault)
     try:  # 库文件在但零表 (如中断创建): 兜底建表, 与 owned_stats 同防御
         conn.executescript(SCHEMA)
     except sqlite3.OperationalError:
         pass
     row = conn.execute("SELECT tokens_saved, cost_usd FROM ledger_events WHERE source='headroom-lifetime'").fetchone()
-    if row:
+    if row and legacy:
         raw = json.loads(conn.execute("SELECT raw FROM ledger_events WHERE source='headroom-lifetime'").fetchone()[0])
         print("== lifetime (headroom 通路层累计) ==")
         print(f"  压缩节省: {row['tokens_saved']:,} tokens = {fmt_usd(row['cost_usd'])}")
@@ -2039,13 +2050,13 @@ def cmd_ledger_stats(args):
         print(f"  总输入:   {int(raw.get('total_input_tokens') or 0):,} tokens = {fmt_usd(raw.get('total_input_cost_usd'))}")
     rows = conn.execute("SELECT model, COUNT(*) n, SUM(tokens_saved) t, SUM(cost_usd) c "
                         "FROM ledger_events WHERE kind='compression' GROUP BY model "
-                        "ORDER BY c DESC LIMIT 10").fetchall()
+                        "ORDER BY c DESC LIMIT 10").fetchall() if legacy else []
     if rows:
         print("== 按模型 (明细) ==")
         for r in rows:
             print(f"  {r['model']:<24} 事件={r['n']:<6} 省={r['t'] or 0:>12,} tok  {fmt_usd(r['c'] or 0)}")
     zx = conn.execute("SELECT COUNT(*) n, model FROM ledger_events WHERE kind='zcode_usage'"
-                      " GROUP BY model ORDER BY n DESC").fetchall()
+                      " GROUP BY model ORDER BY n DESC").fetchall() if legacy else []
     if zx:
         tot = conn.execute("SELECT COUNT(*) n, SUM(CAST(json_extract(raw,'$.input') AS INT)) i,"
                            " SUM(CAST(json_extract(raw,'$.cache_read') AS INT)) cr"
@@ -2057,7 +2068,7 @@ def cmd_ledger_stats(args):
         import cv_ledger
         us = cv_ledger.usage_stats_summary(vault)
         if us.get("events_total"):
-            print(f"== 本地多端账本 ({us['events_total']} 事件直采, 无需 headroom,"
+            print(f"== 本地多端账本 ({us['events_total']} 事件,"
                   f" 来源 {json.dumps(us.get('sources') or {}, ensure_ascii=False)}) ==")
             print(f"  近 5h:  总输入 {us['window_5h_total_input']:,} · 输出 {us['window_5h_tokens_out']:,}"
                   f" · 费用估算 {fmt_usd(us['window_5h_cost_est_usd'])}")
@@ -5003,8 +5014,15 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     w = q.get("window", "5h") or "5h"
                     if w not in cv_ledger.WINDOW_CHOICES:
                         return self._json({"error": "invalid window: 可选 5h|24h|7d|30d"}, 400)
-                    return self._json(cv_ledger.usage_payload(
-                        vault, window=w, account=q.get("account") or None))
+                    payload = cv_ledger.usage_payload(
+                        vault, window=w, account=q.get("account") or None)
+                    rq = cv_ledger.remote_quota_cached(vault)  # 配置了 CV_PLAN_TOKEN 才有值
+                    if rq is not None:
+                        payload["remote_quota"] = rq  # 厂商实时套餐额度 (TTL 60s 缓存)
+                    aq = cv_ledger.agv_quota_cached()  # Antigravity IDE 本机 RPC (TTL 60s 含负缓存)
+                    if aq is not None:
+                        payload["remote_quota_agv"] = aq
+                    return self._json(payload)
                 if u.path == "/preview":
                     qid = q.get("id", "")
                     if not self._sid_ok(qid):
@@ -5689,7 +5707,24 @@ def main(argv=None):
     lq.add_argument("--account", help="账号过滤 (accounts.json 具名账号或 client:x 伪账号)")
     lq.add_argument("--json", action="store_true", help="输出 JSON (供脚本消费)")
     lq.set_defaults(func=cv_ledger_quota_cmd)
-    lsub.add_parser("stats").set_defaults(func=cmd_ledger_stats)
+    ll = lsub.add_parser("limit", help="额度池配置助手 (套餐预设 / 写入 accounts.json; 厂商实时额度见 --list 提示)")
+    ll.add_argument("--list", action="store_true", help="打印套餐预设 (每 5h 提示次数口径) 与实时额度接入说明")
+    ll.add_argument("--preset", help="套餐名 (见 --list; 记入 profile 供参考)")
+    ll.add_argument("--name", help="profile 名 (默认同 --preset)")
+    ll.add_argument("--tokens-5h", type=int, help="5h 滚动窗口 token 上限")
+    ll.add_argument("--tokens-week", type=int, help="7 天周期 token 上限 (kind=7d)")
+    ll.add_argument("--source", help="匹配来源 (逗号分隔, 如 zcode,claude)")
+    ll.add_argument("--client", help="匹配客户端 (逗号分隔)")
+    ll.add_argument("--model-prefix", help="匹配模型通配 (逗号分隔, 如 'glm-*')")
+    ll.set_defaults(func=cv_ledger_limit_cmd)
+    pt = lsub.add_parser("plan-token", help="配置智谱 Coding Plan 用户 Token (厂商实时套餐额度)")
+    pt.add_argument("token", nargs="?", help="Coding Plan 用户 Token (浏览器 F12 → 请求头 Authorization; 非普通 API Key)")
+    pt.add_argument("--clear", action="store_true", help="清除已存 Token")
+    pt.set_defaults(func=cv_ledger_plan_token_cmd)
+    _lst = lsub.add_parser("stats", help="账本汇总 (headroom 旧段落默认隐藏)")
+    _lst.add_argument("--legacy-headroom", action="store_true",
+                      help="补印旧 headroom 通路层 lifetime/按模型节省 (默认彻底隐藏)")
+    _lst.set_defaults(func=cmd_ledger_stats)
 
     w = sub.add_parser("warm", help="缓存预热: 切换上游前预发历史前缀 (M2/Pro)")
     w.add_argument("--snapshot", required=True, help="快照 id (活上下文作前缀)")
