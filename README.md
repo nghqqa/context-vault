@@ -44,6 +44,8 @@ python tools/cv.py migrate ~/.claude/transcripts/ses_xxx.jsonl --target codex
 python tools/cv.py import cv_xxxx --target codex --apply
 ```
 
+For the full CLI reference, scenario playbooks, environment variables, and troubleshooting, see [docs/USAGE.md](docs/USAGE.md).
+
 ## 📦 What survives a migration
 
 Honesty first — this is the whole table, not a highlight reel:

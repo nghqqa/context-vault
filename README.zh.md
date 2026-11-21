@@ -44,7 +44,7 @@ python tools/cv.py migrate ~/.claude/transcripts/ses_xxx.jsonl --target codex
 python tools/cv.py import cv_xxxx --target codex --apply
 ```
 
-更多：`cv ingest <会话文件>`（桥接读 18 种格式，经 session-migrate）、`cv export-harness cv_xxxx --to opencode`（桥接写 18 个目标）、`cv memory extract`（记忆提取）、`cv probe --watch 300`（哨兵）、`cv backup`（一致性备份轮换）、`cv dashboard --open`（自包含面板）。
+更多：`cv ingest <会话文件>`（桥接读 18 种格式，经 session-migrate）、`cv export-harness cv_xxxx --to opencode`（桥接写 18 个目标）、`cv memory extract`（记忆提取）、`cv probe --watch 300`（哨兵）、`cv backup`（一致性备份轮换）、`cv dashboard --open`（自包含面板）。完整命令与场景指南见 [docs/USAGE.md](docs/USAGE.md)。
 
 ## 📦 迁移保真度表（What survives）
 
