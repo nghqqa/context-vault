@@ -77,7 +77,7 @@ function seqGuard(){
 }
 
 const WARN='<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 2L15 14H1L8 2Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" style="color:var(--warn)"/><path d="M8 6.5v3.5M8 12v.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" style="color:var(--warn)"/></svg>';
-const GOOD='<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.3" stroke="currentColor" stroke-width="1.5" style="color:var(--acc-strong)"/><path d="M5.4 8.2l1.8 1.8 3.4-3.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="color:var(--acc-strong)"/></svg>';
+const GOOD='<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.3" stroke="currentColor" stroke-width="1.5" style="color:var(--ok)"/><path d="M5.4 8.2l1.8 1.8 3.4-3.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="color:var(--ok)"/></svg>';
 const ERRIC='<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.3" stroke="currentColor" stroke-width="1.5" style="color:var(--err)"/><path d="M8 4.8v4M8 11.2v.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" style="color:var(--err)"/></svg>';
 const errEmpty=(msg,retry)=>'<div class="empty">'+ERRIC+'<div>'+esc(msg)+"</div>"+
   (retry?'<button class="btn sm" onclick="'+retry+'">重试</button>':"")+"</div>";
@@ -103,6 +103,7 @@ const stripMd=s=>String(s||"")
   .replace(/```[\s\S]*?```/g," ")
   .replace(/`([^`\n]+)`/g,"$1")
   .replace(/\*\*([^*\n]+)\*\*/g,"$1")
+  .replace(/\*\*/g,"")
   .replace(/__([^_\n]+)__/g,"$1")
   .replace(/^[#>*\s]+/gm,"");
 const cleanSummary=s=>{let t=stripMd(s);const tags=[];
@@ -146,6 +147,8 @@ function setTab(t){
     x.classList.toggle("on",on);on?x.setAttribute("aria-current","page"):x.removeAttribute("aria-current")});
   TABS.forEach(k=>{$("#t-"+k).style.display=k===t?"":"none"});
   $("#sec-title").textContent=TAB_TITLE[t];
+  const sc=$(".content");if(sc)sc.scrollTop=0;
+  if(window.scrollTo)window.scrollTo(0,0);
   if(t==="mig"&&!$("#mig-sid").dataset.filled)fillMig();
   if(t==="probe"&&!$("#probe-list").dataset.loaded)loadProbe();
   if(window.history)history.replaceState(null,"","#"+t);
@@ -307,7 +310,7 @@ async function loadOv(){
     $("#ov-audit").innerHTML=au?
       '<div class="audit-grid">'+
       '<div class="audit-cell"><span class="al">累计事件</span><span class="av">'+num(au.total_events||0)+'</span></div>'+
-      '<div class="audit-cell"><span class="al">探测正常</span><span class="av" style="color:var(--acc-strong)">'+num((au.summary||{}).ok_probes||0)+'</span></div>'+
+      '<div class="audit-cell"><span class="al">探测正常</span><span class="av" style="color:var(--ok)">'+num((au.summary||{}).ok_probes||0)+'</span></div>'+
       '<div class="audit-cell"><span class="al">异常告警</span><span class="av" style="color:'+(((au.summary||{}).abnormal||0)>0?'var(--err)':'var(--ink)')+'">'+num((au.summary||{}).abnormal||0)+'</span></div>'+
       '<div class="audit-cell"><span class="al">切换 / 缺失</span><span class="av">'+num((au.summary||{}).switches||0)+' / '+num((au.summary||{}).model_missing_events||0)+'</span></div>'+
       '</div>'
@@ -345,7 +348,7 @@ function quotaRankRows(u,key){
       {t:num(x.events),num:1},
       {t:numT(x.total_input),num:1},
       {t:numT(x.total_output),num:1},
-      {t:x.cost_est_usd?usd(x.cost_est_usd)+'<span class="hint"> 估</span>':"订阅",num:1}];
+      {t:x.cost_est_usd?'<span title="按公开 API 挂牌价等效折算">≈'+usd(x.cost_est_usd)+'</span>':"订阅",num:1}];
       return r}));
 }
 function renderUsageRank(){
@@ -474,8 +477,8 @@ function renderQuota(u,ledger){
   if(usageWindow==="30d"&&days.length){
     const show=days.slice(-14);
     const mx=Math.max(...show.map(x=>x.total_input||0),1);
-    const fmt=v=>v>=1e6?(v/1e6).toFixed(1)+"M":v>=1e3?(v/1e3).toFixed(0)+"k":String(Math.round(v));
-    const mw=Math.min(680,show.length*46+120);
+    const fmt=v=>v>=1e9?(v/1e9).toFixed(1)+"B":v>=1e6?(v/1e6).toFixed(1)+"M":v>=1e3?(v/1e3).toFixed(0)+"k":String(Math.round(v));
+    const mw=Math.min(820,show.length*54+100);
     h+='<div class="hint" style="margin:10px 0 4px"><b>近 14 天消耗趋势</b> (30d 窗口内逐日)</div>'+
       '<div class="months" style="max-width:'+mw+'px"><div class="yax"><span>'+fmt(mx)+'</span><span>'+fmt(mx/2)+
       '</span><span>0</span></div><div class="bars">'+show.map((x,i)=>{const hh=Math.max(100*(x.total_input||0)/mx,3);
