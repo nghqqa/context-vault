@@ -1,0 +1,14 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+COPY tools/ /app/tools/
+
+ENV HOST=0.0.0.0 \
+    PORT=8000 \
+    CV_VAULT_DIR=/data/vault \
+    PYTHONUNBUFFERED=1
+
+VOLUME ["/data/vault"]
+EXPOSE 8000
+
+CMD ["python", "tools/aml_adapter.py", "--serve"]

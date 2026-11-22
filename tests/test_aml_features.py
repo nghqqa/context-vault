@@ -1,17 +1,25 @@
-"""AML 借鉴特性回归测试: AMLMemoryAdapter (Add/Search) + MCP budget_tokens 预算裁剪。"""
+"""AML 借鉴特性回归测试: AMLMemoryAdapter (Add/Search) + HTTP 边界 + MCP budget_tokens 预算裁剪。"""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from http.client import HTTPConnection
+from http.server import ThreadingHTTPServer
 import json
 from pathlib import Path
-import sys
-import unittest
-import tempfile
+import re
 import shutil
+import sqlite3
+import sys
+import tempfile
+import threading
+import time
+import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
 import aml_adapter  # noqa: E402
+import cv  # noqa: E402
 import mcp_server  # noqa: E402
 
 
@@ -22,7 +30,7 @@ class TestAMLFeatures(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_aml_adapter_add_and_search_with_budget(self):
+    def test_aml_adapter_add_search_id_guard_and_budget(self):
         ad = aml_adapter.AMLMemoryAdapter(self.tmp)
         try:
             r1 = ad.add(
@@ -33,8 +41,14 @@ class TestAMLFeatures(unittest.TestCase):
                 session_id="ses_1",
                 project="demo-proj",
             )
-            self.assertTrue(r1["snapshot_id"].startswith("cv_aml_"))
+            # 快照 ID 必须严格满足全链路纯 hex 守卫 ^cv_[0-9a-f]{8,64}$
+            self.assertRegex(r1["snapshot_id"], r"^cv_[0-9a-f]{8,64}$")
             self.assertEqual(r1["blocks"], 2)
+
+            # 全链路详情查看: MCP vault_snapshot 可直接读取 AML 快照
+            snap_detail = mcp_server.t_snapshot(self.tmp, r1["snapshot_id"])
+            self.assertIn(r1["snapshot_id"], snap_detail)
+            self.assertNotIn("无效 id", snap_detail)
 
             r2 = ad.add(
                 [
@@ -59,7 +73,225 @@ class TestAMLFeatures(unittest.TestCase):
         finally:
             ad.close()
 
-    def test_mcp_budget_tokens_trimming(self):
+    def test_aml_add_metadata_in_hash_and_legacy_db_migration(self):
+        # 模拟缺少 v2 列的旧版 memory_items 表
+        conn = cv.db(self.tmp)
+        conn.executescript(
+            cv.SCHEMA
+            + """
+            CREATE TABLE IF NOT EXISTS memory_items(
+              id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, snapshot_id TEXT,
+              kind TEXT, content TEXT, project TEXT, hits INTEGER DEFAULT 0, last_used TEXT
+            );
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        ad = aml_adapter.AMLMemoryAdapter(self.tmp)
+        try:
+            msgs = [
+                {"role": "user", "content": "统一配置中心切换为 etcd。"},
+                {"role": "assistant", "content": "决定：配置中心使用 etcd 集群存储。"},
+            ]
+            a = ad.add(msgs, session_id="ses_A", project="proj_a")
+            b = ad.add(msgs, session_id="ses_B", project="proj_b")
+            # 相同 messages 但不同元数据应生成不同快照 ID, 不会造成磁盘与 DB 分裂
+            self.assertNotEqual(a["snapshot_id"], b["snapshot_id"])
+            # 相同 messages + 相同元数据应幂等
+            a2 = ad.add(msgs, session_id="ses_A", project="proj_a")
+            self.assertEqual(a["snapshot_id"], a2["snapshot_id"])
+
+            # 核对磁盘 JSON 与 DB 记录一致
+            env_a = json.loads((self.tmp / "snapshots" / f"{a['snapshot_id']}.json").read_text(encoding="utf-8"))
+            env_b = json.loads((self.tmp / "snapshots" / f"{b['snapshot_id']}.json").read_text(encoding="utf-8"))
+            self.assertEqual(env_a["capture"]["project"], "proj_a")
+            self.assertEqual(env_b["capture"]["project"], "proj_b")
+        finally:
+            ad.close()
+
+    def test_aml_search_single_item_over_budget_truncates_and_marks_trimmed(self):
+        ad = aml_adapter.AMLMemoryAdapter(self.tmp)
+        try:
+            long_text = "超长架构说明：" + ("数据库分片与一致性哈希细节说明" * 40)
+            ad.add(
+                [{"role": "assistant", "content": long_text}],
+                session_id="ses_long",
+                project="long-proj",
+                extract_memory=False,
+            )
+            res = ad.search("一致性哈希", top_k=5, budget_tokens=64, include_memories=False)
+            self.assertEqual(res["total"], 1)
+            self.assertTrue(res["trimmed"])
+            self.assertLessEqual(cv.estimate_text_tokens(res["results"][0]["content"]), 64)
+        finally:
+            ad.close()
+
+    def test_aml_concurrent_add_and_search_thread_safe(self):
+        ad = aml_adapter.AMLMemoryAdapter(self.tmp)
+        try:
+            def worker(idx: int):
+                res = ad.add(
+                    [
+                        {"role": "user", "content": f"并发任务 #{idx}: 验证线程安全写入 topic_{idx}"},
+                        {"role": "assistant", "content": f"决定：并发任务 #{idx} 使用互斥锁保护 topic_{idx}"},
+                    ],
+                    session_id=f"ses_conc_{idx}",
+                    project="conc-proj",
+                )
+                sr = ad.search(f"topic_{idx}", top_k=5)
+                return res["snapshot_id"], sr["total"]
+
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                outs = list(pool.map(worker, range(12)))
+            self.assertEqual(len(outs), 12)
+            self.assertTrue(all(re.fullmatch(r"cv_[0-9a-f]{8,64}", sid) for sid, _ in outs))
+            self.assertTrue(all(total >= 1 for _, total in outs))
+        finally:
+            ad.close()
+
+    def test_tenant_router_isolation_and_lru_eviction(self):
+        router = aml_adapter.TenantRouter(self.tmp, max_adapters=2)
+        try:
+            alice = router.for_user("alice@example.com")
+            bob = router.for_user("bob@example.com")
+            alice.add([
+                {"role": "user", "content": "Alice 秘密架构：采用 ClickHouse 存储指标。"},
+                {"role": "assistant", "content": "决定：Alice 服务使用 ClickHouse。"},
+            ])
+            bob.add([
+                {"role": "user", "content": "Bob 架构：采用 DuckDB 本地分析。"},
+                {"role": "assistant", "content": "决定：Bob 服务使用 DuckDB。"},
+            ])
+            # Alice 只能查到 ClickHouse，查不到 Bob 的 DuckDB
+            self.assertEqual(alice.search("DuckDB", top_k=10)["total"], 0)
+            self.assertEqual(bob.search("ClickHouse", top_k=10)["total"], 0)
+            self.assertGreaterEqual(alice.search("ClickHouse", top_k=10)["total"], 1)
+
+            # 第 3 个租户应触发 LRU 淘汰, 句柄池大小不超过 max_adapters=2
+            carol = router.for_user("carol@example.com")
+            carol.add([{"role": "user", "content": "Carol 使用 Postgres。"}])
+            self.assertLessEqual(len(router._adapters), 2)
+            # 重新获取被淘汰的租户仍能正常查询已有数据
+            bob_again = router.for_user("bob@example.com")
+            self.assertGreaterEqual(bob_again.search("DuckDB", top_k=10)["total"], 1)
+        finally:
+            router.close_all()
+
+    def test_http_server_route_validation_and_body_guards(self):
+        # 启动隔离的 HTTP 测试服务器 (验证不篡改全局 ThreadingHTTPServer.allow_reuse_address)
+        orig_reuse = ThreadingHTTPServer.allow_reuse_address
+        router = aml_adapter.TenantRouter(self.tmp)
+
+        class _TestSrv(aml_adapter._AMLHTTPServer):
+            pass
+
+        # 复用 serve_aml 同款 Handler 逻辑: 通过线程启动真实 serve_aml 在临时端口上测试
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+
+        # 启动前用子线程运行 _AMLHTTPServer 以便优雅 shutdown
+        srv_holder = {}
+        orig_cls = aml_adapter._AMLHTTPServer
+
+        class _CaptureSrv(orig_cls):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                srv_holder["srv"] = self
+
+        aml_adapter._AMLHTTPServer = _CaptureSrv
+        th = threading.Thread(
+            target=aml_adapter.serve_aml,
+            args=(self.tmp, "127.0.0.1", port, None),
+            daemon=True,
+        )
+        th.start()
+        try:
+            for _ in range(50):
+                if "srv" in srv_holder:
+                    break
+                time.sleep(0.02)
+            self.assertIn("srv", srv_holder)
+            self.assertEqual(ThreadingHTTPServer.allow_reuse_address, orig_reuse)
+
+            def req(method: str, path: str, body: bytes | None = None, headers: dict | None = None):
+                c = HTTPConnection("127.0.0.1", port, timeout=5)
+                try:
+                    c.request(method, path, body=body, headers=headers or {})
+                    resp = c.getresponse()
+                    data = json.loads(resp.read().decode("utf-8"))
+                    return resp.status, data
+                finally:
+                    c.close()
+
+            # 1) POST 到不存在路径不得创建租户目录
+            st, _ = req("POST", "/not-found", json.dumps({"user_id": "ghost_user"}).encode("utf-8"))
+            self.assertEqual(st, 404)
+            self.assertFalse((self.tmp / "tenants").exists())
+
+            # 2) 非对象 JSON 请求体应返回 400
+            st, data = req("POST", "/add", b"[]")
+            self.assertEqual(st, 400)
+            self.assertIn("JSON object", data["error"])
+
+            # 3) 超大 Content-Length 返回 413
+            c = HTTPConnection("127.0.0.1", port, timeout=5)
+            try:
+                c.putrequest("POST", "/add")
+                c.putheader("Content-Length", str(aml_adapter.MAX_HTTP_BODY_BYTES + 1))
+                c.endheaders()
+                resp = c.getresponse()
+                self.assertEqual(resp.status, 413)
+            finally:
+                c.close()
+
+            # 4) 正常 /add + /search
+            st, add_res = req(
+                "POST",
+                "/add",
+                json.dumps({
+                    "user_id": "u_http",
+                    "messages": [{"role": "assistant", "content": "决定：HTTP 接口使用限流保护。"}],
+                }).encode("utf-8"),
+            )
+            self.assertEqual(st, 200)
+            self.assertRegex(add_res["snapshot_id"], r"^cv_[0-9a-f]{8,64}$")
+
+            st, sr_res = req(
+                "POST",
+                "/search",
+                json.dumps({"user_id": "u_http", "query": "限流保护", "top_k": 5}).encode("utf-8"),
+            )
+            self.assertEqual(st, 200)
+            self.assertGreaterEqual(sr_res["total"], 1)
+        finally:
+            aml_adapter._AMLHTTPServer = orig_cls
+            if "srv" in srv_holder:
+                srv_holder["srv"].shutdown()
+                srv_holder["srv"].server_close()
+            th.join(timeout=3)
+            router.close_all()
+
+    def test_mcp_budget_tokens_trimming_edge_cases_and_parity(self):
+        # 1) token 估算口径与 cv.estimate_text_tokens 完全一致
+        for sample in ("", "hello world", "中文测试文本", "混合 SQLite 倒排索引 test 123"):
+            self.assertEqual(mcp_server._estimate_tokens(sample), cv.estimate_text_tokens(sample))
+
+        # 2) 单条超长纯中文触发首条截断时: 必须保留裁剪提示且总 token 贴合预算
+        long_cn = "架构决策记录：" + ("索引分片与连接池复用核心细节" * 40)
+        out = mcp_server._trim_by_budget("头部:", [long_cn], "尾部", budget_tokens=64)
+        self.assertIn("budget_tokens=64", out)
+        self.assertLessEqual(mcp_server._estimate_tokens(out), 72)
+
+        # 3) 异常 budget_tokens 类型应直接抛出 ValueError (含 bool / 非数字字符串)
+        with self.assertRaises(ValueError):
+            mcp_server.dispatch("vault_search", {"query": "SQLite", "budget_tokens": True}, self.tmp)
+        with self.assertRaises(ValueError):
+            mcp_server.dispatch("vault_search", {"query": "SQLite", "budget_tokens": "not_a_num"}, self.tmp)
+
+        # 4) 端到端冷路径裁剪
         ad = aml_adapter.AMLMemoryAdapter(self.tmp)
         try:
             for i in range(4):
@@ -74,7 +306,6 @@ class TestAMLFeatures(unittest.TestCase):
         finally:
             ad.close()
 
-        # 模拟热服务不可用，直接走本地索引路径
         mcp_server._svc_mark_down()
         full_ctx = mcp_server.dispatch("vault_context", {"query": "SQLite 索引", "limit": 4}, self.tmp)
         trimmed_ctx = mcp_server.dispatch(
@@ -88,28 +319,28 @@ class TestAMLFeatures(unittest.TestCase):
         )
         self.assertIn("budget_tokens=64", trimmed_search)
 
-    def test_tenant_router_isolation(self):
-        router = aml_adapter.TenantRouter(self.tmp)
+    def test_request_id_idempotency_and_conflict(self):
+        ad = aml_adapter.AMLMemoryAdapter(self.tmp)
         try:
-            alice = router.for_user("alice@example.com")
-            bob = router.for_user("bob@example.com")
-            alice.add([
-                {"role": "user", "content": "Alice 秘密架构：采用 ClickHouse 存储指标。"},
-                {"role": "assistant", "content": "决定：Alice 服务使用 ClickHouse。"},
-            ])
-            bob.add([
-                {"role": "user", "content": "Bob 架构：采用 DuckDB 本地分析。"},
-                {"role": "assistant", "content": "决定：Bob 服务使用 DuckDB。"},
-            ])
-            # Alice 只能查到 ClickHouse，查不到 Bob 的 DuckDB
-            res_a = alice.search("DuckDB", top_k=10)
-            self.assertEqual(res_a["total"], 0)
-            res_b = bob.search("ClickHouse", top_k=10)
-            self.assertEqual(res_b["total"], 0)
-            res_a_ok = alice.search("ClickHouse", top_k=10)
-            self.assertGreaterEqual(res_a_ok["total"], 1)
+            msgs = [
+                {"role": "user", "content": "确认幂等键设计。"},
+                {"role": "assistant", "content": "决定：统一使用 request_id 做幂等写入。"},
+            ]
+            first = ad.add(msgs, session_id="ses_idem", request_id="req_001")
+            self.assertFalse(first["idempotent_replay"])
+
+            replay = ad.add(msgs, session_id="ses_idem", request_id="req_001")
+            self.assertTrue(replay["idempotent_replay"])
+            self.assertEqual(replay["snapshot_id"], first["snapshot_id"])
+
+            with self.assertRaises(aml_adapter.RequestConflictError):
+                ad.add(
+                    [{"role": "user", "content": "完全不同的 payload"}],
+                    session_id="ses_idem",
+                    request_id="req_001",
+                )
         finally:
-            router.close_all()
+            ad.close()
 
 
 if __name__ == "__main__":
