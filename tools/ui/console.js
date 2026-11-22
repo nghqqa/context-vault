@@ -471,60 +471,85 @@ function renderQuota(u,ledger){
   const wsrcs=Object.entries(u.window_sources||{}).map(([k,v])=>k+" "+v).join(" · ");
   const costKnown=(t.cost_known_events||0)>0;
   const rqPlan=(u.remote_quota&&u.remote_quota.ok)?("订阅 · "+esc(u.remote_quota.plan)+" 套餐"):"订阅模式 · 未配置单价";
-  // 头部: 窗口切换 (5h/24h/7d/30d) + 窗口内来源分解 + 全库累计 (口径分离: 窗口 vs 全库)
-  let h='<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">'+
+  const pre=u.precision||{};
+  // 头部: 窗口切换 (5h/24h/7d/30d) + 窗口/全库/精确度精简摘要
+  let h='<div class="q-head"><div class="q-head-l">'+
     '<div class="seg" id="ov-wseg" role="group" aria-label="统计窗口">'+
     USAGE_WINDOWS.map(([k,l])=>'<button class="btn'+(usageWindow===k?" on":"")+'" data-w="'+k+
       '" onclick="setUsageWindow(\''+k+'\')">'+l+"</button>").join("")+"</div>"+
     '<span class="hint">窗口 '+esc(usageWindow)+" 事件 "+num(t.events)+" ("+esc(wsrcs||"—")+
-    ") · 全库累计 "+num(u.events_total)+" 事件</span></div>";
-  h+='<div class="audit-grid">'+
-    aCell("窗口 "+esc(usageWindow)+" KPI · 窗口事件",num(t.events)+" <span class=\"hint\">"+esc(wsrcs||"—")+"</span>")+
+    ") · 全库 "+num(u.events_total)+"</span></div>"+
+    '<div class="q-head-r"><span>精确 '+(pre.exact_events||0)+" / 估算 "+(pre.estimated_events||0)+
+    " ("+((pre.estimated_share||0)*100).toFixed(0)+"%)</span>"+
+    (u.accounts_configured?'<span class="mini-tag">accounts.json 已配</span>':'<span class="mini-tag" title="运行 cv ledger limit --list 配置额度上限">未配上限</span>')+
+    "</div></div>";
+  // 4 列紧凑 KPI 条 (一行排开, 避免和下方配额卡视觉混淆)
+  h+='<div class="q-kpi-strip">'+
+    aCell("窗口 "+esc(usageWindow)+" 事件",num(t.events)+' <span class="hint" style="font-size:11.5px;font-weight:400">'+esc(wsrcs||"—")+"</span>")+
     aCell("总输入",numT(t.total_input)+" <small>tokens</small>")+
-    aCell("费用估算",(t.cost_est_usd?usd(t.cost_est_usd)+' <span class="mini-tag">公开 API 挂牌价等效折算</span>'
-      :(costKnown?'<span class="hint">部分事件按列表价折算</span>':'<span class="mini-tag" title="未匹配到单价表 (vault/pricing.json); 订阅制模型默认不计成本">'+rqPlan+"</span>")))+
+    aCell("费用估算",(t.cost_est_usd?usd(t.cost_est_usd)+' <span class="mini-tag" title="按公开 API 挂牌价等效折算">等效折算</span>'
+      :(costKnown?'<span class="hint">部分折算</span>':'<span class="mini-tag" title="未匹配到单价表 (vault/pricing.json); 订阅制模型默认不计成本">'+rqPlan+"</span>")))+
     aCell("缓存命中率",hit==null?"—":'<span>'+(hit*100).toFixed(1)+"%</span>"+
-      ((u.cache_save_est_usd||0)>0?" · 节省约 "+usd(u.cache_save_est_usd):'<span class="hint"> · 订阅不计节省</span>'))+
-    '</div>';
-  const pre=u.precision||{};
-  h+='<div class="hint" style="margin:4px 0 8px">精确事件 '+(pre.exact_events||0)+" · 估算事件 "+(pre.estimated_events||0)+
-    " ("+((pre.estimated_share||0)*100).toFixed(0)+"% 估算) · 窗口 "+esc(u.window||"5h")+
-    (u.accounts_configured?" · 额度池已配置 (accounts.json)":" · 未配置上限 (<code>cv ledger limit --list</code>)")+"</div>";
-  // 厂商实时额度: 智谱 (CV_PLAN_TOKEN) + Antigravity IDE 本机 RPC, 共用渲染块
+      ((u.cache_save_est_usd||0)>0?' <span class="hint" style="font-size:11.5px;font-weight:400">省 '+usd(u.cache_save_est_usd)+"</span>":'<span class="hint" style="font-size:11.5px;font-weight:400"> · 订阅</span>'))+
+    "</div>";
+  // 厂商实时额度: 紧凑高密度胶囊条 (奇数末项横跨整行, 彻底消除灰块空洞)
+  const quotaDotCls=t=>{
+    const s=String(t||"").toLowerCase();
+    if(s.includes("argon"))return"arg";
+    if(s.includes("claude")||s.includes("gpt"))return"cla";
+    if(s.includes("gemini"))return"gem";
+    return"zp";
+  };
   const quotaRemoteBlock=(rq,title,tag,tip)=>{
     if(!rq||!rq.ok)return"";
     const LT={TOKENS_LIMIT:"5h Token 额度",TIME_LIMIT:"MCP 月额度",PROMPTS_LIMIT:"提示次数",REQUESTS_LIMIT:"请求数"};
-    return '<div class="hint" style="margin:10px 0 2px"><b>'+title+"</b> — "+esc(rq.plan||"?")+
-      ' <span class="mini-tag" title="'+esc(tip)+'">'+tag+"</span></div>"+
-      '<div class="audit-grid">'+(rq.limits||[]).map(l=>{
-        const pct=l.pct_used||0;
-        const cls=pct>=90?"q-hot":pct>=70?"q-warn":"";
-        const lTitle=l.desc?('<span title="'+esc(l.desc)+'">'+(LT[l.type]||esc(l.type))+"</span>"):(LT[l.type]||esc(l.type));
-        return aCell(lTitle,
-          '<span class="q-big '+cls+'">'+pct.toFixed(1)+'%</span><span class="hint"> 已用</span>'+
-          '<span class="winbar'+(cls?" "+cls:"")+'" style="display:block;width:100%;margin:7px 0 4px"><i style="width:'+Math.min(100,pct)+'%"></i></span>'+
-          (l.reset_at?'<div class="quota-eta">重置 '+etaRel(l.reset_at)+"</div>":""));
-      }).join("")+"</div>"};
+    const lims=rq.limits||[];
+    const odd=lims.length%2===1&&lims.length>1;
+    return '<div class="q-group"><div class="q-group-hd">'+
+      '<div class="q-group-title"><span>'+title+'</span><span class="q-plan-tag">'+esc(rq.plan||"?")+'</span></div>'+
+      '<span class="q-live-tag" title="'+esc(tip)+'">'+tag+"</span></div>"+
+      '<div class="q-pill-grid">'+lims.map((l,i)=>{
+        const used=Math.max(0,Math.min(100,+(l.pct_used||0)));
+        const rem=Math.max(0,100-used);
+        const cls=used>=90?"q-hot":used>=70?"q-warn":"";
+        const isArgon=String(l.type||"").toLowerCase().includes("argon");
+        const spanCls=(odd&&i===lims.length-1)?" span-full":"";
+        const argonCls=isArgon?" q-argon":"";
+        const lbl=LT[l.type]||esc(l.type);
+        const lTitle=l.desc?('<span class="q-pill-name" title="'+esc(l.desc)+'">'+lbl+"</span>"):('<span class="q-pill-name">'+lbl+"</span>");
+        // 进度条按剩余额度填充 (越满越健康, 跌至低剩余自动转琥珀/警示红; 同时明示已用与剩余百分比)
+        return '<div class="q-pill'+spanCls+argonCls+'">'+
+          '<div class="q-pill-top">'+
+            '<div class="q-pill-l"><span class="q-pill-dot '+quotaDotCls(l.type)+'"></span>'+lTitle+
+              (l.reset_at?'<span class="q-pill-reset" title="下次额度重置时间">重置 '+etaRel(l.reset_at)+"</span>":"")+
+            "</div>"+
+            '<div class="q-pill-r">'+
+              '<span class="q-pill-rem '+cls+'" title="剩余可用额度">余 '+rem.toFixed(1)+'%</span>'+
+              '<span class="q-pill-used">已用 '+used.toFixed(1)+'%</span>'+
+            "</div>"+
+          "</div>"+
+          '<span class="winbar'+(cls?" "+cls:"")+'"><i style="width:'+rem.toFixed(1)+'%"></i></span>'+
+        "</div>";
+      }).join("")+"</div></div>"};
   h+=quotaRemoteBlock(u.remote_quota,"套餐余额 (智谱实时)","实时",
     "CV_PLAN_TOKEN / vault/plan_token.json 配置后由智谱额度接口返回, 服务端 60s 缓存; Token 不出本机");
   h+=quotaRemoteBlock(u.remote_quota_agv,"Antigravity 额度 (本机 IDE)","LSP 实时",
     "经 LSP 官方发现文件 (daemon/hub_*.json) 直连本机 language_server 实时额度; IDE 登录态即凭据, 零配置");
   if((u.sources||{}).antigravity>0&&!(u.remote_quota_agv&&u.remote_quota_agv.ok)){
-    h+='<div class="hint" style="margin:6px 0 2px"><b>Antigravity 额度 (本机 IDE)</b> — 暂不可用 ('+
-      esc((u.remote_quota_agv||{}).error||"未发现")+') · IDE 未运行或未登录时仅显示下方本地估算消耗</div>'}
-  // 5h 滚动窗口 (固定 5h 语义, 不随上方分析窗口切换): 进度条真实填充 + 冷却倒计时常显
+    h+='<div class="q-group" style="padding:8px 12px"><div class="hint"><b>Antigravity 额度 (本机 IDE)</b> — 暂不可用 ('+
+      esc((u.remote_quota_agv||{}).error||"未发现")+') · IDE 未运行或未登录时仅显示下方本地估算消耗</div></div>'}
+  // 5h 滚动窗口 (固定 5h 语义, 不随上方分析窗口切换): 放进独立轻边框卡片
   const accs=(u.fiveh&&u.fiveh.accounts)||[];
   const hasLimits=accs.some(a=>a.mode==="limit");
   const f5=(u.fiveh&&u.fiveh.totals)||{};
-  h+='<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0 2px">'+
-    '<span class="hint"><b>'+(hasLimits?"5 小时额度窗口 (本地额度池)":"5h 消耗构成 (按客户端归因)")+"</b> — "+
-    (hasLimits?"上限/恢复 ETA 来自 accounts.json 额度池":"未配上限=纯消耗模式: 进度条按 7d 峰值/参考档位, ETA 为窗口回落倒计时")+"</span>"+
+  h+='<div class="q-section"><div class="q-section-hd">'+
+    '<span class="hint"><b>'+(hasLimits?"5 小时额度窗口 (本地额度池)":"5h 消耗构成 (按客户端归因)")+"</b> · "+
+    (hasLimits?"上限与恢复 ETA 来自 accounts.json":"纯消耗模式: 进度按 7d 峰值/参考档位")+"</span>"+
     '<select id="ov-ref-tier" aria-label="参考档位" onchange="setRefTier(this.value)">'+
     REF_TIERS.map((v,i)=>'<option value="'+v+'"'+(usageRefTier===v?" selected":"")+">"+REF_TIERS_LBL[i]+"</option>").join("")+
     "</select></div>";
   h+=accs.length?accs.map(a=>{
     const isLim=a.mode==="limit"||a.limit;
-    const barCls=isLim&&a.pct!=null&&a.pct>=1?"winbar hot":"winbar";
     // 进度条真实填充: 有上限→上限占比; 无上限→参考档位占比 > 7d 单 5h 峰值比 > 窗口内占比
     let wPct,pctS;
     if(isLim){wPct=Math.min(100,(a.pct||0)*100);pctS=(a.pct*100).toFixed(1)+"%"}
@@ -534,38 +559,42 @@ function renderQuota(u,ledger){
     else if(a.pct_of_peak!=null){
       wPct=Math.min(100,a.pct_of_peak*100);pctS="峰值比 "+(a.pct_of_peak*100).toFixed(0)+"%"}
     else{wPct=Math.min(100,Math.round((a.share||0)*100));pctS="占比 "+Math.round((a.share||0)*100)+"%"}
+    const barCls=wPct>=90?"winbar hot":wPct>=70?"winbar warn":"winbar";
     const usageS=isLim?(num(a.used_weighted)+" / "+num(a.limit)+" ("+esc(a.weight||"total_tokens")+")")
       :(bn(a.used_weighted)+" tok");
     let line='<div class="quota-row"><span class="qn" title="'+esc(a.account)+'">'+esc(a.account)+"</span>"+
-      '<span class="'+barCls+'"><i style="width:'+wPct+'%"></i></span>'+
+      '<span class="'+barCls+'"><i style="width:'+wPct.toFixed(1)+'%"></i></span>'+
       '<span class="mono">'+pctS+"</span>"+
       '<span class="hint">'+usageS+"</span></div>";
+    const subParts=[];
     if(a.eta&&(isLim?a.eta["50%"]!=null||a.eta["80%"]!=null||a.eta["100%"]!=null:true)){
-      line+='<div class="quota-eta" style="padding:0 0 3px 130px">'+
-        (isLim?"恢复至 50%: ":"窗口回落 50%: ")+etaRel(a.eta["50%"])+
+      subParts.push('<span>'+(isLim?"恢复至 50%: ":"窗口回落 50%: ")+etaRel(a.eta["50%"])+
         " · 80%: "+etaRel(a.eta["80%"])+
-        (isLim?" · 100%: ":" · 完全冷却: ")+etaRel(a.eta["100%"])+"</div>"}
+        (isLim?" · 100%: ":" · 完全冷却: ")+etaRel(a.eta["100%"])+"</span>")}
     if(a.models&&a.models.length){
-      line+='<div class="quota-eta" style="padding:0 0 6px 130px">模型拆分: '+
-        a.models.map(m=>esc(m.name)+" "+Math.round((m.share||0)*100)+"% ("+bn(m.used)+")").join(" · ")+
-        "</div>"}
+      subParts.push('<div class="q-model-chips">'+
+        a.models.map(m=>'<span class="q-mchip">'+esc(m.name)+" "+Math.round((m.share||0)*100)+"% · "+bn(m.used)+"</span>").join("")+
+        "</div>")}
+    if(subParts.length)line+='<div class="q-sub-meta">'+subParts.join("")+"</div>";
     return line}).join("")
     :'<div class="hint" style="padding:2px 0">近 5 小时无消耗</div>';
   const rw=u.runway||[];
   if(rw.length){
-    h+='<div class="hint" style="margin:8px 0 2px"><b>跑道</b> — 按近 24h 消耗速率外推距 7d/月上限的剩余天数</div>';
+    h+='<div class="hint" style="margin:8px 0 4px"><b>跑道</b> · 按近 24h 消耗速率外推距 7d/月上限剩余天数</div>';
     h+=rw.map(r=>{const cap=r.metric==="tokens"?num(r.cap)+" tok":usd(r.cap);
       const used=r.metric==="tokens"?num(r.used_tokens)+" tok":usd(r.used_usd);
       const dl=r.days_left!=null?r.days_left.toFixed(1)+" 天":"∞ (近 24h 零消耗)";
       return '<div class="quota-row"><span class="qn" title="'+esc(r.account)+'">'+esc(r.account)+"</span>"+
         '<span class="mini-tag">'+esc(r.kind)+"</span>"+
         '<span class="hint">上限 '+cap+" · 本期已用 "+used+" · 剩余跑道 <b>"+dl+"</b></span></div>"}).join("")}
-  // 消耗排行 (随窗口切换) + 30d 趋势
-  h+='<div class="hint" style="margin:10px 0 6px"><b>消耗排行</b> — 窗口 '+esc(u.window||"5h")+
-    ' · 精确/估算已标注 <span class="mini-tag">含估算=来源无精确 usage</span></div>';
-  h+='<div id="ov-quota-rankseg" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px">'+
-    USAGE_RANKS.map(([k,l])=>'<button class="btn sm'+(usageRankKey===k?" on":"")+'" data-k="'+k+
-      '" onclick="setUsageRank(\''+k+'\')">'+l+"</button>").join("")+"</div>";
+  h+="</div>";
+  // 消耗排行 (随窗口切换) + 30d 趋势: 标题与维度药丸同排对齐
+  h+='<div class="q-section"><div class="q-section-hd">'+
+    '<span class="hint"><b>消耗排行</b> · 窗口 '+esc(u.window||"5h")+
+    ' <span class="mini-tag">含估算=来源无精确 usage</span></span>'+
+    '<div id="ov-quota-rankseg" class="seg" role="group" aria-label="排行维度">'+
+    USAGE_RANKS.map(([k,l])=>'<button class="btn'+(usageRankKey===k?" on":"")+'" data-k="'+k+
+      '" onclick="setUsageRank(\''+k+'\')">'+l+"</button>").join("")+"</div></div>";
   h+='<div id="ov-quota-ranks"></div>';
   const days=(u.by_day)||[];
   if(usageWindow==="30d"&&days.length){
@@ -581,6 +610,7 @@ function renderQuota(u,ledger){
       esc(x.day+" · 输入 "+num(x.total_input)+" · 输出 "+num(x.total_output||0))+
       '"></div><div class="lb">'+esc(String(x.day).slice(5))+"</div></div>"}).join("")+"</div></div>";
   }
+  h+="</div>";
   // 底部小字: ZCode 历史累计库 (model_usage 全量真相源, 与 usage_events 窗口口径分离)
   const zu=(usageLedger&&usageLedger.zcode_usage)||{};
   const zkeys=Object.keys(zu);

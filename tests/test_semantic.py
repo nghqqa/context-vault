@@ -184,6 +184,46 @@ class TestSemanticAndModularization(unittest.TestCase):
             idx._close()
             th.join(timeout=3)
 
+    def test_native_antigravity_db_export_handles_empty_tool_result_and_wal(self):
+        import sqlite3
+        import cv_antigravity as ag
+
+        dbp = self.tmp / "11112222-3333-4444-5555-666677778888.db"
+        conn = sqlite3.connect(dbp)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE trajectory_meta(trajectory_id TEXT, cascade_id TEXT)")
+            conn.execute("CREATE TABLE trajectory_metadata_blob(id TEXT, data BLOB)")
+            conn.execute("CREATE TABLE steps(idx INTEGER PRIMARY KEY, step_type INTEGER, status INTEGER, metadata BLOB, step_payload BLOB)")
+            conn.execute("INSERT INTO trajectory_meta VALUES('traj1', '11112222-3333-4444-5555-666677778888')")
+            # trajectory_metadata_blob: f1={f1:'file:///e:/demo-repo'}, f2={f1:1795300000}
+            meta_blob = ag._pb_len(1, ag._pb_len(1, b"file:///e:/demo-repo")) + ag._pb_len(2, ag._pb_var(1, 1795300000))
+            conn.execute("INSERT INTO trajectory_metadata_blob VALUES('main', ?)", (meta_blob,))
+            # step 0: user input (type 14)
+            ts_md = ag._pb_len(1, ag._pb_var(1, 1795300010))
+            u_payload = ag._pb_len(19, ag._pb_len(2, "帮我检查原生 Antigravity 同步".encode("utf-8")))
+            conn.execute("INSERT INTO steps VALUES(0, 14, 3, ?, ?)", (ts_md, u_payload))
+            # step 1: planner reply + tool_call (type 15)
+            tc = ag._pb_len(1, b"call_1") + ag._pb_len(2, b"read_file") + ag._pb_len(3, b'{"Path":"a.py"}')
+            p_payload = ag._pb_len(20, ag._pb_len(3, b"thinking...") + ag._pb_len(1, "已定位 WAL 同步问题".encode("utf-8")) + ag._pb_len(7, tc))
+            conn.execute("INSERT INTO steps VALUES(1, 15, 3, ?, ?)", (ts_md, p_payload))
+            # step 2: generic tool result with MISSING text (smigrate 曾在此报错崩溃)
+            t_md = ts_md + ag._pb_len(4, ag._pb_len(1, b"call_1") + ag._pb_len(2, b"read_file"))
+            t_payload = ag._pb_len(140, ag._pb_len(2, b""))
+            conn.execute("INSERT INTO steps VALUES(2, 132, 3, ?, ?)", (t_md, t_payload))
+            conn.commit()
+        finally:
+            conn.close()
+
+        exp = ag.export_antigravity_db(dbp)
+        self.assertEqual(exp["capture"]["agent"], "antigravity")
+        self.assertEqual(exp["capture"]["cwd"], r"E:\demo-repo")
+        self.assertEqual(exp["capture"]["completeness"], "full")
+        types = [b["type"] for b in exp["conversation"]]
+        self.assertEqual(types, ["text", "thinking", "text", "tool_call", "tool_result"])
+        self.assertIn("Antigravity", exp["conversation"][0]["content"])
+        self.assertIn("empty/binary", exp["conversation"][4]["output"])
+
 
 if __name__ == "__main__":
     unittest.main()

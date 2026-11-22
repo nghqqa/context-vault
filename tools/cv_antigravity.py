@@ -285,6 +285,200 @@ def _antigravity_normalize_steps(db_path: Path) -> int:
     return n
 
 
+def _pb_str(fields: dict, fn: int) -> str:
+    vals = fields.get((fn, 2))
+    if not vals:
+        return ""
+    raw = vals[0]
+    if isinstance(raw, (bytes, bytearray)):
+        return raw.decode("utf-8", errors="replace")
+    return str(raw)
+
+
+def _pb_epoch_iso(meta_bytes: bytes | None) -> str:
+    if not meta_bytes:
+        return ""
+    mf, _ = _pb_decode(bytes(meta_bytes))
+    ts_raw = mf.get((1, 2))
+    if not ts_raw:
+        return ""
+    tf, _ = _pb_decode(bytes(ts_raw[0]))
+    secs = tf.get((1, 0))
+    if not secs or not secs[0]:
+        return ""
+    try:
+        return dt.datetime.fromtimestamp(int(secs[0]), tz=dt.timezone.utc).astimezone().isoformat(timespec="seconds")
+    except (OSError, OverflowError, ValueError):
+        return ""
+
+
+def _agv_uri_to_cwd(uri: str) -> str:
+    """将 file:///e:/context-vault 或 file:///e%3A/context-vault 规范化为本地路径。"""
+    import urllib.parse
+    s = (uri or "").strip()
+    if not s:
+        return ""
+    if s.lower().startswith("file://"):
+        parsed = urllib.parse.urlparse(s)
+        p = urllib.parse.unquote(parsed.path or "")
+        if len(p) >= 3 and p[0] == "/" and p[2] == ":":
+            p = p[1].upper() + p[2:]
+            p = p.replace("/", "\\")
+        return p
+    return s
+
+
+def export_antigravity_db(db_path: Path, drop_developer: bool = False) -> dict:
+    """零依赖原生只读解析 Antigravity conversations/*.db (含 WAL 模式):
+    直接解码 trajectory_metadata_blob + steps protobuf, 无需外部 smigrate,
+    彻底规避 smigrate 遇空/二进制 generic 工具结果报错丢会话以及 cwd 失真问题。"""
+    dbp = Path(db_path)
+    cv_mod = _cv()
+    stats = cv_mod.zero_stats()
+    # 只读 URI 打开 (自动读取同目录 .db-wal, 永不修改 Antigravity 原库)
+    conn = sqlite3.connect(f"file:{dbp.resolve().as_posix()}?mode=ro", uri=True, timeout=10)
+    try:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "steps" not in tables:
+            return {"capture": {"agent": "antigravity", "source_format": "antigravity-db",
+                                "session_ref": dbp.stem, "cwd": "", "completeness": "empty"},
+                    "stats": stats, "conversation": [], "created_at": cv_mod.now_iso()}
+
+        cascade_id = dbp.stem
+        if "trajectory_meta" in tables:
+            row = conn.execute("SELECT cascade_id FROM trajectory_meta ORDER BY rowid LIMIT 1").fetchone()
+            if row and row[0]:
+                cascade_id = str(row[0])
+
+        cwd = ""
+        created_at = ""
+        if "trajectory_metadata_blob" in tables:
+            mrow = conn.execute("SELECT data FROM trajectory_metadata_blob ORDER BY rowid LIMIT 1").fetchone()
+            if mrow and mrow[0]:
+                mf, _ = _pb_decode(bytes(mrow[0]))
+                ws_raw = mf.get((1, 2))
+                if ws_raw:
+                    wsf, _ = _pb_decode(bytes(ws_raw[0]))
+                    cwd = _agv_uri_to_cwd(_pb_str(wsf, 1) or _pb_str(wsf, 2))
+                if not cwd:
+                    cwd = _agv_uri_to_cwd(_pb_str(mf, 7))
+                ts_raw = mf.get((2, 2))
+                if ts_raw:
+                    tf, _ = _pb_decode(bytes(ts_raw[0]))
+                    secs = tf.get((1, 0))
+                    if secs and secs[0]:
+                        try:
+                            created_at = dt.datetime.fromtimestamp(
+                                int(secs[0]), tz=dt.timezone.utc
+                            ).astimezone().isoformat(timespec="seconds")
+                        except (OSError, OverflowError, ValueError):
+                            pass
+
+        blocks: list[dict] = []
+        has_assistant = False
+        first_ts = ""
+        last_ts = ""
+        rows = conn.execute(
+            "SELECT idx, step_type, metadata, step_payload FROM steps ORDER BY CAST(idx AS INTEGER)"
+        ).fetchall()
+        for _idx, stype, md, sp in rows:
+            if not sp:
+                continue
+            ts = _pb_epoch_iso(md)
+            if ts:
+                if not first_ts:
+                    first_ts = ts
+                last_ts = ts
+            outer, _ = _pb_decode(bytes(sp))
+            if stype == 14:  # User input
+                u_raw = outer.get((19, 2))
+                if not u_raw:
+                    continue
+                uf, _ = _pb_decode(bytes(u_raw[0]))
+                txt = _pb_str(uf, 2).strip()
+                if not txt:
+                    sub3 = uf.get((3, 2))
+                    if sub3:
+                        sf3, _ = _pb_decode(bytes(sub3[0]))
+                        txt = _pb_str(sf3, 1).strip()
+                if txt:
+                    blk = {"type": "text", "role": "user", "content": txt}
+                    if ts:
+                        blk["ts"] = ts
+                    blocks.append(blk)
+            elif stype == 15:  # Planner response (thinking + visible reply + tool calls)
+                p_raw = outer.get((20, 2))
+                if not p_raw:
+                    continue
+                pf, _ = _pb_decode(bytes(p_raw[0]))
+                thought = _pb_str(pf, 3).strip()
+                reply = (_pb_str(pf, 1) or _pb_str(pf, 8)).strip()
+                if thought:
+                    blk = {"type": "thinking", "summary": thought}
+                    if ts:
+                        blk["ts"] = ts
+                    blocks.append(blk)
+                if reply:
+                    has_assistant = True
+                    blk = {"type": "text", "role": "assistant", "content": reply}
+                    if ts:
+                        blk["ts"] = ts
+                    blocks.append(blk)
+                for tc_raw in pf.get((7, 2)) or []:
+                    tcf, _ = _pb_decode(bytes(tc_raw))
+                    cid = _pb_str(tcf, 1)
+                    name = _pb_str(tcf, 2) or "tool"
+                    args_str = _pb_str(tcf, 3)
+                    try:
+                        args_obj = json.loads(args_str) if args_str else {}
+                    except ValueError:
+                        args_obj = {"raw": args_str}
+                    blk = {"type": "tool_call", "call_id": cid, "name": name, "args": args_obj}
+                    if ts:
+                        blk["ts"] = ts
+                    blocks.append(blk)
+            elif stype == 132:  # Generic tool result (空/二进制结果安全降级, 永不丢整会话)
+                cid, tname = "", ""
+                if md:
+                    mf2, _ = _pb_decode(bytes(md))
+                    f4 = mf2.get((4, 2))
+                    if f4:
+                        cf, _ = _pb_decode(bytes(f4[0]))
+                        cid = _pb_str(cf, 1)
+                        tname = _pb_str(cf, 2)
+                out_txt = ""
+                g_raw = outer.get((140, 2))
+                if g_raw:
+                    gf, _ = _pb_decode(bytes(g_raw[0]))
+                    res_raw = gf.get((2, 2))
+                    if res_raw:
+                        rf, _ = _pb_decode(bytes(res_raw[0]))
+                        out_txt = _pb_str(rf, 1)
+                clipped, _trunc = cv_mod.clip(out_txt or "(empty/binary tool output)")
+                blk = {"type": "tool_result", "call_id": cid, "name": tname or "tool", "output": clipped}
+                if ts:
+                    blk["ts"] = ts
+                blocks.append(blk)
+        stats["blocks_total"] = len(blocks)
+        completeness = "full" if has_assistant else ("no_assistant_text" if blocks else "empty")
+        return {
+            "capture": {
+                "agent": "antigravity",
+                "source_format": "antigravity-db",
+                "session_ref": cascade_id,
+                "source_session_id": cascade_id,
+                "originator": "antigravity",
+                "cwd": cwd,
+                "completeness": completeness,
+            },
+            "stats": stats,
+            "conversation": blocks,
+            "created_at": last_ts or created_at or first_ts or cv_mod.now_iso(),
+        }
+    finally:
+        conn.close()
+
+
 def _antigravity_read_cascade_id(db_path: Path) -> str:
     """从导出库读取 cascade_id (优先 trajectory_meta, 回退 blob field 6)。"""
     import sqlite3

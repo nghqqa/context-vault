@@ -182,26 +182,23 @@ class _DedupSet:
 
 class _DedupSql:
     """SQL 指纹查证 (增量): blockhash 表 = 当前已索引块的全局指纹账本。
-    本批新见指纹同时记入内存集合 (同批链后继免查库即可判重); 落库统一延迟到
-    _commit_staging 的同一事务 — 崩溃整批回滚, 账本与索引永不跨代分叉
-    (旧实现逐文件 commit, 中途崩溃会留下指向未索引快照的孤儿账本)。"""
-    __slots__ = ("conn", "lock", "rows", "_batch")
+    构造期一次性将已有指纹载入内存集合 (O(1) 判重, 避免无索引逐块全表扫 O(N*M) 卡死);
+    落库统一延迟到 _commit_staging 的同一事务 — 崩溃整批回滚, 账本与索引永不跨代分叉。"""
+    __slots__ = ("rows", "_seen")
 
     def __init__(self, conn, lock):
-        self.conn = conn
-        self.lock = lock
         self.rows = []
-        self._batch = set()
+        with lock:
+            try:
+                self._seen = {r[0] for r in conn.execute("SELECT h FROM blockhash")}
+            except sqlite3.Error:
+                self._seen = set()
 
     def dup(self, fp: int) -> bool:
-        if fp in self._batch:
-            return True
-        with self.lock:
-            return self.conn.execute(
-                "SELECT 1 FROM blockhash WHERE h=? LIMIT 1", (fp,)).fetchone() is not None
+        return fp in self._seen
 
     def add(self, fp: int, ord_: int, doc: int):
-        self._batch.add(fp)
+        self._seen.add(fp)
         self.rows.append((fp, ord_, doc))
 
     def flush(self):
@@ -716,6 +713,7 @@ CREATE TABLE IF NOT EXISTS sid_rows(sid TEXT PRIMARY KEY, row_json BLOB);
 CREATE TABLE IF NOT EXISTS sid_mtimes(sid TEXT PRIMARY KEY, mtime INTEGER);
 CREATE TABLE IF NOT EXISTS terms(term TEXT PRIMARY KEY, df INTEGER, docs BLOB, tfs BLOB);
 CREATE TABLE IF NOT EXISTS blockhash(h INTEGER, sid_ord INTEGER, doc INTEGER);
+CREATE INDEX IF NOT EXISTS idx_blockhash_h ON blockhash(h);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value BLOB);
 """
 

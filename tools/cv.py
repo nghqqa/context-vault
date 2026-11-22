@@ -1698,12 +1698,11 @@ ANTIGRAVITY_CONV_DIR = HOME / ".gemini" / "antigravity" / "conversations"
 
 def _sync_antigravity_dbs(conn, vault: Path, debounce=False) -> tuple:
     """Antigravity 本地会话回灌: ~/.gemini/antigravity/conversations/*.db → 快照。
-    键 antigravity:<cascade>; smigrate convert --format antigravity --to claude 中转后按
-    claude-projects 适配器解析 (原生库 source=1 需 smigrate 本机补丁才能读, 见 memory)。
-    自导入会话 (migrations.jsonl dest 命中) 跳过, 防导出↔回灌回环吸入。"""
-    exe = find_smigrate()
-    if not exe or not ANTIGRAVITY_CONV_DIR.exists():
+    优先走零依赖原生 SQLite+Protobuf 直读 (支持 WAL 实时检测、精准 cwd、不因空/二进制工具输出失败);
+    老格式原生读空时再兜底试 smigrate。自导入会话 (migrations.jsonl dest 命中) 跳过防回环。"""
+    if not ANTIGRAVITY_CONV_DIR.exists():
         return (0, 0, 0)
+    exe = find_smigrate()
     imported: set[str] = set()
     for v in load_migrations(vault).values():
         stem = Path(v.get("dest", "")).stem
@@ -1719,38 +1718,53 @@ def _sync_antigravity_dbs(conn, vault: Path, debounce=False) -> tuple:
         key = f"antigravity:{cascade}"
         try:
             st = dbp.stat()
+            wal = dbp.parent / (dbp.name + "-wal")
+            wst = wal.stat() if wal.exists() else None
+            eff_mtime = max(st.st_mtime, wst.st_mtime if wst else 0.0)
+            eff_size = st.st_size + (wst.st_size if wst else 0)
         except OSError:
             continue
-        prev = conn.execute("SELECT mtime, snapshot_id, synced_at FROM sync_sources WHERE path=?",
+        prev = conn.execute("SELECT mtime, size, snapshot_id, synced_at FROM sync_sources WHERE path=?",
                             (key,)).fetchone()
-        if prev and abs((prev["mtime"] or 0) - st.st_mtime) < 1:
+        if prev and abs((prev["mtime"] or 0) - eff_mtime) < 1 and (prev["size"] or 0) == eff_size:
             continue
-        if debounce and prev and prev["snapshot_id"] and _debounced(prev["synced_at"], st.st_mtime):
+        if debounce and prev and prev["snapshot_id"] and _debounced(prev["synced_at"], eff_mtime):
             continue
-        tmp = outbox / f"agy-src-{dbp.stem}.jsonl"
+        exported = None
         try:
-            r = subprocess.run([exe, "convert", str(dbp), "--format", "antigravity",
-                                "--to", "claude", "--output", str(tmp)],
-                               capture_output=True, text=True, timeout=300,
-                               creationflags=NO_WINDOW)
-            if r.returncode != 0 or not tmp.exists():
-                continue
-            exported = export_claude_code(tmp, False)
+            exported = export_antigravity_db(dbp, False)
         except Exception:
-            continue
-        finally:
-            tmp.unlink(missing_ok=True)
-        if exported["stats"]["blocks_total"] == 0:
+            exported = None
+        if (not exported or exported["stats"]["blocks_total"] == 0) and exe:
+            tmp = outbox / f"agy-src-{dbp.stem}.jsonl"
+            try:
+                r = subprocess.run([exe, "convert", str(dbp), "--format", "antigravity",
+                                    "--to", "claude", "--output", str(tmp)],
+                                   capture_output=True, text=True, timeout=120,
+                                   creationflags=NO_WINDOW)
+                if r.returncode == 0 and tmp.exists():
+                    exported = export_claude_code(tmp, False)
+            except Exception:
+                pass
+            finally:
+                tmp.unlink(missing_ok=True)
+        if not exported or exported["stats"]["blocks_total"] == 0:
+            # 记录空/不可解析水位, 避免每轮 2 分钟重复撞墙空耗 CPU
+            conn.execute("INSERT OR REPLACE INTO sync_sources(path,mtime,size,snapshot_id,synced_at)"
+                         " VALUES(?,?,?,?,?)",
+                         (key, eff_mtime, eff_size, prev["snapshot_id"] if prev else "", now_iso()))
             continue
         exported["capture"]["agent"] = "antigravity"
         exported["capture"]["source_format"] = "antigravity-db"
         envelope = build_envelope(exported)
+        if exported.get("created_at"):
+            envelope["created_at"] = exported["created_at"]
         sid = snapshot_id(envelope)
         if prev and prev["snapshot_id"]:
             if prev["snapshot_id"] == sid:
                 conn.execute("INSERT OR REPLACE INTO sync_sources"
                              "(path,mtime,size,snapshot_id,synced_at) VALUES(?,?,?,?,?)",
-                             (key, st.st_mtime, st.st_size, sid, now_iso()))
+                             (key, eff_mtime, eff_size, sid, now_iso()))
                 continue
             envelope["lineage"]["parent_snapshot"] = prev["snapshot_id"]
         out = vault / "snapshots" / f"{sid}.json"
@@ -1758,9 +1772,9 @@ def _sync_antigravity_dbs(conn, vault: Path, debounce=False) -> tuple:
             atomic_write_text(out, json.dumps(envelope, ensure_ascii=False, indent=1))
         register_snapshot(conn, envelope, sid, out)
         conn.execute("INSERT OR REPLACE INTO sync_sources(path,mtime,size,snapshot_id,synced_at)"
-                     " VALUES(?,?,?,?,?)", (key, st.st_mtime, st.st_size, sid, now_iso()))
-        n_upd += 1 if prev else 0
-        n_new += 0 if prev else 1
+                     " VALUES(?,?,?,?,?)", (key, eff_mtime, eff_size, sid, now_iso()))
+        n_upd += 1 if prev and prev["snapshot_id"] else 0
+        n_new += 0 if (prev and prev["snapshot_id"]) else 1
     return (n_new, n_upd, 0)
 
 
@@ -2457,6 +2471,7 @@ from cv_antigravity import (  # noqa: F401,E402
     _antigravity_fill_step_timestamps,
     _antigravity_normalize_steps,
     _antigravity_read_cascade_id,
+    export_antigravity_db,
     _antigravity_resolve_project_id,
     _antigravity_set_workspace,
     _antigravity_ws_uris,
