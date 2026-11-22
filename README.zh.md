@@ -25,10 +25,20 @@
 - **公开可复现 Benchmark**——`python benchmarks/run_bench.py` 30 秒复现 162 题五维度消融（v0→v2 全演进链），见 [docs/BENCHMARK.md](docs/BENCHMARK.md)。
 - **token 账本**——从你自己会话文件内嵌的 usage 记录聚合出按模型成本、缓存命中率，不需要任何代理。`cv ledger sync` 直接只读采集 Claude Code / Codex / ZCode / Antigravity 四端本地日志（幂等去重）形成 `usage_events` 事件流，`cv ledger quota` 输出 5 小时滚动窗口、恢复 ETA、7d/月跑道（可选 `vault/accounts.json` 账号额度池）与按模型/项目/账号排行——纯本地离线，无需 headroom。
 - **跨会话双时态记忆**——从历史自动提取决策/偏好/摘要/踩坑/架构红线，每条带精确出处（快照#块 + 会话真实时间）与主题签名；方案被推翻时旧记忆自动标记 `superseded` 并默认不再返回，`include_history` 可追溯完整演变链。
-- **MCP 记忆后端**——6 个工具让任意 MCP 客户端（Claude Code / Codex / Cursor）变成"记得住的 agent"，一条命令全客户端接入。
+- **MCP 记忆后端**——6 个工具让任意 MCP 客户端（Claude Code / Codex / Cursor）变成"记得住的 agent"，支持显式 `budget_tokens` 预算裁剪，一条命令全客户端接入。
+- **AML 标准 Add/Search 适配**——内置 `cv-aml` / [tools/aml_adapter.py](tools/aml_adapter.py)（及挂载于 `cv serve` 的 `/aml/add`、`/aml/search`），支持多租户隔离、`request_id` 幂等重放与 `409 Conflict` 冲突检测，附带零依赖 [Dockerfile.aml](Dockerfile.aml)。
+- **可选敏感信息脱敏**——`cv export --redact` 或 `CV_REDACT_SECRETS=1` 在入库前自动对常见 API Key / GitHub Token / AWS Key / JWT / PEM 私钥打码。
 - **上游哨兵**——定时探测 relay `/v1/models`，模型静默消失即刻告警并留审计痕。
 
 ## 🚀 快速开始
+
+```bash
+pip install -e .                   # 可选：注册全局命令 cv / cv-mcp / cv-aml (零第三方依赖)
+cv setup --mcp                     # 一步式初始化：建库 → 同步全端会话 → 账本 → 提取记忆 → 接入 MCP
+cv serve                           # Web 控制台 + 热索引 + 统一 /aml/* 接口 (http://127.0.0.1:8791)
+```
+
+或免安装直接运行（Python 3.9+ 零依赖）：
 
 ```bash
 python tools/cv.py doctor          # 环境体检（零依赖，Python 3.9+）
@@ -90,7 +100,7 @@ vault/
 - 195MB Codex rollout → **1.5 秒**导出 → 12MB 快照；39 个压缩边界、2.24 亿 token 用量、838 对工具调用全部保真。
 - **双向迁移真机验证全部通过**：Codex→Claude 在 2.1.181 里 resume 续写；Claude→Codex 在 0.153.4 里恢复 **373,160 tokens 全量上下文**。
 - 逆向并规避 codex 两代格式陷阱（`ordinal` 数字/字符串互不兼容、resume 走 SQLite thread-store、"rollout is empty" 误导性报错）。
-- 测试 **124+ 用例**，含冷热双路径等价测试——常驻索引与文件扫描回退必须结果一致（"常驻只是加速，不是依赖"被写进了测试）；CI 另有控制台 JS 执行/单元回归与真实浏览器多视口布局探针（380–2560px × 四分区溢出检测）。
+- 测试 **225+ 用例**，含冷热双路径等价测试——常驻索引与文件扫描回退必须结果一致（"常驻只是加速，不是依赖"被写进了测试）；CI 另有控制台 JS 执行/单元回归与真实浏览器多视口布局探针（380–2560px × 四分区溢出检测）。
 
 ## 设计原则
 

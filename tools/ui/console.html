@@ -60,7 +60,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
     <div class="gsearch">
       <span class="gs-ic"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></span>
       <input type="search" id="g-q" placeholder="全局检索历史会话 — 项目名、模型或关键词" aria-label="全局搜索历史会话">
-      <kbd>/ · Enter</kbd>
+      <kbd onclick="openCmdk()" title="打开快速命令面板 (Ctrl/Cmd+K)" style="cursor:pointer;pointer-events:auto">/ · ⌘K</kbd>
     </div>
     <div class="top-actions">
       <button class="btn sm" id="top-sync-btn" onclick="syncVaultNow()" title="扫描 ZCode / Codex / Claude / Antigravity 最新会话入库"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.3-3.55M13.5 2.5v2.4h-2.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span>同步</span></button>
@@ -253,6 +253,14 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
   </div>
   <div id="dw-body"></div>
   <div id="dw-msg-pane" hidden></div>
+</dialog>
+<dialog class="cmdk" id="cmdk" aria-label="快速命令检索" closedby="any">
+  <div class="cmdk-hd">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+    <input type="search" id="cmdk-q" placeholder="即时检索跨会话记忆与历史快照… (↑↓ 选择 · Enter 直达 · Esc 关闭)" aria-label="命令面板检索" oninput="onCmdkInput()" onkeydown="onCmdkKey(event)">
+    <kbd>ESC</kbd>
+  </div>
+  <div class="cmdk-body" id="cmdk-body"><div class="cmdk-empty">输入关键词同时检索长期记忆与全库快照</div></div>
 </dialog>
 <dialog id="confirm-dlg" aria-labelledby="confirm-t">
   <h3 id="confirm-t">确认写入真实会话目录</h3>

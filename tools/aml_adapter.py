@@ -164,9 +164,10 @@ def _truncate_to_tokens(text: str, max_tokens: int) -> str:
 class TenantRouter:
     """按 user_id 隔离的多租户适配器路由器 (带 LRU 上限, 防止 SQLite 句柄泄漏)。"""
 
-    def __init__(self, base_vault: Path | str, max_adapters: int = 64):
+    def __init__(self, base_vault: Path | str, max_adapters: int = 64, default_idx: VaultIndex | None = None):
         self.base_vault = Path(base_vault)
         self.max_adapters = max(1, int(max_adapters))
+        self._default_idx = default_idx
         self._lock = threading.Lock()
         self._adapters: OrderedDict[str, AMLMemoryAdapter] = OrderedDict()
 
@@ -179,7 +180,8 @@ class TenantRouter:
                 self._adapters.move_to_end(key)
                 return ad
             target = self.base_vault if not key else (self.base_vault / "tenants" / key)
-            ad = AMLMemoryAdapter(target)
+            shared_idx = self._default_idx if not key else None
+            ad = AMLMemoryAdapter(target, idx=shared_idx)
             self._adapters[key] = ad
             if len(self._adapters) > self.max_adapters:
                 _, evicted = self._adapters.popitem(last=False)
@@ -198,7 +200,7 @@ class TenantRouter:
 class AMLMemoryAdapter:
     """AML Add / Search 协议适配器 (零第三方依赖, 线程安全)。"""
 
-    def __init__(self, vault: Path | str):
+    def __init__(self, vault: Path | str, idx: VaultIndex | None = None):
         self.vault = Path(vault)
         self._lock = threading.RLock()
         (self.vault / "snapshots").mkdir(parents=True, exist_ok=True)
@@ -209,11 +211,12 @@ class AMLMemoryAdapter:
             conn.commit()
         finally:
             conn.close()
-        self._idx = VaultIndex(self.vault, cv.block_text)
+        self._owns_idx = idx is None
+        self._idx = idx if idx is not None else VaultIndex(self.vault, cv.block_text)
 
     def close(self):
         with self._lock:
-            if getattr(self, "_idx", None) is not None:
+            if getattr(self, "_owns_idx", True) and getattr(self, "_idx", None) is not None:
                 self._idx._close()
 
     def add(
@@ -227,10 +230,18 @@ class AMLMemoryAdapter:
         agent: str = "aml",
         parent_snapshot: str | None = None,
         extract_memory: bool = True,
+        redact: bool | None = None,
     ) -> dict:
         blocks = _to_blocks(messages)
         if not blocks:
             raise ValueError("messages 为空, 无法创建快照")
+        do_redact = (os.environ.get("CV_REDACT_SECRETS") == "1") if redact is None else bool(redact)
+        redacted_n = 0
+        if do_redact:
+            for b in blocks:
+                if isinstance(b.get("content"), str):
+                    b["content"], n = cv.redact_secrets(b["content"])
+                    redacted_n += n
         req_id = _normalize_request_id(request_id)
         eff_cwd = cwd or f"/aml/{project}"
         # 哈希纳入命名空间与完整元数据, 生成纯 hex ID (匹配全链路 ^cv_[0-9a-f]{8,64}$ 守卫)
@@ -383,7 +394,19 @@ class AMLMemoryAdapter:
                         },
                     })
             ctx = self._idx.context(query, limit=top_k)
-            for r in ctx.get("results", []):
+            ctx_results = list(ctx.get("results", []))
+            # 若显式配置了 CV_EMBEDDINGS_URL, 自动用稠密向量 RRF 语义重排快照候选 (零配置零开销)
+            try:
+                from cv_dense import DenseProvider, hybrid_search
+                prov = DenseProvider()
+                if prov.available and ctx_results:
+                    hyb = hybrid_search(self._idx, self.vault, query, top_k, provider=prov)
+                    rank_map = {h["sid"]: i for i, h in enumerate(hyb.get("hits", []))}
+                    if rank_map:
+                        ctx_results.sort(key=lambda r: rank_map.get(r.get("sid", ""), len(rank_map)))
+            except Exception:
+                pass
+            for r in ctx_results:
                 raw_score = float(r.get("score") or 0.0)
                 snap_candidates.append({
                     "source": "snapshot",
@@ -548,6 +571,7 @@ def serve_aml(vault: Path, host: str = "127.0.0.1", port: int = 8792, token: str
                         agent=body.get("agent") or "aml",
                         parent_snapshot=body.get("parent_snapshot"),
                         extract_memory=bool(body.get("extract_memory", True)),
+                        redact=body.get("redact"),
                     )
                     self._send(200, res)
                     return

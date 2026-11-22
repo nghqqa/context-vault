@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "context-vault"
+version = "0.7.0"
+description = "Local-first, vendor-neutral context asset vault for AI coding agents (zero third-party deps)"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+cv = "cv:main"
+cv-mcp = "mcp_server:main"
+cv-aml = "aml_adapter:main"
+
+[tool.setuptools]
+package-dir = {"" = "tools"}
+py-modules = [
+  "cv",
+  "cv_index",
+  "cv_memory",
+  "cv_ledger",
+  "cv_dense",
+  "cv_ui",
+  "mcp_server",
+  "aml_adapter",
+  "antigravity_batch",
+]
+packages = ["ui"]
+
+[tool.setuptools.package-data]
+ui = ["*.html", "*.css", "*.js"]

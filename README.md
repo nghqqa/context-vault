@@ -25,10 +25,20 @@ Your AI coding sessions are your most valuable work asset — yet they're locked
 - **Open reproducible benchmark** — `python benchmarks/run_bench.py` reproduces a 162-query, 5-dimension ablation (full v0→v2 evolution) in ~30s; see [docs/BENCHMARK.md](docs/BENCHMARK.md).
 - **Token ledger** — per-model costs, cache hit rates aggregated from usage records *inside your own session files*. No proxy required. `cv ledger sync` directly harvests Claude Code / Codex / ZCode / Antigravity local logs (read-only, idempotent) into a `usage_events` time series, and `cv ledger quota` reports the 5-hour rolling window, recovery ETA, 7d/monthly runway (optional `vault/accounts.json` quota pools) and per-model/project/account rankings — fully offline, no headroom required.
 - **Cross-session temporal memory** — decisions, preferences, summaries, pitfalls and hard constraints auto-extracted from history with exact provenance (snapshot#block + real session time) and topic signatures; when a decision is superseded, stale memories are marked and hidden by default (`include_history` traces the full evolution chain).
-- **MCP backend** — 6 tools (`vault_remember` etc.) turn any MCP client (Claude Code / Codex / Cursor) into a remembering agent. One command to install everywhere.
+- **MCP backend** — 6 tools (`vault_remember` etc.) turn any MCP client (Claude Code / Codex / Cursor) into a remembering agent with optional `budget_tokens` trimming. One command to install everywhere.
+- **AML Add/Search adapter** — `cv-aml` / `tools/aml_adapter.py` (and `/aml/add`, `/aml/search` mounted on `cv serve`) with tenant isolation, `request_id` idempotent replay & `409 Conflict` detection, plus a zero-dep `Dockerfile.aml`.
+- **Optional secret redaction** — `cv export --redact` or `CV_REDACT_SECRETS=1` masks common API keys, GitHub/AWS tokens, JWTs and PEM private keys before persisting snapshots.
 - **Upstream sentinel** — probes relay `/v1/models`, alerts and leaves an audit trail when a model silently disappears.
 
 ## 🚀 Quick Start
+
+```bash
+pip install -e .                   # optional: installs global `cv`, `cv-mcp`, `cv-aml` commands (zero deps)
+cv setup --mcp                     # one-shot onboarding: init → sync → ledger → memory → MCP install
+cv serve                           # web console + hot index + unified /aml/* API at http://127.0.0.1:8791
+```
+
+Or run directly without installation (zero dependencies, Python 3.9+):
 
 ```bash
 python tools/cv.py doctor          # environment check (zero dependencies, Python 3.9+)
@@ -90,7 +100,7 @@ Two rules that don't bend: **snapshots are immutable** (any derived data lives i
 - 195 MB Codex rollout → 12 MB snapshot in **1.5 s**; 39 compaction boundaries, 224M tokens of usage, 838 tool-call pairs intact.
 - **Bidirectional migration, both directions real-machine verified**: Codex→Claude resumes and continues accurately in Claude 2.1.181; Claude→Codex restores **373,160 tokens of full context** in Codex 0.153.4.
 - Reverse-engineered and dodged the two-generation Codex format trap (numeric vs string `ordinal`, resume reading the SQLite thread-store, misleading "rollout is empty").
-- Test suite: **124+ tests** including a hot/cold equivalence test — the resident index and the file-scan fallback must return identical results ("the daemon accelerates; it is never a dependency"). CI also runs JS syntax/runtime/unit checks and a real-browser layout probe (380–2560px × four sections, page-overflow detection).
+- Test suite: **225+ tests** including a hot/cold equivalence test — the resident index and the file-scan fallback must return identical results ("the daemon accelerates; it is never a dependency"). CI also runs JS syntax/runtime/unit checks and a real-browser layout probe (380–2560px × four sections, page-overflow detection).
 
 ## Design principles
 

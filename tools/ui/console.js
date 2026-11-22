@@ -4,6 +4,7 @@ const $$=s=>document.querySelectorAll(s);
 function applyThemeMeta(v){
   const val=(v==="light"||v==="dark")?v:"light dark";
   try{const m=document.querySelector('meta[name="color-scheme"]');if(m)m.content=val}catch(e){}
+  try{if(document.documentElement&&document.documentElement.dataset){val==="light dark"?delete document.documentElement.dataset.theme:(document.documentElement.dataset.theme=val)}}catch(e){}
   $$(".theme-sw button").forEach(b=>b.setAttribute("aria-pressed",(b.dataset.theme===val)?"true":"false"));
 }
 function setTheme(v){
@@ -121,6 +122,8 @@ const agentCell=a=>"<span class='chip'>"+esc(a||"?")+"</span>";
 const memKindMeta=k=>{
   if(k==="preference")return{t:"偏好",cls:"ok"};
   if(k==="decision")return{t:"决策",cls:"warn"};
+  if(k==="pitfall")return{t:"踩坑",cls:"err"};
+  if(k==="constraint")return{t:"红线",cls:"warn"};
   if(k==="summary")return{t:"摘要",cls:""};
   if(k==="fact")return{t:"事实",cls:""};
   return{t:k||"记忆",cls:""};
@@ -155,16 +158,107 @@ function setTab(t){
 }
 $$("nav.side-nav button").forEach(b=>b.onclick=()=>setTab(b.dataset.t));
 document.addEventListener("keydown",e=>{
+  if((e.ctrlKey||e.metaKey)&&String(e.key||"").toLowerCase()==="k"){
+    e.preventDefault();openCmdk();return;
+  }
   const t=e.target,tag=t&&t.tagName;
   if(tag&&/^(INPUT|SELECT|TEXTAREA)$/.test(tag)){
     if(e.key==="Escape"&&t.blur)t.blur();
     return;
   }
-  if(drawerIsOpen())return;
+  if(drawerIsOpen()||cmdkIsOpen())return;
   if(e.key==="/"){e.preventDefault();const g=$("#g-q");if(g&&g.focus)g.focus();return}
   const n=+e.key;
   if(n>=1&&n<=TABS.length){setTab(TABS[n-1]);e.preventDefault()}
 });
+let cmdkTimer=null,cmdkSeq=0,cmdkItems=[],cmdkIdx=0;
+function cmdkIsOpen(){const d=$("#cmdk");return !!(d&&d.open)}
+function openCmdk(){
+  const d=$("#cmdk");if(!d)return;
+  try{if(!d.open&&d.showModal)d.showModal()}catch(e){}
+  const inp=$("#cmdk-q");
+  if(inp){inp.value=($("#g-q")&&$("#g-q").value)||"";if(inp.focus)inp.focus();if(inp.select)inp.select()}
+  onCmdkInput();
+}
+function closeCmdk(){const d=$("#cmdk");if(d&&d.open&&d.close)d.close()}
+function onCmdkInput(){
+  clearTimeout(cmdkTimer);
+  cmdkTimer=setTimeout(()=>runCmdkSearch(),150);
+}
+async function runCmdkSearch(){
+  const my=++cmdkSeq,body=$("#cmdk-body"),q=($("#cmdk-q")&&$("#cmdk-q").value||"").trim();
+  if(!body)return;
+  if(!q){
+    cmdkItems=[];cmdkIdx=0;
+    body.innerHTML='<div class="cmdk-empty">输入关键词即时检索跨会话记忆与历史快照 · 回车直达</div>';
+    return;
+  }
+  body.innerHTML='<div class="cmdk-empty">检索中…</div>';
+  try{
+    const [mr,sr]=await Promise.all([
+      api("/memory?limit=5&q="+encodeURIComponent(q)).catch(()=>({memories:[]})),
+      api("/search?limit=8&q="+encodeURIComponent(q)).catch(()=>({hits:[]}))
+    ]);
+    if(my!==cmdkSeq)return;
+    const mems=(mr&&mr.memories)||[],hits=(sr&&sr.hits)||[];
+    cmdkItems=[];cmdkIdx=0;
+    let html="";
+    if(mems.length){
+      html+='<div class="cmdk-sec">跨会话记忆 ('+mems.length+')</div>';
+      mems.forEach(m=>{
+        const idx=cmdkItems.length,km=memKindMeta(m.kind),txt=stripMd(m.content).replace(/\s+/g," ").trim();
+        const sid=m.snapshot||"";
+        cmdkItems.push({type:"mem",sid:sid,q:q});
+        html+='<button type="button" class="cmdk-item'+(idx===0?' on':'')+'" data-ci="'+idx+'" onclick="execCmdkItem('+idx+')">'+
+          '<span class="ci-main"><span class="chip '+km.cls+'">'+esc(km.t)+'</span><span>'+highlightPlain(esc(txt.slice(0,84)),q)+'</span></span>'+
+          '<span class="ci-sub">'+esc(m.project||"全局")+'</span></button>';
+      });
+    }
+    if(hits.length){
+      html+='<div class="cmdk-sec">历史快照 ('+hits.length+')</div>';
+      hits.forEach(h=>{
+        const idx=cmdkItems.length,c=cleanSummary(h.first||"");
+        cmdkItems.push({type:"snap",sid:h.sid,ts:h.created_at||""});
+        html+='<button type="button" class="cmdk-item'+(idx===0?' on':'')+'" data-ci="'+idx+'" onclick="execCmdkItem('+idx+')">'+
+          '<span class="ci-main"><span class="chip">'+esc(h.agent||"?")+'</span><span>'+highlightPlain(esc(c.text.slice(0,72)),q)+'</span></span>'+
+          '<span class="ci-sub">'+esc(shortSid(h.sid))+'</span></button>';
+      });
+    }
+    if(!cmdkItems.length){
+      body.innerHTML='<div class="cmdk-empty">未找到匹配「'+esc(q)+'」的记忆或快照</div>';
+      return;
+    }
+    body.innerHTML=html;
+  }catch(e){
+    if(my!==cmdkSeq)return;
+    body.innerHTML='<div class="cmdk-empty">检索失败：'+esc(e.message)+'</div>';
+  }
+}
+function onCmdkKey(e){
+  if(e.key==="Escape"){closeCmdk();return}
+  if(!cmdkItems.length){
+    if(e.key==="Enter"){
+      const q=($("#cmdk-q")&&$("#cmdk-q").value||"").trim();
+      closeCmdk();setTab("snap");$("#snap-q").value=q;q?snapSearch():loadSnaps();
+    }
+    return;
+  }
+  if(e.key==="ArrowDown"||e.key==="ArrowUp"){
+    e.preventDefault();
+    cmdkIdx=(cmdkIdx+(e.key==="ArrowDown"?1:-1)+cmdkItems.length)%cmdkItems.length;
+    $$(".cmdk-item").forEach((el,i)=>el.classList.toggle("on",i===cmdkIdx));
+    return;
+  }
+  if(e.key==="Enter"){e.preventDefault();execCmdkItem(cmdkIdx)}
+}
+function execCmdkItem(idx){
+  const it=cmdkItems[idx];if(!it)return;
+  closeCmdk();
+  if(it.sid&&/^cv_[0-9a-f]{8,64}$/i.test(it.sid)){snapDetail(it.sid,it.ts||"");return}
+  openMemoryView();
+  if($("#snap-q"))$("#snap-q").value=it.q||"";
+  loadMemoryView();
+}
 $("#g-q").addEventListener("keydown",e=>{
   if(e.key!=="Enter")return;
   const q=e.target.value.trim();
@@ -622,6 +716,44 @@ async function dedupMemoriesNow(){
     toast("去重失败："+e.message,1);
   }
 }
+let memComposeOpen=false;
+function toggleMemCompose(){
+  memComposeOpen=!memComposeOpen;
+  return loadMemoryView();
+}
+async function submitManualMem(){
+  const k=($("#mc-kind")&&$("#mc-kind").value)||"decision";
+  const proj=($("#mc-proj")&&$("#mc-proj").value||"").trim()||"manual";
+  const content=($("#mc-txt")&&$("#mc-txt").value||"").trim();
+  const pin=!!($("#mc-pin")&&$("#mc-pin").checked);
+  if(!content){toast("请先输入记忆内容",1);return}
+  try{
+    await api("/memory/add",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({kind:k,project:proj,content:content,pinned:pin})});
+    memComposeOpen=false;
+    toast("已写入长期记忆库");
+    loadOv();
+    await loadMemoryView();
+  }catch(e){toast("写入失败："+e.message,1)}
+}
+async function toggleMemPin(id,nextPin){
+  try{
+    await api("/memory/pin",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({id:id,pinned:!!nextPin})});
+    toast(nextPin?"已置顶该记忆":"已取消置顶");
+    loadOv();
+    await loadMemoryView();
+  }catch(e){toast("操作失败："+e.message,1)}
+}
+async function deleteMemItem(id){
+  try{
+    await api("/memory/delete",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({id:id})});
+    toast("已删除记忆条目 #"+id);
+    loadOv();
+    await loadMemoryView();
+  }catch(e){toast("删除失败："+e.message,1)}
+}
 async function loadMemoryView(){
   snapMemMode=true;snapTreeMode=false;updateSnapTreeBtn();
   const q=($("#snap-q")&&$("#snap-q").value||"").trim();
@@ -642,19 +774,39 @@ async function loadMemoryView(){
     const dock='<div class="mem-dock">'+
       '<div class="mem-pills" role="group" aria-label="记忆类型筛选">'+
         pill("all","全部",totAll)+
-        pill("preference","偏好",cnts.preference||0)+
         pill("decision","决策",cnts.decision||0)+
+        pill("preference","偏好",cnts.preference||0)+
+        pill("pitfall","踩坑",cnts.pitfall||0)+
+        pill("constraint","红线",cnts.constraint||0)+
         pill("summary","压缩摘要",cnts.summary||0)+
       '</div>'+
       '<div class="mem-acts">'+
+        '<button class="btn sm'+(memComposeOpen?' on':'')+'" onclick="toggleMemCompose()">+ 手动记一条</button>'+
         '<button class="btn sm primary" id="mem-ext-btn" onclick="extractMemoriesNow(false)">增量提取记忆</button>'+
         '<button class="btn sm" onclick="dedupMemoriesNow()" title="合并 (类型, 内容) 完全相同的跨快照重复摘录，保留最早一条">去重合并</button>'+
         '<button class="btn sm" onclick="extractMemoriesNow(true)" title="忽略已提取水位，重新扫描全库快照提取记忆">全量重提</button>'+
       '</div></div>';
+    const composeHtml=memComposeOpen?(
+      '<div class="mem-compose">'+
+        '<div class="mem-compose-row">'+
+          '<select id="mc-kind" aria-label="记忆类型">'+
+            '<option value="decision">决策 (decision)</option>'+
+            '<option value="constraint">架构红线 (constraint)</option>'+
+            '<option value="pitfall">踩坑记录 (pitfall)</option>'+
+            '<option value="preference">个人偏好 (preference)</option>'+
+          '</select>'+
+          '<input type="text" id="mc-proj" placeholder="归属项目名 (如 context-vault)" aria-label="归属项目">'+
+          '<label class="hint" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="mc-pin" checked> 置顶优先</label>'+
+          '<button type="button" class="btn sm primary" onclick="submitManualMem()">保存记忆</button>'+
+          '<button type="button" class="btn sm" onclick="toggleMemCompose()">取消</button>'+
+        '</div>'+
+        '<textarea id="mc-txt" placeholder="输入长期有效的架构决策、踩坑结论或个人偏好（将立即对 MCP vault_remember 生效）…"></textarea>'+
+      '</div>'
+    ):"";
     if(!arr.length){
-      $("#snap-list").innerHTML=dock+'<div class="empty">'+WARN+
+      $("#snap-list").innerHTML=dock+composeHtml+'<div class="empty">'+WARN+
         '<div>'+(q?('没有匹配「'+esc(q)+'」的跨会话记忆'):'当前分类下暂无记忆条目')+'</div>'+
-        '<div class="hint">记忆由规则引擎从历史对话中的「决策结论 / 用户偏好 / 压缩摘要」自动提取，不修改原快照。</div>'+
+        '<div class="hint">记忆由规则引擎从历史对话自动提取，也可点击「+ 手动记一条」录入关键红线，永不修改原快照。</div>'+
         '<button class="btn primary" onclick="extractMemoriesNow(false)">立即从全库快照提取</button></div>';
       return;
     }
@@ -663,19 +815,26 @@ async function loadMemoryView(){
       const cleanTxt=stripMd(m.content).replace(/\s+/g," ").trim();
       const sid=m.snapshot||"";
       const validSid=/^cv_[0-9a-f]{8,64}$/i.test(sid);
-      return '<div class="mem-row">'+
+      const isPin=!!m.pinned;
+      const ops=(m.id!=null)?(
+        '<button type="button" class="mem-op'+(isPin?' pin-on':'')+'" onclick="toggleMemPin('+m.id+','+(!isPin)+')">'+(isPin?'已置顶':'置顶')+'</button>'+
+        '<button type="button" class="mem-op del" onclick="deleteMemItem('+m.id+')">删除</button>'
+      ):"";
+      return '<div class="mem-row'+(isPin?' pinned':'')+'">'+
         '<div class="mem-row-top">'+
+          (isPin?'<span class="chip err">置顶</span>':'')+
           '<span class="chip '+km.cls+'">'+esc(km.t)+'</span>'+
           '<span class="chip">'+esc(m.project||"全局")+'</span>'+
           (m.hits>0?'<span class="mini-tag">引用 ×'+num(m.hits)+'</span>':'')+
           '<span class="mem-row-meta">'+
-            (validSid?('来源 '+sidBtn(sid)):esc(sid))+
+            (validSid?('来源 '+sidBtn(sid)):(sid==="manual"?"手动录入":esc(sid)))+
+            ops+
           '</span>'+
         '</div>'+
         '<div class="mem-row-txt">'+highlightPlain(esc(cleanTxt),q)+'</div>'+
       '</div>';
     }).join("");
-    $("#snap-list").innerHTML=dock+'<div class="mem-list">'+listHtml+'</div>';
+    $("#snap-list").innerHTML=dock+composeHtml+'<div class="mem-list">'+listHtml+'</div>';
   }catch(e){
     if(e&&e.stale)return;
     $("#snap-list").innerHTML=errEmpty("记忆库加载失败："+e.message,"loadMemoryView()");

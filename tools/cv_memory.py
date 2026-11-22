@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS memory_items(
   kind TEXT, content TEXT, project TEXT,
   hits INTEGER DEFAULT 0, last_used TEXT,
   block_idx INTEGER, event_ts TEXT, lineage_root TEXT, topic_key TEXT,
-  status TEXT DEFAULT 'active', superseded_by INTEGER, confidence REAL DEFAULT 1.0)
+  status TEXT DEFAULT 'active', superseded_by INTEGER, confidence REAL DEFAULT 1.0,
+  pinned INTEGER DEFAULT 0)
 """
 _MEMORY_TABLE_BASE = _MEMORY_ITEMS_DDL + """;
 CREATE TABLE IF NOT EXISTS memory_extracted(
@@ -51,6 +52,7 @@ _V2_COLUMNS = (
     ("status", "TEXT DEFAULT 'active'"),
     ("superseded_by", "INTEGER"),
     ("confidence", "REAL DEFAULT 1.0"),
+    ("pinned", "INTEGER DEFAULT 0"),
 )
 
 
@@ -589,8 +591,14 @@ def memory_search_api(vault: Path, query: str, limit: int = 8, kind: str | None 
                 rows = conn.execute("SELECT * FROM memory_items WHERE 1=1" + status_clause).fetchall()
         except sqlite3.OperationalError:
             return []  # 只读且零表: 无记忆可检索, 与空库同口径 (修复6)
-        if not terms:  # 速览模式: 按 id 倒序取最新且按 (kind, content) 去重
-            rows.sort(key=lambda r: r["id"], reverse=True)
+        if not terms:  # 速览模式: 置顶优先, 再按 id 倒序取最新且按 (kind, content) 去重
+            rows.sort(
+                key=lambda r: (
+                    1 if ("pinned" in r.keys() and r["pinned"]) else 0,
+                    r["id"],
+                ),
+                reverse=True,
+            )
             out, seen = [], set()
             for r in rows:
                 key = (r["kind"], (r["content"] or "").strip())
@@ -606,10 +614,11 @@ def memory_search_api(vault: Path, query: str, limit: int = 8, kind: str | None 
             low = (r["content"] or "").lower()
             n = sum(low.count(t) for t in terms)
             if n:
-                scored.append((n + (3 if r["kind"] == "summary" else 0), r["id"], r))
-        scored.sort(key=lambda x: (-x[0], -x[1]))
+                is_pin = 1 if ("pinned" in r.keys() and r["pinned"]) else 0
+                scored.append((n + (3 if r["kind"] == "summary" else 0) + (5 if is_pin else 0), is_pin, r["id"], r))
+        scored.sort(key=lambda x: (-x[0], -x[1], -x[2]))
         out, seen = [], set()
-        for n, _, r in scored:
+        for n, _, _, r in scored:
             key = (r["kind"], (r["content"] or "").strip())
             if key in seen:
                 continue
@@ -632,11 +641,104 @@ def memory_search_api(vault: Path, query: str, limit: int = 8, kind: str | None 
         conn.close()
 
 
+VALID_MEMORY_KINDS = ("decision", "preference", "pitfall", "constraint", "summary")
+
+
+def memory_add_manual(
+    vault: Path,
+    content: str,
+    kind: str = "decision",
+    project: str = "manual",
+    pinned: bool = False,
+) -> dict:
+    """手动写入一条长期记忆 (高置信度, 支持置顶与幂等去重)。"""
+    from cv import db, now_iso, SCHEMA
+    txt = str(content or "").strip()
+    if not txt:
+        raise ValueError("记忆内容不能为空")
+    if len(txt) > 2000:
+        txt = txt[:2000]
+    k = str(kind or "decision").strip().lower()
+    if k not in VALID_MEMORY_KINDS:
+        raise ValueError(f"不支持的记忆类型: {k} (可选: {', '.join(VALID_MEMORY_KINDS)})")
+    proj = str(project or "manual").strip()[:120] or "manual"
+    pin_i = 1 if pinned else 0
+    conn = db(vault)
+    try:
+        conn.executescript(SCHEMA)
+        ensure_memory_schema(conn)
+        dup = conn.execute(
+            "SELECT id, pinned FROM memory_items WHERE kind=? AND content=? AND status='active' LIMIT 1",
+            (k, txt),
+        ).fetchone()
+        if dup:
+            new_pin = 1 if (pin_i or (dup["pinned"] or 0)) else 0
+            conn.execute(
+                "UPDATE memory_items SET confidence=5.0, pinned=?, project=? WHERE id=?",
+                (new_pin, proj, dup["id"]),
+            )
+            conn.commit()
+            return {"id": dup["id"], "kind": k, "project": proj, "content": txt,
+                    "pinned": bool(new_pin), "existed": True}
+        now = now_iso()
+        cur = conn.execute(
+            "INSERT INTO memory_items(created_at,snapshot_id,kind,content,project,"
+            "event_ts,status,confidence,pinned) VALUES(?,?,?,?,?,?,'active',5.0,?)",
+            (now, "manual", k, txt, proj, now, pin_i),
+        )
+        conn.commit()
+        return {"id": cur.lastrowid, "kind": k, "project": proj, "content": txt,
+                "pinned": bool(pin_i), "existed": False}
+    finally:
+        conn.close()
+
+
+def memory_delete(vault: Path, mem_id: int) -> dict:
+    """按 id 删除单条记忆 (仅删派生索引表, 永不修改快照文件)。"""
+    from cv import db, SCHEMA
+    if isinstance(mem_id, bool):
+        raise ValueError("id 必须为正整数")
+    mid = int(mem_id)
+    if mid <= 0:
+        raise ValueError("id 必须为正整数")
+    conn = db(vault)
+    try:
+        conn.executescript(SCHEMA)
+        ensure_memory_schema(conn)
+        cur = conn.execute("DELETE FROM memory_items WHERE id=?", (mid,))
+        conn.commit()
+        return {"id": mid, "deleted": cur.rowcount}
+    finally:
+        conn.close()
+
+
+def memory_set_pin(vault: Path, mem_id: int, pinned: bool = True) -> dict:
+    """切换单条记忆的置顶状态。"""
+    from cv import db, SCHEMA
+    if isinstance(mem_id, bool):
+        raise ValueError("id 必须为正整数")
+    mid = int(mem_id)
+    if mid <= 0:
+        raise ValueError("id 必须为正整数")
+    pin_i = 1 if pinned else 0
+    conn = db(vault)
+    try:
+        conn.executescript(SCHEMA)
+        ensure_memory_schema(conn)
+        cur = conn.execute("UPDATE memory_items SET pinned=? WHERE id=?", (pin_i, mid))
+        conn.commit()
+        return {"id": mid, "pinned": bool(pin_i), "updated": cur.rowcount}
+    finally:
+        conn.close()
+
+
 def _memory_row_api(r, score: int) -> dict:
-    """检索行 → API 字典 (v0 键全保留, v2 出处/双时态键增量附加)。"""
-    return {"kind": r["kind"], "content": r["content"], "project": r["project"],
+    """检索行 → API 字典 (v0 键全保留, v2 出处/双时态键 + id/pinned 增量附加)。"""
+    keys = r.keys()
+    return {"id": r["id"], "kind": r["kind"], "content": r["content"], "project": r["project"],
             "snapshot": r["snapshot_id"], "hits": (r["hits"] or 0) + (1 if score else 0),
             "score": score,
             "block_idx": r["block_idx"], "event_ts": r["event_ts"],
             "topic_key": r["topic_key"], "status": r["status"] or "active",
-            "superseded_by": r["superseded_by"], "confidence": r["confidence"]}
+            "superseded_by": r["superseded_by"], "confidence": r["confidence"],
+            "pinned": bool(r["pinned"]) if "pinned" in keys else False}

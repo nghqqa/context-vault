@@ -502,6 +502,55 @@ def _parent_chain_reaches(conn, start: str, target: str, cap: int = 256) -> bool
     return False
 
 
+# ---------------------------------------------------------------- 敏感信息脱敏 (可选, 零依赖)
+
+_SECRET_PATTERNS = (
+    # PEM 私钥块
+    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]+?-----END [A-Z0-9 ]*PRIVATE KEY-----"),
+     "[REDACTED:PRIVATE_KEY]"),
+    # GitHub token (ghp_/gho_/ghu_/ghs_/github_pat_)
+    (re.compile(r"\b(?:gh[pous]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"),
+     "[REDACTED:GITHUB_TOKEN]"),
+    # AWS Access Key ID
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED:AWS_KEY]"),
+    # OpenAI / Anthropic / 通用 sk- 密钥
+    (re.compile(r"\bsk-(?:proj-|ant-api\d+-)?[A-Za-z0-9_-]{20,}\b"), "[REDACTED:API_KEY]"),
+    # JWT 三段式令牌
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+     "[REDACTED:JWT]"),
+)
+
+
+def redact_secrets(text: str) -> tuple[str, int]:
+    """对常见 API Key / Token / 私钥块做正则打码, 返回 (脱敏后文本, 命中次数)。"""
+    if not text or not isinstance(text, str):
+        return text, 0
+    total = 0
+    out = text
+    for pat, repl in _SECRET_PATTERNS:
+        out, n = pat.subn(repl, out)
+        total += n
+    return out, total
+
+
+def redact_envelope(envelope: dict) -> tuple[dict, int]:
+    """原地对 context-snapshot 信封中所有对话块文本做脱敏, 返回 (envelope, 总命中数)。"""
+    hits = 0
+    for blk in envelope.get("conversation") or []:
+        if not isinstance(blk, dict):
+            continue
+        for k in ("content", "text", "summary", "output"):
+            if isinstance(blk.get(k), str) and blk[k]:
+                blk[k], n = redact_secrets(blk[k])
+                hits += n
+        if isinstance(blk.get("args"), dict):
+            for ak, av in list(blk["args"].items()):
+                if isinstance(av, str) and av:
+                    blk["args"][ak], n = redact_secrets(av)
+                    hits += n
+    return envelope, hits
+
+
 def cmd_export(args):
     src = Path(args.source).expanduser()
     fmt = detect_format(first_jsonl(src), src)
@@ -509,6 +558,10 @@ def cmd_export(args):
                  "claude-projects": export_claude_code}
     exported = exporters[fmt](src, args.drop_developer)
     envelope = build_envelope(exported)
+    do_redact = bool(getattr(args, "redact", False)) or os.environ.get("CV_REDACT_SECRETS") == "1"
+    redacted_n = 0
+    if do_redact:
+        envelope, redacted_n = redact_envelope(envelope)
     sid = snapshot_id(envelope)
     vault = vault_dir(args)
     (vault / "snapshots").mkdir(parents=True, exist_ok=True)
@@ -2853,6 +2906,9 @@ from cv_memory import (  # noqa: F401,E402
     memory_dedup,
     memory_counts_api,
     memory_search_api,
+    memory_add_manual,
+    memory_delete,
+    memory_set_pin,
 )
 
 
@@ -4783,14 +4839,23 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
     token: 商业化/局域网档的可选鉴权 — 设置后所有请求需凭据 (X-Vault-Token 头 /
     Cookie vault_token / 首访 ?token= 自动 Set-Cookie), 未授权一律 401。"""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-    # Windows 下默认 allow_reuse_address=1 允许对活动监听端口静默双绑: 第二个 cv serve 收不到
-    # 任何流量却写自己的 serve.json 误导 MCP 读到别的 vault — 恒置 False, 绑定冲突走显式回退
-    ThreadingHTTPServer.allow_reuse_address = False
+
+    # 用局部子类隔离端口复用策略: Windows 下置 False 防止静默双绑抢占; Linux 容器允许复用防 TIME_WAIT 撞端口
+    class _VaultHTTPServer(ThreadingHTTPServer):
+        allow_reuse_address = os.name != "nt"
+
     from urllib.parse import urlparse, parse_qs
     sys.path.insert(0, str(Path(__file__).parent))
     from mcp_server import ledger_summary
     import cv_ledger  # 本地多端账本 (usage_events); 延迟导入防循环 (cv_ledger 顶层 import cv)  # ledger_summary: /stats 端点 (曾漏导入致 500)
     idx = VaultIndex(vault, block_text)  # block_text 用本模块规范实现, 与 mcp 冷回退同源
+    aml_router_holder = [None]
+
+    def _get_aml_router():
+        if aml_router_holder[0] is None:
+            import aml_adapter as _aml
+            aml_router_holder[0] = _aml.TenantRouter(vault, default_idx=idx)
+        return aml_router_holder[0]
 
     class H(BaseHTTPRequestHandler):
         # HTTP/1.0 下 Chromium 系 webview 会复用已被服务端关闭的连接, fetch 全部挂起
@@ -5053,7 +5118,15 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                         lim = int(q.get("limit", 5))
                     except ValueError:
                         return self._json({"error": "invalid limit: 需要整数"}, 400)
-                    if q.get("hybrid") == "1":  # 可选稠密重排 (CV_EMBEDDINGS_URL 配置时生效;
+                    hyb = q.get("hybrid")
+                    use_dense = (hyb == "1")
+                    if hyb is None:
+                        try:
+                            from cv_dense import DenseProvider
+                            use_dense = DenseProvider().available
+                        except Exception:
+                            use_dense = False
+                    if use_dense:  # 可选稠密重排 (CV_EMBEDDINGS_URL 配置时生效;
                         # 未配置/故障时 hybrid_search 内部回退纯结构化, 行为不变)
                         try:
                             from cv_dense import DenseProvider, hybrid_search
@@ -5338,6 +5411,71 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     return self._json(mres)
                 if u.path == "/memory/dedup":
                     return self._json(memory_dedup(vault))
+                if u.path == "/memory/add":
+                    try:
+                        mres = memory_add_manual(
+                            vault,
+                            body.get("content", ""),
+                            kind=body.get("kind") or "decision",
+                            project=body.get("project") or "manual",
+                            pinned=bool(body.get("pinned", False)),
+                        )
+                        return self._json(mres)
+                    except ValueError as e:
+                        return self._json({"error": str(e)}, 400)
+                if u.path == "/memory/delete":
+                    try:
+                        dres = memory_delete(vault, body.get("id"))
+                        return self._json(dres)
+                    except (TypeError, ValueError) as e:
+                        return self._json({"error": str(e)}, 400)
+                if u.path == "/memory/pin":
+                    try:
+                        pres = memory_set_pin(vault, body.get("id"), pinned=bool(body.get("pinned", True)))
+                        return self._json(pres)
+                    except (TypeError, ValueError) as e:
+                        return self._json({"error": str(e)}, 400)
+                if u.path in ("/aml/add", "/aml/search"):
+                    import aml_adapter as _aml
+                    try:
+                        uid = body.get("user_id")
+                        adapter = _get_aml_router().for_user(uid)
+                        if u.path == "/aml/add":
+                            req_id = body.get("request_id")
+                            if req_id is None:
+                                req_id = (
+                                    self.headers.get("Idempotency-Key")
+                                    or self.headers.get("X-Idempotency-Key")
+                                )
+                            ares = adapter.add(
+                                body.get("messages") or [],
+                                session_id=body.get("session_id"),
+                                request_id=req_id,
+                                project=body.get("project") or "aml",
+                                cwd=body.get("cwd") or "",
+                                agent=body.get("agent") or "aml",
+                                parent_snapshot=body.get("parent_snapshot"),
+                                extract_memory=bool(body.get("extract_memory", True)),
+                                redact=body.get("redact"),
+                            )
+                            if not uid:
+                                idx.rebuild()  # 默认主库写入同步刷新热索引
+                            return self._json(ares)
+                        top_k_raw = body.get("top_k", 100)
+                        if isinstance(top_k_raw, bool):
+                            raise ValueError("top_k 必须为整数")
+                        ares = adapter.search(
+                            body.get("query") or "",
+                            top_k=int(top_k_raw),
+                            budget_tokens=body.get("budget_tokens"),
+                            include_memories=bool(body.get("include_memories", True)),
+                            include_history=bool(body.get("include_history", False)),
+                        )
+                        return self._json(ares)
+                    except _aml.RequestConflictError as e:
+                        return self._json({"error": str(e)}, 409)
+                    except ValueError as e:
+                        return self._json({"error": str(e)}, 400)
                 if u.path == "/fork":
                     fid = str(body.get("id") or "")
                     if not self._sid_ok(fid):
@@ -5397,7 +5535,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
     srv, last_err = None, None
     for cand in ([port] if port == 0 else [port, *SERVE_FALLBACK_PORTS, 0]):
         try:
-            srv = ThreadingHTTPServer(("127.0.0.1", cand), H)
+            srv = _VaultHTTPServer(("127.0.0.1", cand), H)
             break
         except OSError as e:
             if cand == port and _cv_service_alive(port):
@@ -5415,6 +5553,16 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
              "started": now_iso()}))
     except OSError:
         pass
+    orig_close = srv.server_close
+
+    def _close_with_aml():
+        try:
+            if aml_router_holder[0] is not None:
+                aml_router_holder[0].close_all()
+        finally:
+            orig_close()
+
+    srv.server_close = _close_with_aml
     return srv, idx
 
 
@@ -5550,6 +5698,59 @@ def cmd_doctor(args):
     print("\n结论: " + ("核心环境就绪" if core_ok else "尚未初始化 vault (运行 python tools/cv.py init 或 sync)"))
 
 
+def cmd_setup(args):
+    """一步式初始化向导: 建库 → 同步全端会话 → 同步多端账本 → 提取记忆 → (可选) 接入 MCP。"""
+    vault = vault_dir(args)
+    print(f"[1/4] 初始化 vault 目录: {vault}")
+    (vault / "snapshots").mkdir(parents=True, exist_ok=True)
+    (vault / "outbox").mkdir(parents=True, exist_ok=True)
+    conn = db(vault)
+    try:
+        conn.executescript(SCHEMA + SYNC_TABLE)
+        ensure_memory_schema(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    print("[2/4] 扫描并同步本地会话资产...")
+    sres = sync_vault(vault, quiet=True)
+    print(f"  同步完成: 新增 {sres.get('new', 0)} · 更新 {sres.get('updated', 0)} · 累计 {sres.get('total', 0)} 快照")
+
+    if not getattr(args, "no_ledger", False):
+        print("[3/4] 同步多端 token 账本 (Claude/Codex/ZCode/Antigravity)...")
+        try:
+            import cv_ledger as _cl
+            lres = _cl.sync_usage_events(vault)
+            print(f"  账本同步完成: 新增事件 {lres.get('added', 0)} · 扫描文件 {lres.get('files_scanned', 0)}")
+        except Exception as e:
+            print(f"  账本同步跳过: {e}")
+    else:
+        print("[3/4] 已跳过多端账本同步 (--no-ledger)")
+
+    print("[4/4] 提取跨会话双时态记忆...")
+    mres = extract_memories_incremental(vault)
+    print(f"  记忆提取完成: 新增 {mres.get('added', 0)} · 活跃 {mres.get('active', 0)} / 总计 {mres.get('total', 0)}")
+
+    if getattr(args, "mcp", False):
+        print("[附加] 自动接入全部检测到的 MCP 客户端...")
+        ns = argparse.Namespace(
+            vault=str(vault),
+            mcp_cmd="install",
+            client="all",
+            all=True,
+            dry_run=False,
+        )
+        try:
+            cmd_mcp(ns)
+        except Exception as e:
+            print(f"  MCP 接入提示: {e}")
+
+    print("\n初始化完成！下一步推荐:")
+    print("  1. 启动 Web 控制台 + 热索引 + AML API:  cv serve  (或 python tools/cv.py serve)")
+    if not getattr(args, "mcp", False):
+        print("  2. 一键接入全部 MCP 客户端:             cv mcp install --all")
+
+
 # ------------------------------------------------- main
 
 def main(argv=None):
@@ -5564,6 +5765,7 @@ def main(argv=None):
     e = sub.add_parser("export", help="导出会话文件为快照 (只读源文件)")
     e.add_argument("source")
     e.add_argument("--drop-developer", action="store_true")
+    e.add_argument("--redact", action="store_true", help="导出前自动脱敏常见 API Key/Token/私钥 (或设 CV_REDACT_SECRETS=1)")
     e.set_defaults(func=cmd_export)
 
     li = sub.add_parser("list", help="列出 vault 内快照或各项目顶层主对话")
@@ -5760,6 +5962,10 @@ def main(argv=None):
     b.set_defaults(func=cmd_backup)
 
     sub.add_parser("doctor").set_defaults(func=cmd_doctor)
+    stp = sub.add_parser("setup", help="一步式初始化向导: 建库 → 同步会话 → 账本 → 记忆 → (可选) MCP")
+    stp.add_argument("--mcp", action="store_true", help="同时自动接入全部本地 MCP 客户端")
+    stp.add_argument("--no-ledger", action="store_true", help="跳过多端 token 账本同步")
+    stp.set_defaults(func=cmd_setup)
     sub.add_parser("repair", help="一次性数据修复: lineage 索引回填 + zcode 历史用量回填 (幂等)"
                    ).set_defaults(func=cmd_repair)
     pr = sub.add_parser("prune", help="中间版本 GC: 每会话每天保留最后一版 + 叶子; fork/孤本整链保留")

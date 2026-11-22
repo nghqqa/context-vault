@@ -294,6 +294,10 @@ _EN_STOPWORDS = frozenset(
     "very can will just should now also about into over after before between out "
     "up down off again further once only own same s t d ll re ve m y".split())
 
+# 极克制的中文纯疑问/礼貌虚词 bigram (仅在 code_aware 模式过滤, 防问句虚词被短噪声刷分)
+_ZH_STOP_BIGRAMS = frozenset(
+    "什么 怎么 如何 请问 一下 是否 哪些 为什 可以 这个 那个 我们 你们 他们 时候".split())
+
 def block_index_terms(text: str, bt: str, tokenizer=tokenize, code_aware: bool = True) -> list:
     """块索引词集 (热索引与冷回退共用同一实现 — 索引体积与冷热等价的关键闸口)。
     tokenizer/code_aware 必须从索引/排序器实例贯穿传入 (消融 V1 vanilla 才能真实生效):
@@ -302,7 +306,7 @@ def block_index_terms(text: str, bt: str, tokenizer=tokenize, code_aware: bool =
     - tool 块 (tool_call/tool_result): 标识符锚点 + CJK bigram 头部截断 (报错摘要头)。
       code_aware=False (vanilla) 时 tool 块退化为纯词切分 (无 ident_set/复合词)。"""
     toks = tokenizer(text)
-    cjk = [t for t in toks if _is_cjk(t[0])]
+    cjk = [t for t in toks if _is_cjk(t[0]) and (not code_aware or t not in _ZH_STOP_BIGRAMS)]
     if bt in ("tool_call", "tool_result"):
         if code_aware:
             return sorted(ident_set(text)) + cjk[:TOOL_CJK_CAP]
@@ -318,6 +322,9 @@ def bm25_idf(n_docs: int, df: int) -> float:
 
 def bm25_tf_norm(tf: int, blen: int, avg_len: float) -> float:
     d = max(float(min(blen, LEN_CAP)), 1.0)
+    # 短块长度下界平滑: 避免极短草稿/巡检块凭借极小 d/avg_len 压制完整技术会话
+    if avg_len > 12.0:
+        d = max(d, 0.35 * avg_len)
     return (tf * (BM25_K1 + 1.0)) / (tf + BM25_K1 * (1.0 - BM25_B + BM25_B * d / max(avg_len, 1.0)))
 
 
@@ -805,7 +812,7 @@ class VaultIndex:
                 "w": weights if isinstance(weights, str) else (weights or DEFAULT_WEIGHTS),
                 "ib": round(float(self.ident_boost), 3),
                 "hl": round(float(self.half_life), 3),
-                "ca": bool(code_aware), "cid": config_id or "",
+                "ca": bool(code_aware), "cid": config_id or "", "sv": 2,
             }, sort_keys=True, default=str)
             self.config_fp = hashlib.sha256(cfg_src.encode("utf-8")).hexdigest()[:16]
         except (TypeError, ValueError):
