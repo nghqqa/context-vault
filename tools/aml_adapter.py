@@ -17,6 +17,7 @@ import os
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import signal
 import sys
 import tempfile
 import threading
@@ -81,6 +82,20 @@ CREATE TABLE IF NOT EXISTS aml_requests (
 
 class RequestConflictError(ValueError):
     """同 request_id 携带不同 payload 时抛出 (映射 HTTP 409 Conflict)。"""
+
+
+def _normalize_request_id(val) -> str | None:
+    """校验并规范化可选的 request_id: 拒绝非字符串、纯空白与超长值。"""
+    if val is None:
+        return None
+    if not isinstance(val, str):
+        raise ValueError("request_id 必须为字符串")
+    cleaned = val.strip()
+    if not cleaned:
+        raise ValueError("request_id 不能为空白字符串")
+    if len(cleaned) > 256:
+        raise ValueError("request_id 长度不能超过 256 字符")
+    return cleaned
 
 
 def _safe_tenant_id(user_id: str) -> str:
@@ -216,6 +231,7 @@ class AMLMemoryAdapter:
         blocks = _to_blocks(messages)
         if not blocks:
             raise ValueError("messages 为空, 无法创建快照")
+        req_id = _normalize_request_id(request_id)
         eff_cwd = cwd or f"/aml/{project}"
         # 哈希纳入命名空间与完整元数据, 生成纯 hex ID (匹配全链路 ^cv_[0-9a-f]{8,64}$ 守卫)
         hash_payload = {
@@ -227,26 +243,33 @@ class AMLMemoryAdapter:
             "agent": agent,
             "parent_snapshot": parent_snapshot,
         }
-        full_hash = hashlib.sha256(
+        payload_hash = hashlib.sha256(
             json.dumps(hash_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:16]
+        # 请求级幂等指纹额外包含 extract_memory, 避免同 request_id 切换行为参数时误重放
+        req_hash = hashlib.sha256(
+            json.dumps(
+                {"payload": hash_payload, "extract_memory": bool(extract_memory)},
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
         ).hexdigest()
-        payload_hash = full_hash[:16]
         sid = f"cv_{payload_hash}"
         snap_path = self.vault / "snapshots" / f"{sid}.json"
 
         with self._lock:
-            if request_id:
+            if req_id is not None:
                 conn = cv.db(self.vault)
                 try:
                     row = conn.execute(
                         "SELECT payload_hash, response_json FROM aml_requests WHERE request_id=?",
-                        (str(request_id),),
+                        (req_id,),
                     ).fetchone()
                 finally:
                     conn.close()
                 if row is not None:
-                    if row[0] != full_hash:
-                        raise RequestConflictError(f"request_id 冲突: {request_id}")
+                    if row[0] != req_hash:
+                        raise RequestConflictError(f"request_id 冲突: {req_id}")
                     cached = json.loads(row[1])
                     cached["idempotent_replay"] = True
                     return cached
@@ -299,26 +322,25 @@ class AMLMemoryAdapter:
             mem_res = {}
             if extract_memory:
                 mem_res = cv_memory.extract_memories_incremental(self.vault)
-        res = {
-            "snapshot_id": sid,
-            "source_session_id": src_sid,
-            "blocks": len(blocks),
-            "memories_extracted": mem_res.get("added", 0) if isinstance(mem_res, dict) else 0,
-            "idempotent_replay": False,
-        }
-        if request_id:
-            with self._lock:
+            res = {
+                "snapshot_id": sid,
+                "source_session_id": src_sid,
+                "blocks": len(blocks),
+                "memories_extracted": mem_res.get("added", 0) if isinstance(mem_res, dict) else 0,
+                "idempotent_replay": False,
+            }
+            if req_id is not None:
                 conn = cv.db(self.vault)
                 try:
                     conn.execute(
-                        "INSERT OR IGNORE INTO aml_requests(request_id, payload_hash, response_json, created_at) "
+                        "INSERT INTO aml_requests(request_id, payload_hash, response_json, created_at) "
                         "VALUES(?,?,?,?)",
-                        (str(request_id), full_hash, json.dumps(res, ensure_ascii=False), cv.now_iso()),
+                        (req_id, req_hash, json.dumps(res, ensure_ascii=False), cv.now_iso()),
                     )
                     conn.commit()
                 finally:
                     conn.close()
-        return res
+            return res
 
     def search(
         self,
@@ -438,7 +460,8 @@ class AMLMemoryAdapter:
 
 
 class _AMLHTTPServer(ThreadingHTTPServer):
-    allow_reuse_address = False
+    # Windows 上关闭地址复用以防端口抢占, POSIX/Linux 容器下启用 SO_REUSEADDR 避免重启撞 TIME_WAIT
+    allow_reuse_address = os.name != "nt"
 
 
 def serve_aml(vault: Path, host: str = "127.0.0.1", port: int = 8792, token: str | None = None):
@@ -510,10 +533,16 @@ def serve_aml(vault: Path, host: str = "127.0.0.1", port: int = 8792, token: str
                 uid = body.get("user_id")
                 adapter = router.for_user(uid)
                 if self.path == "/add":
+                    req_id = body.get("request_id")
+                    if req_id is None:
+                        req_id = (
+                            self.headers.get("Idempotency-Key")
+                            or self.headers.get("X-Idempotency-Key")
+                        )
                     res = adapter.add(
                         body.get("messages") or [],
                         session_id=body.get("session_id"),
-                        request_id=body.get("request_id"),
+                        request_id=req_id,
                         project=body.get("project") or "aml",
                         cwd=body.get("cwd") or "",
                         agent=body.get("agent") or "aml",
@@ -539,20 +568,40 @@ def serve_aml(vault: Path, host: str = "127.0.0.1", port: int = 8792, token: str
                 self._send(400, {"error": str(e)})
 
     srv = _AMLHTTPServer((host, port), Handler)
+    prev_sigterm = None
+    install_sigterm = (
+        hasattr(signal, "SIGTERM")
+        and threading.current_thread() is threading.main_thread()
+    )
+    if install_sigterm:
+        def _handle_sigterm(_signum, _frame):
+            # 在独立线程调用 shutdown, 避免主线程信号回调内自锁
+            threading.Thread(target=srv.shutdown, daemon=True).start()
+        prev_sigterm = signal.signal(signal.SIGTERM, _handle_sigterm)
     print(f"AML adapter listening on http://{host}:{port} (POST /add, POST /search, GET /health)")
     try:
         srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
     finally:
+        if install_sigterm and prev_sigterm is not None:
+            signal.signal(signal.SIGTERM, prev_sigterm)
+        srv.server_close()
         router.close_all()
 
 
-def main(argv=None):
+def _build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Context Vault AML Add/Search 适配器")
-    ap.add_argument("--vault", default=os.environ.get("CV_VAULT_DIR", "vault"))
+    ap.add_argument("--vault", default=os.environ.get("CV_VAULT_DIR") or "vault")
     ap.add_argument("--serve", action="store_true", help="启动 HTTP Add/Search 服务")
-    ap.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
-    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8792")))
+    ap.add_argument("--host", default=os.environ.get("HOST") or "127.0.0.1")
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT") or "8792"))
     ap.add_argument("--token", default=None, help="可选鉴权令牌 (或设 CV_AML_TOKEN)")
+    return ap
+
+
+def main(argv=None):
+    ap = _build_arg_parser()
     args = ap.parse_args(argv)
     if args.serve:
         serve_aml(Path(args.vault), host=args.host, port=args.port, token=args.token)

@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-11-22T12:55:18",
+ "generated_at": "2026-11-22T15:51:00",
  "n_queries": 162,
  "search": [
   {
@@ -11,8 +11,8 @@
    "stale_version_intrusion": 0.5714,
    "abstention_accuracy": 0.4583,
    "index_size_mb": 0.0,
-   "latency_p50_ms": 89.5,
-   "latency_p95_ms": 132.3,
+   "latency_p50_ms": 100.6,
+   "latency_p95_ms": 126.3,
    "build_sec": 0.0,
    "diagnostic_profile": {
     "single_session": {
@@ -848,9 +848,9 @@
    "stale_version_intrusion": 0.8571,
    "abstention_accuracy": 0.6667,
    "index_size_mb": 0.25,
-   "latency_p50_ms": 0.3,
-   "latency_p95_ms": 0.5,
-   "build_sec": 0.16,
+   "latency_p50_ms": 0.4,
+   "latency_p95_ms": 1.0,
+   "build_sec": 0.24,
    "diagnostic_profile": {
     "single_session": {
      "n": 54,
@@ -1685,9 +1685,9 @@
    "stale_version_intrusion": 0.9524,
    "abstention_accuracy": 0.9167,
    "index_size_mb": 0.26,
-   "latency_p50_ms": 0.5,
-   "latency_p95_ms": 0.7,
-   "build_sec": 0.27,
+   "latency_p50_ms": 0.8,
+   "latency_p95_ms": 1.3,
+   "build_sec": 0.52,
    "diagnostic_profile": {
     "single_session": {
      "n": 54,
@@ -2522,9 +2522,9 @@
    "stale_version_intrusion": 0.0,
    "abstention_accuracy": 0.9167,
    "index_size_mb": 0.26,
-   "latency_p50_ms": 0.6,
-   "latency_p95_ms": 0.9,
-   "build_sec": 0.28,
+   "latency_p50_ms": 0.7,
+   "latency_p95_ms": 1.2,
+   "build_sec": 0.41,
    "diagnostic_profile": {
     "single_session": {
      "n": 54,
@@ -3359,9 +3359,9 @@
    "stale_version_intrusion": 0.0,
    "abstention_accuracy": 0.8333,
    "index_size_mb": 0.26,
-   "latency_p50_ms": 0.7,
-   "latency_p95_ms": 1.0,
-   "build_sec": 0.28,
+   "latency_p50_ms": 0.9,
+   "latency_p95_ms": 1.5,
+   "build_sec": 0.37,
    "diagnostic_profile": {
     "single_session": {
      "n": 54,
@@ -4269,21 +4269,21 @@
    "recall_at_5": 0.9825,
    "mrr_at_10": 0.8687,
    "abstention_accuracy": 0.8333,
-   "latency_p95_ms": 1.0
+   "latency_p95_ms": 1.5
   },
   {
    "condition": "noisy(+60)",
-   "recall_at_1": 0.807,
-   "recall_at_5": 0.9825,
-   "mrr_at_10": 0.8687,
-   "abstention_accuracy": 0.8333,
-   "latency_p95_ms": 1.1
+   "recall_at_1": 0.6842,
+   "recall_at_5": 0.6842,
+   "mrr_at_10": 0.6842,
+   "abstention_accuracy": 1.0,
+   "latency_p95_ms": 3.3
   }
  ],
  "streaming": {
   "total_steps": 99,
-  "avg_step_ms": 45.88,
-  "mid_stream_context_hit": 1.0,
+  "avg_step_ms": 42.76,
+  "mid_stream_context_hit": 0.4,
   "final_active_recall": 0.9048,
   "final_stale_intrusion": 0.0
  }

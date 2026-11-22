@@ -133,37 +133,89 @@ def _readonly_index(args_vault):
 
 
 def _estimate_tokens(text: str) -> int:
-    """轻量 token 估算 (与 cv.estimate_text_tokens 口径一致: CJK 约 1.5 字/tok, ASCII 约 4 字/tok)。"""
+    """轻量 token 估算 (与 cv.estimate_text_tokens 完全同口径: CJK ≈ 1 字/tok, ASCII ≈ 4 字/tok)。"""
     if not text:
         return 0
-    ascii_chars = sum(1 for c in text if ord(c) < 128)
-    non_ascii = len(text) - ascii_chars
-    return max(1, (ascii_chars + 3) // 4 + (non_ascii * 2 + 2) // 3)
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    return cjk + (len(text) - cjk) // 4 + 1
+
+
+def _parse_budget_tokens(val) -> int | None:
+    """严格解析可选 budget_tokens 参数: 拒绝 bool 和非整数字符串。"""
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        raise ValueError("budget_tokens 必须为整数, 不能是布尔值")
+    if isinstance(val, int):
+        return val
+    if isinstance(val, str) and val.strip():
+        try:
+            return int(val.strip())
+        except ValueError as e:
+            raise ValueError(f"无效的 budget_tokens: {val!r}") from e
+    raise ValueError(f"无效的 budget_tokens: {val!r}")
+
+
+def _truncate_to_tokens(text: str, max_tokens: int) -> str:
+    """二分截断单条文本, 确保估算 token 数不超过 max_tokens。"""
+    if max_tokens <= 0 or not text:
+        return ""
+    if _estimate_tokens(text) <= max_tokens:
+        return text
+    if max_tokens <= 1:
+        return "…"
+    lo, hi = 0, len(text)
+    best = 0
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        cand = text[:mid] + "…"
+        if _estimate_tokens(cand) <= max_tokens:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return (text[:best] + "…") if best > 0 else "…"
 
 
 def _trim_by_budget(header: str, items: list[str], footer: str,
                     budget_tokens: int | None, hard_cap: int = 12000) -> str:
     """按显式 token 预算从尾部裁剪检索条目 (AML 预算裁剪契约)。"""
-    if not budget_tokens or int(budget_tokens) <= 0:
+    parsed = _parse_budget_tokens(budget_tokens)
+    if parsed is None or parsed <= 0:
         parts = [header, *items] + ([footer] if footer else [])
         return "\n".join(parts)[:hard_cap]
-    budget = max(64, int(budget_tokens))
-    used = _estimate_tokens(header) + (_estimate_tokens(footer) if footer else 0)
+    budget = max(64, parsed)
+    base_used = _estimate_tokens(header) + (_estimate_tokens(footer) if footer else 0)
+    used = base_used
     kept: list[str] = []
+    truncated = False
     for item in items:
         cost = _estimate_tokens(item)
         if kept and used + cost > budget:
+            truncated = True
             break
         if not kept and used + cost > budget:
-            # 至少保留首条 (按字符比例截断到预算内)
-            avail = max(32, (budget - used) * 3)
-            kept.append(item[:avail] + "…")
+            # 至少保留首条: 扣除裁剪提示本身开销后按 token 预算精确截断
+            notice_est = _estimate_tokens(
+                f"... (已按 budget_tokens={budget} 从尾部裁剪: 保留 1/{len(items)} 条)"
+            )
+            avail_tokens = max(8, budget - base_used - notice_est)
+            kept.append(_truncate_to_tokens(item, avail_tokens))
             used = budget
+            truncated = True
             break
         kept.append(item)
         used += cost
+    # 若已保留部分条目触发了裁剪, 检查加上裁剪提示后是否仍超预算 (仅多条时再退一条)
+    if (len(kept) < len(items) or truncated) and len(kept) > 1:
+        notice_cost = _estimate_tokens(
+            f"... (已按 budget_tokens={budget} 从尾部裁剪: 保留 {len(kept)}/{len(items)} 条)"
+        )
+        while len(kept) > 1 and used + notice_cost > budget:
+            removed = kept.pop()
+            used -= _estimate_tokens(removed)
     parts = [header, *kept]
-    if len(kept) < len(items):
+    if len(kept) < len(items) or truncated:
         parts.append(f"... (已按 budget_tokens={budget} 从尾部裁剪: 保留 {len(kept)}/{len(items)} 条)")
     if footer:
         parts.append(footer)
@@ -464,14 +516,18 @@ def _via_service(name: str, args_dict: dict):
                 return "查询词太短"  # 与冷回退同口径
             if not r.get("total"):  # 截断前真实命中数, 同 mcp-6 口径
                 return f"vault 中无相关上下文: {r['query']}"
-            items = [
-                f"\n--- 快照 {h['sid']} 块#{h['block']} ({h['role']}, cwd={h.get('cwd')}) "
-                f"相关度={h['score']} ---\n{h['excerpt']}"
-                for h in r["results"]
-            ]
+            items = []
+            for h in r["results"]:
+                ver = f", 版本链 {h['versions']}" if h.get("versions", 1) > 1 else ""
+                items.append(
+                    f"\n--- 快照 {h['sid']} 块#{h['block']} ({h['role']}, "
+                    f"cwd={h.get('cwd')}{ver}) 相关度={h['score']} ---\n{h['excerpt']}"
+                )
             return _trim_by_budget(
                 f"来自 context-vault 的相关历史上下文 (查询: '{r['query']}', via 热索引):",
-                items, "", bt,
+                items,
+                "\n(以上为历史会话摘录; 引用时注明来源快照)",
+                bt,
             )
         if name == "vault_recent":
             lim = max(1, min(int(args_dict.get('limit', 5)), 200))  # 与 /recent 服务端钳制同口径 (修复5)
@@ -579,6 +635,8 @@ def dispatch(name: str, args_dict: dict, vault: Path) -> str:
     # 优先走常驻服务热索引 (cv serve); 失活自动回退本地文件扫描 — 常驻只是加速, 不是依赖
     global _VAULT
     _VAULT = vault  # 供 _resolve_base 读 vault/serve.json 发现服务实际地址
+    if "budget_tokens" in args_dict:
+        _parse_budget_tokens(args_dict.get("budget_tokens"))
     svc = None if _svc_skip() else _via_service(name, args_dict)  # 负缓存期内直接冷路径 (修复3)
     if svc is not None:
         return svc

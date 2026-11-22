@@ -399,19 +399,40 @@ def run_handoff_panel(tmp: Path, queries: dict) -> list:
 
 
 def run_noisy_panel(queries: dict, clean_ours: dict, n_noise: int = 60) -> list:
-    """AML Coding Memory 式抗噪对照: relevant (纯净语料) vs noisy (混入 60 条干扰会话)。"""
+    """AML Coding Memory 式抗噪对照: relevant (纯净语料) vs noisy (混入 60 条 Hard Negative 干扰会话)。"""
     noisy_tmp = Path(tempfile.mkdtemp(prefix="cv_bench_noisy_"))
     try:
         load_corpus(noisy_tmp)
         snaps_dir = noisy_tmp / "snapshots"
-        topics = ("phoenix-api", "quartz-ui", "cobalt-sync")
+        # Hard Negative 词表: 复用项目名与高频领域词 (retry/verify/store/tokens/socket 等),
+        # 但内容是无关的日常排查/压测草稿, 检验真实抗噪区分度
+        noise_templates = (
+            ("phoenix-api", "retry", "排查 staging 环境 retry 超时告警与 backoff 日志采样，尚未修改生产配置。"),
+            ("phoenix-api", "verify", "复核 webhook verify 签名验签压测脚本与测试密钥轮换清单，未变更线上实现。"),
+            ("phoenix-api", "reconcile", "核对对账任务 reconcile 批处理监控指标与告警阈值，属于例行巡检记录。"),
+            ("phoenix-api", "store", "检查 idempotency store 磁盘占用与索引碎片率，记录维护窗口计划。"),
+            ("phoenix-api", "cutover", "整理 ledger migration cutover 演练检查表与回滚联系人名单。"),
+            ("phoenix-api", "rules", "查看 rate limiter rules 压测报表与限流触发次数统计，无规则变更。"),
+            ("quartz-ui", "VirtualTable", "测试 VirtualTable 滚动帧率与渲染耗时 profiler 截图，仅作性能基线记录。"),
+            ("quartz-ui", "tokens", "导出主题 tokens 设计稿对照表并与视觉团队确认暗色模式对比度。"),
+            ("quartz-ui", "validate", "整理表单 validate 单元测试覆盖率报告与 mock 数据夹具。"),
+            ("quartz-ui", "socket", "记录 websocket socket 断网重连抓包日志与心跳监控面板链接。"),
+            ("cobalt-sync", "sync", "检查 cobalt-sync 增量同步队列积压告警与磁盘 I/O 监控图表。"),
+            ("cobalt-sync", "index", "复核 cobalt-sync 倒排索引压缩比与冷启动耗时统计，无架构变更。"),
+        )
         for i in range(n_noise):
-            proj = topics[i % len(topics)]
+            proj, topic, note = noise_templates[i % len(noise_templates)]
             sid = f"cv_bench_noise_{i:02d}"
+            blocks = [
+                {"type": "text", "role": "user",
+                 "content": f"记录 {proj} 的 {topic} 模块日常巡检与压测草稿 #{i} (当前采用方案待后续评审确认)。"},
+                {"type": "text", "role": "assistant",
+                 "content": f"巡检备注 #{i} ({proj}/{topic}): {note} 已归档临时日志，无正式方案变更。"},
+            ]
             env = {
                 "spec": "context-snapshot/0.1",
                 "id": sid,
-                "created_at": f"2026-10-{(i % 20) + 1:02d}T10:00:00Z",
+                "created_at": f"2026-03-{(i % 28) + 1:02d}T10:00:00",
                 "capture": {
                     "agent": "codex",
                     "source_session_id": f"noise_{i:02d}",
@@ -419,14 +440,20 @@ def run_noisy_panel(queries: dict, clean_ours: dict, n_noise: int = 60) -> list:
                     "project": f"{proj}-noise",
                     "completeness": "full",
                 },
+                "stats": {
+                    "tokens_in": 0,
+                    "tokens_out": 0,
+                    "reasoning_tokens": 0,
+                    "cache_read": 0,
+                    "cache_write": 0,
+                    "total_tokens": 0,
+                    "cost_usd": 0.0,
+                    "usage_events": 0,
+                    "blocks_total": len(blocks),
+                    "blocks_dropped": 0,
+                },
                 "lineage": {"parent_snapshot": None, "fork_of": None},
-                "conversation": [
-                    {"type": "text", "role": "user",
-                     "content": f"Check CI pipeline, lint status, cache warmup and dependency lockfile for {proj} batch #{i}."},
-                    {"type": "text", "role": "assistant",
-                     "content": f"Routine maintenance note #{i} for {proj}: verified test runner, rotated temp logs, no architecture change."},
-                ],
-                "usage": {},
+                "conversation": blocks,
             }
             (snaps_dir / f"{sid}.json").write_text(json.dumps(env, ensure_ascii=False), encoding="utf-8")
         noisy_row = run_search_panel(noisy_tmp, queries, ["Ours"])[0]
@@ -455,16 +482,20 @@ def run_noisy_panel(queries: dict, clean_ours: dict, n_noise: int = 60) -> list:
 def run_streaming_panel(queries: dict) -> dict:
     """AML Streaming 式边写边查评测: 按版本演进顺序交替 Add 与 Search, 验证实时索引与记忆覆盖。"""
     st_tmp = Path(tempfile.mkdtemp(prefix="cv_bench_stream_"))
+    conn = None
+    idx = None
     try:
         (st_tmp / "snapshots").mkdir(parents=True, exist_ok=True)
         conn = cv.db(st_tmp)
-        conn.executescript(cv.SCHEMA + cv_memory.MEMORY_TABLE)
+        conn.executescript(cv.SCHEMA)
+        cv_memory.ensure_memory_schema(conn)
         conn.commit()
         idx = VaultIndex(st_tmp, cv.block_text)
         snaps = sorted((BENCH / "corpus").glob("cv_bench_*.json"),
                        key=lambda p: (p.stem.rsplit("_v", 1)[-1], p.stem))
         tp = queries.get("temporal_update", [])
         step_ms = []
+        seen_chains: set[str] = set()
         mid_probe_done = False
         mid_recall = 0.0
         for i, src in enumerate(snaps, 1):
@@ -477,16 +508,31 @@ def run_streaming_panel(queries: dict) -> dict:
             idx.rebuild()
             cv_memory.extract_memories_incremental(st_tmp)
             step_ms.append((time.perf_counter() - t0) * 1000)
+            seen_chains.add(src.stem.rsplit("_v", 1)[0])
             if not mid_probe_done and i >= len(snaps) // 2 and tp:
                 mid_probe_done = True
-                ok = 0
+                ok, checked = 0, 0
                 for q in tp[:10]:
+                    exp_sids = q.get("expect_sids") or []
+                    target_chains = {s.rsplit("_v", 1)[0] for s in exp_sids}
+                    if target_chains and not (target_chains & seen_chains):
+                        continue  # 该链尚未到达流式当前时刻, 不计分
+                    checked += 1
                     hits = idx.context(q["query"], 3).get("results", [])
-                    if hits:
+                    exp_facts = list(q.get("expect_facts") or []) + list(q.get("stale_facts") or [])
+                    hit_ok = any(
+                        (h.get("sid", "") in exp_sids)
+                        or (h.get("sid", "").rsplit("_v", 1)[0] in target_chains)
+                        or any(f in (h.get("excerpt") or "") for f in exp_facts)
+                        for h in hits
+                    )
+                    if hit_ok:
                         ok += 1
-                mid_recall = round(ok / min(len(tp), 10), 4)
+                mid_recall = round(ok / max(checked, 1), 4)
         conn.close()
+        conn = None
         idx._close()
+        idx = None
         act_ok, act_n, stale_intr, stale_n = 0, 0, 0, 0
         for q in tp:
             hits = cv_memory.memory_search_api(st_tmp, q["query"], 5)
@@ -513,6 +559,16 @@ def run_streaming_panel(queries: dict) -> dict:
             "final_stale_intrusion": round(stale_intr / max(stale_n, 1), 4),
         }
     finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        if idx is not None:
+            try:
+                idx._close()
+            except Exception:
+                pass
         shutil.rmtree(st_tmp, ignore_errors=True)
 
 

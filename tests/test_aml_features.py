@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -266,6 +267,67 @@ class TestAMLFeatures(unittest.TestCase):
             )
             self.assertEqual(st, 200)
             self.assertGreaterEqual(sr_res["total"], 1)
+
+            # 5) HTTP 层 request_id 幂等重放 (200) 与 payload 冲突 (409 Conflict)
+            idem_payload = json.dumps({
+                "user_id": "u_http",
+                "request_id": "http_req_001",
+                "messages": [{"role": "assistant", "content": "决定：HTTP 层启用幂等重放。"}],
+            }).encode("utf-8")
+            st1, r_first = req("POST", "/add", idem_payload)
+            self.assertEqual(st1, 200)
+            self.assertFalse(r_first["idempotent_replay"])
+
+            st2, r_replay = req("POST", "/add", idem_payload)
+            self.assertEqual(st2, 200)
+            self.assertTrue(r_replay["idempotent_replay"])
+            self.assertEqual(r_replay["snapshot_id"], r_first["snapshot_id"])
+
+            st3, r_conflict = req(
+                "POST",
+                "/add",
+                json.dumps({
+                    "user_id": "u_http",
+                    "request_id": "http_req_001",
+                    "messages": [{"role": "assistant", "content": "完全不同的冲突内容。"}],
+                }).encode("utf-8"),
+            )
+            self.assertEqual(st3, 409)
+            self.assertIn("冲突", r_conflict["error"])
+
+            # 6) 兼容 Idempotency-Key 请求头
+            hdr_body = json.dumps({
+                "user_id": "u_http",
+                "messages": [{"role": "user", "content": "通过 Header 传递幂等键。"}],
+            }).encode("utf-8")
+            st4, h1 = req("POST", "/add", hdr_body, headers={"Idempotency-Key": "hdr_req_001"})
+            self.assertEqual(st4, 200)
+            self.assertFalse(h1["idempotent_replay"])
+            st5, h2 = req("POST", "/add", hdr_body, headers={"Idempotency-Key": "hdr_req_001"})
+            self.assertEqual(st5, 200)
+            self.assertTrue(h2["idempotent_replay"])
+            st6, _ = req(
+                "POST",
+                "/add",
+                json.dumps({
+                    "user_id": "u_http",
+                    "messages": [{"role": "user", "content": "Header 幂等键冲突内容。"}],
+                }).encode("utf-8"),
+                headers={"Idempotency-Key": "hdr_req_001"},
+            )
+            self.assertEqual(st6, 409)
+
+            # 7) 非法 request_id (纯空白/非字符串) 返回 400
+            st7, _ = req(
+                "POST",
+                "/add",
+                json.dumps({
+                    "user_id": "u_http",
+                    "request_id": "   ",
+                    "messages": [{"role": "user", "content": "空白 request_id 测试"}],
+                }).encode("utf-8"),
+            )
+            self.assertEqual(st7, 400)
         finally:
             aml_adapter._AMLHTTPServer = orig_cls
             if "srv" in srv_holder:
@@ -333,14 +395,67 @@ class TestAMLFeatures(unittest.TestCase):
             self.assertTrue(replay["idempotent_replay"])
             self.assertEqual(replay["snapshot_id"], first["snapshot_id"])
 
+            # 同 request_id 不同消息内容 → RequestConflictError
             with self.assertRaises(aml_adapter.RequestConflictError):
                 ad.add(
                     [{"role": "user", "content": "完全不同的 payload"}],
                     session_id="ses_idem",
                     request_id="req_001",
                 )
+
+            # 同 request_id 切换 extract_memory 行为参数 → RequestConflictError
+            with self.assertRaises(aml_adapter.RequestConflictError):
+                ad.add(msgs, session_id="ses_idem", request_id="req_001", extract_memory=False)
+
+            # 非法 request_id (空白 / 非字符串) → ValueError
+            for bad_id in ("   ", "", 123, True, ["a"]):
+                with self.assertRaises(ValueError):
+                    ad.add(msgs, session_id="ses_idem", request_id=bad_id)
+
+            # 并发同 request_id 不同 payload: 必须恰好 1 个成功, 其余全抛 RequestConflictError
+            def race(i: int):
+                try:
+                    ad.add(
+                        [{"role": "user", "content": f"并发竞争内容 #{i}"}],
+                        session_id=f"ses_race_{i}",
+                        request_id="req_race_same",
+                        extract_memory=False,
+                    )
+                    return "ok"
+                except aml_adapter.RequestConflictError:
+                    return "conflict"
+
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                outcomes = list(pool.map(race, range(8)))
+            self.assertEqual(outcomes.count("ok"), 1)
+            self.assertEqual(outcomes.count("conflict"), 7)
         finally:
             ad.close()
+
+    def test_cli_env_defaults_handle_empty_strings(self):
+        saved = {k: os.environ.get(k) for k in ("HOST", "PORT", "CV_VAULT_DIR")}
+        try:
+            os.environ["HOST"] = ""
+            os.environ["PORT"] = ""
+            os.environ["CV_VAULT_DIR"] = ""
+            args = aml_adapter._build_arg_parser().parse_args([])
+            self.assertEqual(args.host, "127.0.0.1")
+            self.assertEqual(args.port, 8792)
+            self.assertEqual(args.vault, "vault")
+
+            os.environ["HOST"] = "0.0.0.0"
+            os.environ["PORT"] = "8000"
+            os.environ["CV_VAULT_DIR"] = "/data/vault"
+            args2 = aml_adapter._build_arg_parser().parse_args([])
+            self.assertEqual(args2.host, "0.0.0.0")
+            self.assertEqual(args2.port, 8000)
+            self.assertEqual(args2.vault, "/data/vault")
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
 
 if __name__ == "__main__":
