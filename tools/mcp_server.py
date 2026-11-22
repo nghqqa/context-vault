@@ -132,7 +132,45 @@ def _readonly_index(args_vault):
         return None
 
 
-def t_search(args_vault, query: str, limit: int) -> str:
+def _estimate_tokens(text: str) -> int:
+    """轻量 token 估算 (与 cv.estimate_text_tokens 口径一致: CJK 约 1.5 字/tok, ASCII 约 4 字/tok)。"""
+    if not text:
+        return 0
+    ascii_chars = sum(1 for c in text if ord(c) < 128)
+    non_ascii = len(text) - ascii_chars
+    return max(1, (ascii_chars + 3) // 4 + (non_ascii * 2 + 2) // 3)
+
+
+def _trim_by_budget(header: str, items: list[str], footer: str,
+                    budget_tokens: int | None, hard_cap: int = 12000) -> str:
+    """按显式 token 预算从尾部裁剪检索条目 (AML 预算裁剪契约)。"""
+    if not budget_tokens or int(budget_tokens) <= 0:
+        parts = [header, *items] + ([footer] if footer else [])
+        return "\n".join(parts)[:hard_cap]
+    budget = max(64, int(budget_tokens))
+    used = _estimate_tokens(header) + (_estimate_tokens(footer) if footer else 0)
+    kept: list[str] = []
+    for item in items:
+        cost = _estimate_tokens(item)
+        if kept and used + cost > budget:
+            break
+        if not kept and used + cost > budget:
+            # 至少保留首条 (按字符比例截断到预算内)
+            avail = max(32, (budget - used) * 3)
+            kept.append(item[:avail] + "…")
+            used = budget
+            break
+        kept.append(item)
+        used += cost
+    parts = [header, *kept]
+    if len(kept) < len(items):
+        parts.append(f"... (已按 budget_tokens={budget} 从尾部裁剪: 保留 {len(kept)}/{len(items)} 条)")
+    if footer:
+        parts.append(footer)
+    return "\n".join(parts)[:hard_cap]
+
+
+def t_search(args_vault, query: str, limit: int, budget_tokens: int | None = None) -> str:
     """冷回退搜索 — 三级路径: 常驻服务热索引 > 只读 search_index.db 直查 (毫秒级)
     > 全量文件扫描 ColdRanker。三级共用同一评分/折叠/衰减数学, 命中集一致
     (铁律: 常驻只是加速, 不是依赖)。"""
@@ -155,14 +193,15 @@ def t_search(args_vault, query: str, limit: int) -> str:
         return f"未命中: {query}"
     folded = sum(int(h.get("folded", 0) or 0) for h in r["hits"])
     suffix = f" (折叠 {folded} 个历史版本)" if folded else ""
-    lines = [f"搜索 '{query}' 命中 {r['total']} 个快照{suffix}{via}:"]
+    lines = []
     for h in r["hits"]:
         lines.append(f"  [{h['sid']}] {h['agent']} 得分={h['score']}"
                      f" — {h.get('cwd', '?')} ({str(h.get('created_at', ''))[:10]})")
-    return "\n".join(lines)
+    header = f"搜索 '{query}' 命中 {r['total']} 个快照{suffix}{via}:"
+    return _trim_by_budget(header, lines, "", budget_tokens)
 
 
-def t_context(args_vault, query: str, limit: int) -> str:
+def t_context(args_vault, query: str, limit: int, budget_tokens: int | None = None) -> str:
     """记忆检索: 跨快照找最相关的上下文摘录, 供当前会话引用。
     三级路径同 t_search (同分词/评分/折叠), 保证启停常驻服务不改变命中集合。"""
     import cv as _cv
@@ -182,13 +221,17 @@ def t_context(args_vault, query: str, limit: int) -> str:
         via = ""
     if not r["results"]:
         return f"vault 中无相关上下文: {query}"
-    lines = [f"来自 context-vault 的相关历史上下文 (查询: '{query}'):"]
+    items = []
     for res in r["results"]:
         ver = f", 版本链 {res['versions']}" if res.get("versions", 1) > 1 else ""
-        lines.append(f"\n--- 快照 {res['sid']} 块#{res['block']} ({res['role']}, "
+        items.append(f"\n--- 快照 {res['sid']} 块#{res['block']} ({res['role']}, "
                      f"cwd={res['cwd']}{ver}) 相关度={res['score']} ---\n{res['excerpt']}")
-    lines.append("\n(以上为历史会话摘录; 引用时注明来源快照)")
-    return "\n".join(lines)[:12000]
+    return _trim_by_budget(
+        f"来自 context-vault 的相关历史上下文 (查询: '{query}'):",
+        items,
+        "\n(以上为历史会话摘录; 引用时注明来源快照)",
+        budget_tokens,
+    )
 
 
 def t_snapshot(args_vault, sid: str) -> str:
@@ -393,6 +436,7 @@ def _via_service(name: str, args_dict: dict):
     try:
         if name == "vault_search":
             lim = max(1, min(int(args_dict.get('limit', 5)), 200))  # limit<=0 → 1, 与本地/冷扫同口径 (修复4)
+            bt = args_dict.get("budget_tokens")
             r = _svc_get(f"/search?q={urllib.parse.quote(args_dict.get('query', ''))}"
                          f"&limit={lim}")
             if not r.get("terms"):
@@ -402,24 +446,33 @@ def _via_service(name: str, args_dict: dict):
                 return f"未命中: {r['query']} (via 热索引)"
             folded = sum(int(h.get("folded", 0) or 0) for h in r.get("hits", []))
             suffix = f" (折叠 {folded} 个历史版本)" if folded else ""
-            lines = [f"搜索 '{r['query']}' 命中 {r['total']} 个快照{suffix} (via 热索引):"]
-            for h in r["hits"]:
-                lines.append(f"  [{h['sid']}] {h['agent']} 得分={h['score']} — "
-                             f"{h.get('cwd', '?')} ({str(h.get('created_at', ''))[:10]})")
-            return "\n".join(lines)
+            items = [
+                f"  [{h['sid']}] {h['agent']} 得分={h['score']} — "
+                f"{h.get('cwd', '?')} ({str(h.get('created_at', ''))[:10]})"
+                for h in r["hits"]
+            ]
+            return _trim_by_budget(
+                f"搜索 '{r['query']}' 命中 {r['total']} 个快照{suffix} (via 热索引):",
+                items, "", bt,
+            )
         if name == "vault_context":
             lim = max(1, min(int(args_dict.get('limit', 3)), 200))  # 同修复4: 0/负数钳 1
+            bt = args_dict.get("budget_tokens")
             r = _svc_get(f"/context?q={urllib.parse.quote(args_dict.get('query', ''))}"
                          f"&limit={lim}")
             if not r.get("terms"):
                 return "查询词太短"  # 与冷回退同口径
             if not r.get("total"):  # 截断前真实命中数, 同 mcp-6 口径
                 return f"vault 中无相关上下文: {r['query']}"
-            lines = [f"来自 context-vault 的相关历史上下文 (查询: '{r['query']}', via 热索引):"]
-            for h in r["results"]:
-                lines.append(f"\n--- 快照 {h['sid']} 块#{h['block']} ({h['role']}, cwd={h.get('cwd')}) "
-                             f"相关度={h['score']} ---\n{h['excerpt']}")
-            return "\n".join(lines)[:12000]
+            items = [
+                f"\n--- 快照 {h['sid']} 块#{h['block']} ({h['role']}, cwd={h.get('cwd')}) "
+                f"相关度={h['score']} ---\n{h['excerpt']}"
+                for h in r["results"]
+            ]
+            return _trim_by_budget(
+                f"来自 context-vault 的相关历史上下文 (查询: '{r['query']}', via 热索引):",
+                items, "", bt,
+            )
         if name == "vault_recent":
             lim = max(1, min(int(args_dict.get('limit', 5)), 200))  # 与 /recent 服务端钳制同口径 (修复5)
             r = _svc_get(f"/recent?limit={lim}")
@@ -448,12 +501,14 @@ TOOLS = [
     {"name": "vault_search", "description": "在 context-vault 的全部历史会话快照中搜索关键词, 返回命中的快照列表",
      "inputSchema": {"type": "object", "properties": {
          "query": {"type": "string", "description": "搜索词 (空格分多个词)"},
-         "limit": {"type": "integer", "default": 5}},
+         "limit": {"type": "integer", "default": 5},
+         "budget_tokens": {"type": "integer", "description": "可选 token 预算上限; 超出部分从尾部裁剪"}},
          "required": ["query"]}},
     {"name": "vault_context", "description": "从历史会话中检索与当前任务相关的上下文摘录 (记忆检索, 建议在新任务/新会话开始时调用)",
      "inputSchema": {"type": "object", "properties": {
          "query": {"type": "string", "description": "当前任务/问题关键词"},
-         "limit": {"type": "integer", "default": 3}},
+         "limit": {"type": "integer", "default": 3},
+         "budget_tokens": {"type": "integer", "description": "可选 token 预算上限 (如 2000/4000); 超出部分从尾部裁剪"}},
          "required": ["query"]}},
     {"name": "vault_recent", "description": "列出 vault 中最近的会话快照",
      "inputSchema": {"type": "object", "properties": {
@@ -467,14 +522,16 @@ TOOLS = [
          "query": {"type": "string", "description": "主题关键词 (如 'RBAC 方案' / 'dataset1 调参')"},
          "limit": {"type": "integer", "default": 6},
          "include_history": {"type": "boolean", "default": False,
-                             "description": "true = 追溯决策演变链 (含已 superseded 的旧记忆及其指向)"}},
+                             "description": "true = 追溯决策演变链 (含已 superseded 的旧记忆及其指向)"},
+         "budget_tokens": {"type": "integer", "description": "可选 token 预算上限; 超出部分从尾部裁剪"}},
          "required": ["query"]}},
     {"name": "vault_stats", "description": "token 账本汇总 (本地多端直采: 5h/24h 窗口/缓存命中率/快照数)",
      "inputSchema": {"type": "object", "properties": {}}},
 ]
 
 
-def t_remember(vault: Path, query: str, limit: int, include_history: bool = False) -> str:
+def t_remember(vault: Path, query: str, limit: int, include_history: bool = False,
+               budget_tokens: int | None = None) -> str:
     hist_qs = "&history=1" if include_history else ""
     ms = None
     if not _svc_skip():  # 负缓存生效时不重复探活 (修复3)
@@ -489,8 +546,7 @@ def t_remember(vault: Path, query: str, limit: int, include_history: bool = Fals
         ms = _local_memory(vault, query, limit, include_history)
     if not ms:
         return f"vault 中没有关于「{query}」的记忆。可先运行: python tools/cv.py memory extract"
-    lines = [f"跨会话记忆 ({query}) — 来自 context-vault 历史快照的自动提取"
-             + (" (含历史演变链):" if include_history else " (仅当前有效记忆):")]
+    items = []
     for m in ms:
         provenance = f"项目 {m.get('project') or '?'} · 快照 {m.get('snapshot', '')[:18]}"
         if m.get("block_idx") is not None:
@@ -500,10 +556,17 @@ def t_remember(vault: Path, query: str, limit: int, include_history: bool = Fals
         status = m.get("status") or "active"
         tag = "" if status == "active" else f" [已推翻 ← 见 #{m.get('superseded_by')}]"
         conf = f" · 置信 {m['confidence']:.1f}" if m.get("confidence") else ""
-        lines.append(f"  [{m['kind']}]{tag} {m['content'][:200]}\n"
+        items.append(f"  [{m['kind']}]{tag} {m['content'][:200]}\n"
                      f"      ({provenance}{conf})")
-    lines.append("引用时注明来源快照; 记忆为规则提取, 关键决策请回读原快照核实。")
-    return "\n".join(lines)[:9000]
+    header = (f"跨会话记忆 ({query}) — 来自 context-vault 历史快照的自动提取"
+              + (" (含历史演变链):" if include_history else " (仅当前有效记忆):"))
+    return _trim_by_budget(
+        header,
+        items,
+        "引用时注明来源快照; 记忆为规则提取, 关键决策请回读原快照核实。",
+        budget_tokens,
+        hard_cap=9000,
+    )
 
 
 def _local_memory(vault: Path, query: str, limit: int, include_history: bool = False) -> list:
@@ -520,16 +583,19 @@ def dispatch(name: str, args_dict: dict, vault: Path) -> str:
     if svc is not None:
         return svc
     if name == "vault_search":
-        return t_search(vault, args_dict.get("query", ""), int(args_dict.get("limit", 5)))
+        return t_search(vault, args_dict.get("query", ""), int(args_dict.get("limit", 5)),
+                        args_dict.get("budget_tokens"))
     if name == "vault_context":
-        return t_context(vault, args_dict.get("query", ""), int(args_dict.get("limit", 3)))
+        return t_context(vault, args_dict.get("query", ""), int(args_dict.get("limit", 3)),
+                         args_dict.get("budget_tokens"))
     if name == "vault_recent":
         return t_recent(vault, int(args_dict.get("limit", 5)))
     if name == "vault_snapshot":
         return t_snapshot(vault, args_dict.get("id", ""))
     if name == "vault_remember":
         return t_remember(vault, args_dict.get("query", ""), int(args_dict.get("limit", 6)),
-                          bool(args_dict.get("include_history", False)))
+                          bool(args_dict.get("include_history", False)),
+                          args_dict.get("budget_tokens"))
     if name == "vault_stats":
         return t_stats(vault)
     raise ValueError(f"未知工具: {name}")

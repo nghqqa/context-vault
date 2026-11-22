@@ -219,6 +219,7 @@ def run_search_panel(tmp: Path, queries: dict, variants: list) -> list:
                 chain_leaf[sid] = g["leaf_sid"]
         pos_scores = []
         results = {}
+        dim_stats = {d: {"r1": [], "r5": [], "rr": []} for d in SEARCH_DIMS if d != "abstention"}
         for dim in SEARCH_DIMS:
             for q in dim_qs[dim]:
                 t0 = time.perf_counter()
@@ -231,6 +232,9 @@ def run_search_panel(tmp: Path, queries: dict, variants: list) -> list:
                 r1_all.append(m["R@1"])
                 r5_all.append(m["R@5"])
                 rr_all.append(m["rr10"])
+                dim_stats[dim]["r1"].append(m["R@1"])
+                dim_stats[dim]["r5"].append(m["R@5"])
+                dim_stats[dim]["rr"].append(m["rr10"])
                 n_pos += 1
                 pos_scores.append(hits[0]["score"] if hits else 0.0)
                 results[q["id"]] = sids
@@ -253,6 +257,16 @@ def run_search_panel(tmp: Path, queries: dict, variants: list) -> list:
             if not hits or top1 < tau:
                 ab_ok += 1
         lats.sort()
+        diag = {
+            d: {
+                "n": len(st["r1"]),
+                "recall_at_1": round(sum(st["r1"]) / max(len(st["r1"]), 1), 4),
+                "recall_at_5": round(sum(st["r5"]) / max(len(st["r5"]), 1), 4),
+                "mrr_at_10": round(sum(st["rr"]) / max(len(st["rr"]), 1), 4),
+            }
+            for d, st in dim_stats.items()
+        }
+        diag["abstention"] = {"n": ab_n, "abstention_accuracy": round(ab_ok / max(ab_n, 1), 4)}
         rows.append({
             "variant": name, "panel": "search",
             "recall_at_1": round(sum(r1_all) / max(len(r1_all), 1), 4),
@@ -264,8 +278,11 @@ def run_search_panel(tmp: Path, queries: dict, variants: list) -> list:
             "latency_p50_ms": round(lats[len(lats) // 2], 1) if lats else None,
             "latency_p95_ms": round(lats[int(len(lats) * 0.95) - 1], 1) if lats else None,
             "build_sec": round(build_sec, 2),
+            "diagnostic_profile": diag,
             "per_query": results,
         })
+    if idx_ref is not None and hasattr(idx_ref, "_close"):
+        idx_ref._close()
     return rows
 
 
@@ -381,7 +398,126 @@ def run_handoff_panel(tmp: Path, queries: dict) -> list:
     return rows
 
 
-def render_markdown(search_rows, memory_rows, handoff_rows) -> str:
+def run_noisy_panel(queries: dict, clean_ours: dict, n_noise: int = 60) -> list:
+    """AML Coding Memory 式抗噪对照: relevant (纯净语料) vs noisy (混入 60 条干扰会话)。"""
+    noisy_tmp = Path(tempfile.mkdtemp(prefix="cv_bench_noisy_"))
+    try:
+        load_corpus(noisy_tmp)
+        snaps_dir = noisy_tmp / "snapshots"
+        topics = ("phoenix-api", "quartz-ui", "cobalt-sync")
+        for i in range(n_noise):
+            proj = topics[i % len(topics)]
+            sid = f"cv_bench_noise_{i:02d}"
+            env = {
+                "spec": "context-snapshot/0.1",
+                "id": sid,
+                "created_at": f"2026-10-{(i % 20) + 1:02d}T10:00:00Z",
+                "capture": {
+                    "agent": "codex",
+                    "source_session_id": f"noise_{i:02d}",
+                    "cwd": f"D:\\work\\{proj}-sandbox-{i}",
+                    "project": f"{proj}-noise",
+                    "completeness": "full",
+                },
+                "lineage": {"parent_snapshot": None, "fork_of": None},
+                "conversation": [
+                    {"type": "text", "role": "user",
+                     "content": f"Check CI pipeline, lint status, cache warmup and dependency lockfile for {proj} batch #{i}."},
+                    {"type": "text", "role": "assistant",
+                     "content": f"Routine maintenance note #{i} for {proj}: verified test runner, rotated temp logs, no architecture change."},
+                ],
+                "usage": {},
+            }
+            (snaps_dir / f"{sid}.json").write_text(json.dumps(env, ensure_ascii=False), encoding="utf-8")
+        noisy_row = run_search_panel(noisy_tmp, queries, ["Ours"])[0]
+        return [
+            {
+                "condition": "relevant",
+                "recall_at_1": clean_ours["recall_at_1"],
+                "recall_at_5": clean_ours["recall_at_5"],
+                "mrr_at_10": clean_ours["mrr_at_10"],
+                "abstention_accuracy": clean_ours["abstention_accuracy"],
+                "latency_p95_ms": clean_ours["latency_p95_ms"],
+            },
+            {
+                "condition": f"noisy(+{n_noise})",
+                "recall_at_1": noisy_row["recall_at_1"],
+                "recall_at_5": noisy_row["recall_at_5"],
+                "mrr_at_10": noisy_row["mrr_at_10"],
+                "abstention_accuracy": noisy_row["abstention_accuracy"],
+                "latency_p95_ms": noisy_row["latency_p95_ms"],
+            },
+        ]
+    finally:
+        shutil.rmtree(noisy_tmp, ignore_errors=True)
+
+
+def run_streaming_panel(queries: dict) -> dict:
+    """AML Streaming 式边写边查评测: 按版本演进顺序交替 Add 与 Search, 验证实时索引与记忆覆盖。"""
+    st_tmp = Path(tempfile.mkdtemp(prefix="cv_bench_stream_"))
+    try:
+        (st_tmp / "snapshots").mkdir(parents=True, exist_ok=True)
+        conn = cv.db(st_tmp)
+        conn.executescript(cv.SCHEMA + cv_memory.MEMORY_TABLE)
+        conn.commit()
+        idx = VaultIndex(st_tmp, cv.block_text)
+        snaps = sorted((BENCH / "corpus").glob("cv_bench_*.json"),
+                       key=lambda p: (p.stem.rsplit("_v", 1)[-1], p.stem))
+        tp = queries.get("temporal_update", [])
+        step_ms = []
+        mid_probe_done = False
+        mid_recall = 0.0
+        for i, src in enumerate(snaps, 1):
+            t0 = time.perf_counter()
+            dst = st_tmp / "snapshots" / src.name
+            shutil.copy2(src, dst)
+            env = json.loads(dst.read_text(encoding="utf-8"))
+            cv.register_snapshot(conn, env, src.stem, dst)
+            conn.commit()
+            idx.rebuild()
+            cv_memory.extract_memories_incremental(st_tmp)
+            step_ms.append((time.perf_counter() - t0) * 1000)
+            if not mid_probe_done and i >= len(snaps) // 2 and tp:
+                mid_probe_done = True
+                ok = 0
+                for q in tp[:10]:
+                    hits = idx.context(q["query"], 3).get("results", [])
+                    if hits:
+                        ok += 1
+                mid_recall = round(ok / min(len(tp), 10), 4)
+        conn.close()
+        idx._close()
+        act_ok, act_n, stale_intr, stale_n = 0, 0, 0, 0
+        for q in tp:
+            hits = cv_memory.memory_search_api(st_tmp, q["query"], 5)
+            texts = [h["content"] for h in hits]
+            facts = q.get("expect_facts", [])
+            if facts:
+                act_n += 1
+                if any(f in t for t in texts for f in facts):
+                    act_ok += 1
+            stale = q.get("stale_facts", [])
+            if stale:
+                stale_n += 1
+                for t in texts:
+                    if any(old in t and "由" not in t[max(0, t.find(old) - 12):t.find(old)]
+                           and "旧的" not in t[max(0, t.find(old) - 12):t.find(old)]
+                           for old in stale):
+                        stale_intr += 1
+                        break
+        return {
+            "total_steps": len(snaps),
+            "avg_step_ms": round(statistics.mean(step_ms), 2) if step_ms else 0.0,
+            "mid_stream_context_hit": mid_recall,
+            "final_active_recall": round(act_ok / max(act_n, 1), 4),
+            "final_stale_intrusion": round(stale_intr / max(stale_n, 1), 4),
+        }
+    finally:
+        shutil.rmtree(st_tmp, ignore_errors=True)
+
+
+def render_markdown(search_rows, memory_rows, handoff_rows,
+                    noisy_rows=None, streaming_res=None) -> str:
     lines = ["# CodingVault-Bench 消融实验 (自动生成 — run_bench.py)", ""]
     lines += ["## Panel A — 检索演进", "",
               "| 变体 | Recall@1 | Recall@5 | MRR@10 | 版本入侵率↓ | 拒答准确率 | 索引 MB | P50 ms | P95 ms |",
@@ -404,6 +540,29 @@ def render_markdown(search_rows, memory_rows, handoff_rows) -> str:
     for r in handoff_rows:
         lines.append(f"| {r['variant']} | {r['file_recall_pass_rate']} | "
                      f"{r['pitfall_recall_pass_rate']} | {r['compression_ratio']} |")
+    ours = next((r for r in search_rows if r["variant"] == "Ours"), None)
+    if ours and ours.get("diagnostic_profile"):
+        lines += ["", "## Panel D — Ours 分维度诊断画像", "",
+                  "| 维度 | 题数 | Recall@1 | Recall@5 | MRR@10 | 拒答准确率 |",
+                  "|---|---|---|---|---|---|"]
+        for dim, st in ours["diagnostic_profile"].items():
+            lines.append(f"| {dim} | {st['n']} | {st.get('recall_at_1', '—')} | "
+                         f"{st.get('recall_at_5', '—')} | {st.get('mrr_at_10', '—')} | "
+                         f"{st.get('abstention_accuracy', '—')} |")
+    if noisy_rows:
+        lines += ["", "## Panel E — 抗噪对照 (relevant vs noisy)", "",
+                  "| 条件 | Recall@1 | Recall@5 | MRR@10 | 拒答准确率 | P95 ms |",
+                  "|---|---|---|---|---|---|"]
+        for r in noisy_rows:
+            lines.append(f"| {r['condition']} | {r['recall_at_1']} | {r['recall_at_5']} | "
+                         f"{r['mrr_at_10']} | {r['abstention_accuracy']} | {r['latency_p95_ms']} |")
+    if streaming_res:
+        lines += ["", "## Panel F — Streaming 边写边查评测", "",
+                  f"- 演进步数: {streaming_res['total_steps']} 步 · "
+                  f"单步平均 (入库+索引+记忆): **{streaming_res['avg_step_ms']} ms**",
+                  f"- 流式中段上下文命中率: **{streaming_res['mid_stream_context_hit']}** · "
+                  f"终态 Active Recall: **{streaming_res['final_active_recall']}** · "
+                  f"过期入侵率: **{streaming_res['final_stale_intrusion']}**"]
     return "\n".join(lines) + "\n"
 
 
@@ -423,14 +582,18 @@ def main():
                                        ["Baseline0", "V1", "V2", "V3", "Ours"])
         memory_rows = run_memory_panel(tmp, queries)
         handoff_rows = run_handoff_panel(tmp, queries) if not args.quick else []
+        clean_ours = next(r for r in search_rows if r["variant"] == "Ours")
+        noisy_rows = run_noisy_panel(queries, clean_ours) if not args.quick else []
+        streaming_res = run_streaming_panel(queries) if not args.quick else None
         out_dir = HERE / "results"
         out_dir.mkdir(exist_ok=True)
         payload = {"generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                    "n_queries": n_q, "search": search_rows,
-                   "memory": memory_rows, "handoff": handoff_rows}
+                   "memory": memory_rows, "handoff": handoff_rows,
+                   "noisy": noisy_rows, "streaming": streaming_res}
         (out_dir / "bench_results.json").write_text(
             json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
-        md = render_markdown(search_rows, memory_rows, handoff_rows)
+        md = render_markdown(search_rows, memory_rows, handoff_rows, noisy_rows, streaming_res)
         (out_dir / "BENCH_TABLE.md").write_text(md, encoding="utf-8")
         print(md)
         print(f"results → {out_dir / 'bench_results.json'}")
