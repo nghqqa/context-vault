@@ -951,9 +951,28 @@ def group_conversations_by_project(
             "count": len(ungrouped),
             "conversations": ungrouped,
         })
+    available_agents: list[str] = []
+    try:
+        c = db(vault)
+        try:
+            available_agents = [
+                str(r[0]).strip().lower()
+                for r in c.execute(
+                    "SELECT agent, COUNT(*) AS n FROM snapshots WHERE agent IS NOT NULL AND agent != '' "
+                    "GROUP BY lower(agent) ORDER BY n DESC"
+                ).fetchall()
+                if r[0]
+            ]
+        except sqlite3.OperationalError:
+            available_agents = []
+        finally:
+            c.close()
+    except Exception:
+        available_agents = []
     return {
         "total_projects": len(projects),
         "total_conversations": len(items),
+        "available_agents": available_agents,
         "projects": projects,
     }
 

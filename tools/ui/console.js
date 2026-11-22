@@ -911,14 +911,23 @@ function renderProjectTree(d,q){
     "共 <b class='num'>"+num(tp)+"</b> 个项目文件夹 · <b class='num'>"+num(tc)+
     "</b> 条顶层主对话（已过滤历史版本与子代理碎片"+(treeArchived?"；含已归档":"")+"）"+
     (q?' <button class="xbtn" onclick="$(\'#snap-q\').value=\'\';loadProjectTree()">查看全部项目 ×</button>':"");
+  const baseAgentOpts=[
+    ["zcode","仅 ZCode（默认）"],
+    ["","全部来源（ZCode / Antigravity / Claude / Codex…）"],
+    ["antigravity","仅 Antigravity"],
+    ["claude-code","仅 Claude Code"],
+    ["codex","仅 Codex"]
+  ];
+  const seenAg=new Set(baseAgentOpts.map(x=>x[0]));
+  const extraAgs=((d&&d.available_agents)||[]).filter(a=>a&&!seenAg.has(String(a).toLowerCase()));
+  const agentOptHtml=baseAgentOpts.concat(extraAgs.map(a=>[String(a).toLowerCase(),"仅 "+String(a)])).map(pair=>
+    '<option value="'+esc(pair[0])+'"'+(treeAgent===pair[0]?" selected":"")+'>'+esc(pair[1])+'</option>'
+  ).join("");
   const bar='<div class="proj-dock">'+
     '<div class="proj-toolbar">'+
       '<label for="tree-agent">来源筛选</label>'+
       '<select id="tree-agent" onchange="treeAgent=this.value;loadProjectTree()">'+
-        '<option value="zcode"'+(treeAgent==="zcode"?" selected":"")+'>仅 ZCode（默认）</option>'+
-        '<option value=""'+(treeAgent===""?" selected":"")+'>全部来源（含 Codex / Claude）</option>'+
-        '<option value="codex"'+(treeAgent==="codex"?" selected":"")+'>仅 Codex</option>'+
-        '<option value="claude-code"'+(treeAgent==="claude-code"?" selected":"")+'>仅 Claude Code</option>'+
+        agentOptHtml+
       '</select>'+
       '<label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer">'+
         '<input type="checkbox" id="tree-arch"'+(treeArchived?' checked':'')+' style="accent-color:var(--acc)" onchange="treeArchived=this.checked;loadProjectTree()">包含已归档</label>'+
