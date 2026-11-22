@@ -34,10 +34,19 @@ def _env(name: str, default: str = "") -> str:
 class DenseProvider:
     """OpenAI 兼容 embedding 客户端 (默认不存在 = 整层关闭)。"""
 
-    def __init__(self, url: str | None = None, model: str | None = None, key: str | None = None):
-        self.url = url or _env(EMBED_URL_ENV)
-        self.model = model or _env(EMBED_MODEL_ENV, "nomic-embed-text")
-        self.key = key or _env(EMBED_KEY_ENV)
+    def __init__(self, url: str | None = None, model: str | None = None,
+                 key: str | None = None, vault: Path | None = None):
+        cfg = {}
+        if vault is not None:
+            try:
+                from cv_semantic import load_ai_config
+                cfg = load_ai_config(vault)
+            except Exception:
+                cfg = {}
+        self.url = (url or _env(EMBED_URL_ENV) or str(cfg.get("embeddings_url") or "").strip())
+        self.model = (model or _env(EMBED_MODEL_ENV) or str(cfg.get("embeddings_model") or "").strip()
+                      or "nomic-embed-text")
+        self.key = (key or _env(EMBED_KEY_ENV) or str(cfg.get("embeddings_key") or "").strip())
         try:
             self.timeout = float(_env(EMBED_TIMEOUT_ENV, "8"))
         except ValueError:
@@ -153,7 +162,7 @@ def hybrid_search(idx, vault: Path, query: str, limit: int,
     lim = max(1, int(limit))
     base = idx.search(query, max(lim, RRF_CANDIDATES))
     fallback_hits = base["hits"][:lim]
-    provider = provider or DenseProvider()
+    provider = provider or DenseProvider(vault=vault)
     if not provider.available or not base["hits"]:
         return {**base, "hits": fallback_hits, "hybrid": False}
     owned_cache = cache is None

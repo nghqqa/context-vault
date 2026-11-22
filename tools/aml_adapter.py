@@ -398,7 +398,7 @@ class AMLMemoryAdapter:
             # 若显式配置了 CV_EMBEDDINGS_URL, 自动用稠密向量 RRF 语义重排快照候选 (零配置零开销)
             try:
                 from cv_dense import DenseProvider, hybrid_search
-                prov = DenseProvider()
+                prov = DenseProvider(vault=self.vault)
                 if prov.available and ctx_results:
                     hyb = hybrid_search(self._idx, self.vault, query, top_k, provider=prov)
                     rank_map = {h["sid"]: i for i, h in enumerate(hyb.get("hits", []))}
