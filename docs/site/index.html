@@ -28,6 +28,10 @@
   --acc-soft:light-dark(#fceceb,rgba(255,100,90,.15));
   --acc-line:light-dark(#f3b7b3,rgba(255,100,90,.36));
   --acc-ink:#ffffff;
+  --cta:light-dark(#141414,#ededeb);
+  --cta-hover:light-dark(#2c2c2c,#d6d6d2);
+  --cta-ink:light-dark(#ffffff,#111111);
+  --link:light-dark(#1d5bbf,#6ea8fe);
   --warn:light-dark(#9a5200,#f5b027);
   --warn-bg:light-dark(#fef5e7,rgba(245,176,39,.13));
   --warn-line:light-dark(#edd09a,rgba(245,176,39,.34));
@@ -105,8 +109,8 @@ svg{flex:none;display:block}
   transition:background .12s ease,border-color .12s ease}
 .btn:hover{border-color:var(--ink-3);background:var(--bg-subtle)}
 .btn:active{transform:translateY(1px)}
-.btn.primary{background:var(--acc);border-color:var(--acc);color:var(--acc-ink)}
-.btn.primary:hover{background:#be1b12;border-color:#be1b12}
+.btn.primary{background:var(--cta);border-color:var(--cta);color:var(--cta-ink)}
+.btn.primary:hover{background:var(--cta-hover);border-color:var(--cta-hover)}
 .btn svg{width:16px;height:16px}
 .hero .meta{margin-top:20px;color:var(--ink-3);font-size:13px;line-height:1.8}
 @media(prefers-reduced-motion:no-preference){
@@ -359,13 +363,13 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
         </article>
         <article class="card">
           <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 2.5v5m6-5v5M6.5 7.5h11v3.5a5.5 5.5 0 0 1-11 0V7.5ZM12 16.5V21"/></svg></div>
-          <h3>MCP 记忆后端</h3>
-          <p><code>vault_remember</code> 等 6 个工具，一条命令接入 <code>Claude Code</code> / <code>Codex</code> / <code>Cursor</code>，让任意 MCP 客户端变成"记得住的 agent"。</p>
+          <h3>MCP 与 AML 记忆后端</h3>
+          <p><code>vault_remember</code> 等 6 个 MCP 工具支持显式 <code>budget_tokens</code> 预算裁剪，一条命令接入 <code>Claude Code</code> / <code>Codex</code> / <code>Cursor</code> / <code>Antigravity</code>；另内置 AML <code>Add/Search</code> 适配与多租户隔离。</p>
         </article>
         <article class="card">
           <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M3 9h18M6.5 6.8h.01M9.3 6.8h.01"/></svg></div>
-          <h3>本地控制台</h3>
-          <p><code>cv serve</code> 在 <code>127.0.0.1:8791</code> 起一个零外部请求的 Web 工作台：概览台账、快照检索、迁移工作台、上游哨兵。</p>
+          <h3>本地控制台与语义增强</h3>
+          <p><code>cv serve --open</code> 零外发本地工作台：<code>Ctrl+K</code> 命令面板、记忆手动录入/置顶、高密度配额胶囊面板、Antigravity 原生 WAL 同步，可选接本地 Ollama 做向量重排与记忆精炼。</p>
         </article>
       </div>
     </div>
@@ -438,11 +442,11 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
         <p class="sub">2026-10-27 ~ 11-18 本机实测；与 docs/BENCHMARK.md、benchmarks/results 同源，不挑选、不修饰。</p>
       </div>
       <div class="stats">
-        <div class="stat"><span class="v">124+</span><span class="k">测试用例 · 含冷热双路径等价</span></div>
+        <div class="stat"><span class="v">234</span><span class="k">自动化单测 · 含冷热双路径等价与并发压测</span></div>
         <div class="stat"><span class="v">-87<small>%</small></span><span class="k">千级快照索引体积（778.5 → 100.9 MiB）</span></div>
-        <div class="stat"><span class="v">39<small>ms</small></span><span class="k">千级快照检索 P95（加权 BM25 + Lineage 折叠）</span></div>
+        <div class="stat"><span class="v">1.0</span><span class="k">Ours Recall@5（162 题金标 · P95 &lt;1ms）</span></div>
         <div class="stat"><span class="v">0.0</span><span class="k">过期记忆入侵率（双时态冲突覆盖）</span></div>
-        <div class="stat"><span class="v">162</span><span class="k">金标评测题 · 五维度消融一键复现（CodingVault-Bench）</span></div>
+        <div class="stat"><span class="v">162</span><span class="k">金标评测题 · 五维度 + 抗噪 / 流式消融</span></div>
         <div class="stat"><span class="v">0</span><span class="k">第三方依赖 · 纯 Python 标准库</span></div>
       </div>
       <p class="note">双向迁移在 Claude Code <code>2.1.181</code> 与 Codex <code>0.153.4</code> 真机 resume 续写验证；桥接读 / 写各覆盖 18 种 harness 格式。<strong>CodingVault-Bench</strong>：162 题五维度金标消融（v0 词集交集 → v2 全演进链对照）随仓库开源，<code>python benchmarks/run_bench.py</code> 一键复现，详见 <a href="https://github.com/nghqqa/context-vault/blob/main/docs/BENCHMARK.md">docs/BENCHMARK.md</a>。</p>
@@ -455,21 +459,18 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
       <div class="sec-head">
         <span class="kicker">04 · 快速开始</span>
         <h2>三条命令跑起来</h2>
-        <p class="sub">纯 Python 标准库，克隆即用；核心功能不需要任何 API key。完整命令与场景见 <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.md" style="color:var(--accent);text-decoration:underline">用户手册</a>。</p>
+        <p class="sub">纯 Python 标准库，克隆即用；核心功能不需要任何 API key。完整场景与快捷键指南见 <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.md" style="color:var(--link);text-decoration:underline">用户手册</a>。</p>
       </div>
       <div class="term">
-        <button class="copy" id="copy-clone" type="button">复制</button>
-<pre><span class="pr">$</span> git clone https://github.com/nghqqa/context-vault
-<span class="pr">$</span> cd context-vault
-<span class="pr">$</span> python tools/cv.py doctor             <span class="cm"># 环境体检：零依赖，Python 3.9+</span>
-<span class="pr">$</span> python tools/cv.py sync               <span class="cm"># 扫描全部本地会话源入库（增量 + lineage）</span>
-<span class="pr">$</span> python tools/cv.py serve              <span class="cm"># Web 控制台 → http://127.0.0.1:8791</span>
-<span class="pr">$</span> python tools/cv.py mcp install --all  <span class="cm"># claude / codex / cursor 一键接入 MCP</span></pre>
+        <button class="copy" id="copy-clone" type="button">复制全部</button>
+<pre><span class="pr">$</span> git clone https://github.com/nghqqa/context-vault &amp;&amp; cd context-vault &amp;&amp; pip install -e .
+<span class="pr">$</span> cv setup --mcp     <span class="cm"># 一步到位：建库 → 同步全端会话 → 账本 → 提取记忆 → 接入 MCP</span>
+<span class="pr">$</span> cv serve --open    <span class="cm"># 启动本地热索引服务并自动打开 Web 控制台 (127.0.0.1:8791)</span></pre>
       </div>
-      <p class="term-label">试一次迁移（默认 dry-run，不加 <code style="font-family:var(--mono)">--apply</code> 绝不碰真实会话目录）</p>
+      <p class="term-label">试一次跨工具迁移（默认 dry-run，不加 <code style="font-family:var(--mono)">--apply</code> 绝不碰真实会话目录）</p>
       <div class="term">
-<pre><span class="pr">$</span> python tools/cv.py migrate ~/.claude/transcripts/ses_xxx.jsonl --target codex  <span class="cm"># 产物先落 vault/outbox/</span>
-<span class="pr">$</span> python tools/cv.py import cv_xxxx --target codex --apply                       <span class="cm"># --apply 才写真实目录</span></pre>
+<pre><span class="pr">$</span> cv migrate ~/.claude/transcripts/ses_xxx.jsonl --target codex  <span class="cm"># 产物先落 vault/outbox/</span>
+<span class="pr">$</span> cv import cv_xxxx --target codex --apply                       <span class="cm"># --apply 才写真实目录</span></pre>
       </div>
       <div class="privacy-row">
         <span class="pv"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>只读源文件 · 永不改写</span>
@@ -517,7 +518,7 @@ window.addEventListener("storage",function(e){
 });
 
 /* 复制走 Async Clipboard（GH Pages 恒为 https secure context）；失败也如实反馈，不做假成功 */
-var CLONE_CMD="git clone https://github.com/nghqqa/context-vault";
+var CLONE_CMD="git clone https://github.com/nghqqa/context-vault && cd context-vault && pip install -e .\ncv setup --mcp\ncv serve --open";
 var copyBtn=document.getElementById("copy-clone");
 if(copyBtn){
   copyBtn.addEventListener("click",function(){
@@ -528,7 +529,7 @@ if(copyBtn){
       p=navigator.clipboard.writeText(CLONE_CMD);
     }catch(e){t("复制失败","bad");return}
     p.then(function(){t("已复制","ok")},function(){t("复制失败","bad")});
-    setTimeout(function(){t("复制")},1800);
+    setTimeout(function(){t("复制全部")},1800);
   });
 }
 })();

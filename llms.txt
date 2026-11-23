@@ -1,36 +1,41 @@
 # Context Vault
 
-> Local-first asset vault for AI coding sessions: immutable content-addressed snapshots, honest bidirectional Codex⇄Claude Code migration, token ledger from session usage records, code-aware weighted BM25 retrieval with lineage folding (-87% index size at thousand-snapshot scale, P95 39ms), temporal memory with automatic conflict superseding (stale-memory intrusion 0.0; --history traces the evolution chain), budgeted five-slot handoff brief, MCP backend, and a reproducible 162-query ablation benchmark. Pure Python stdlib, zero dependencies, all data stays on the machine.
+> Local-first asset vault for AI coding sessions: immutable content-addressed snapshots, honest bidirectional Codex⇄Claude Code migration, native Antigravity `.db`/WAL reader, token ledger & real-time quota monitor, code-aware weighted BM25 + optional dense RRF retrieval with lineage folding (-87% index size, O(1) incremental dedup), temporal memory with manual CRUD/pinning and conflict superseding (stale-memory intrusion 0.0), budgeted five-slot handoff brief, MCP backend (with `budget_tokens`), AML Add/Search adapter (tenant isolation + `request_id`/409 idempotency + `Dockerfile.aml`), optional Ollama/LLM semantic refinement, and a reproducible 162-query ablation benchmark. Pure Python stdlib, zero dependencies, all data stays on the machine.
 
 Rules for agents using this tool: never modify source session files (read-only); migration is dry-run by default — write to real session dirs only with explicit `--apply` after showing the user the diff; every memory cites its source snapshot — verify important decisions by re-reading the snapshot; the resident service on 127.0.0.1:8791 is an accelerator only, file-scan fallback returns identical results.
 
+## Quick Start
+
+- `pip install -e .` — optional zero-dep install registering global `cv`, `cv-mcp`, `cv-aml` commands (or run `python tools/cv.py ...` directly)
+- `cv setup --mcp` — one-shot onboarding: init vault → sync all local agents → sync ledger → extract memories → register MCP clients
+- `cv serve --open` — start local web console + hot-index HTTP API + unified `/aml/add`, `/aml/search` at `http://127.0.0.1:8791`
+
 ## Commands
 
-- `python tools/cv.py doctor` — environment check
-- `python tools/cv.py sync` — incremental intake from all local session sources (+lineage)
-- `python tools/cv.py export <session-file>` — snapshot a session (idempotent, content-addressed)
-- `python tools/cv.py migrate <file> --target codex|claude` — export → honest diff → import (dry-run by default; `--apply` writes real dirs)
-- `python tools/cv.py ingest <file> [--format X]` — bridged read via session-migrate (18 formats)
-- `python tools/cv.py export-harness <sid> --to X` — bridged write (18 targets)
-- `python tools/cv.py memory extract` / `memory search "query"` — temporal memory (decisions/preferences/pitfalls/constraints; active-only by default, `--history` traces superseded chains; every item cites snapshot#block + real session time)
-- `python benchmarks/run_bench.py` — reproducible 162-query ablation (CodingVault-Bench)
-- `python tools/cv.py ledger sync [--recompute]` — direct local read-only usage intake across Claude Code / Codex / ZCode / Antigravity (incl. exact per-model `gen_metadata` parsing)
-- `python tools/cv.py ledger quota [--window 5h|24h|7d|30d]` — 5h rolling window, cooldown/recovery ETA, real-time provider/IDE quotas, and per-model/project/client breakdown
-- `python tools/cv.py ledger stats` — local multi-client token ledger & cache hit-rate summary
-- `python tools/cv.py backup [--out DIR] [--keep N]` — consistent vault zip with rotation
-- `python tools/cv.py serve` — web console + hot-index HTTP API at 127.0.0.1:8791 (loopback-guarded)
-- `python tools/cv.py mcp install --all` — register the MCP backend in claude/codex/cursor
+- `cv doctor` — environment check
+- `cv sync [--debounce]` — incremental intake across Claude Code / Codex / ZCode / Antigravity (native WAL-aware reader + lineage)
+- `cv export <session-file> [--redact]` — snapshot a session (idempotent, content-addressed; `--redact` or `CV_REDACT_SECRETS=1` masks common secrets)
+- `cv migrate <file> --target codex|claude|antigravity|markdown` — export → honest diff → import (dry-run by default; `--apply` writes real dirs)
+- `cv ingest <file> [--format X]` / `cv export-harness <sid> --to X` — bridged read/write via `session-migrate` (18 formats)
+- `cv memory extract|search|list|dedup` — temporal memory (decisions/preferences/pitfalls/constraints; active-only by default, `--history` traces superseded chains)
+- `cv semantic status|setup|refine|titles` — optional Ollama / OpenAI-compatible embeddings (`vault/ai_config.json`), LLM memory refinement & session title cleanup
+- `cv ledger sync [--recompute]` / `cv ledger quota [--window 5h|24h|7d|30d]` / `cv ledger stats` — local multi-client token ledger, 5h cooldown ETA & real-time IDE/provider quotas
+- `cv backup [--out DIR] [--keep N]` / `cv prune [--apply]` — consistent zip backups & daily retention GC
+- `cv mcp install --all` / `cv mcp status` — register MCP backend in claude/codex/cursor/antigravity
+- `cv-aml --serve` — standalone AML Add/Search HTTP server (or `Dockerfile.aml` on `0.0.0.0:8000`)
+- `python benchmarks/run_bench.py` — reproducible 162-query ablation + noisy & streaming panels (CodingVault-Bench)
 
 ## MCP tools
 
-- `vault_remember(query[, include_history])` — long-term memory (decisions/preferences/pitfalls/constraints with snapshot#block + time provenance; stale memories are superseded and hidden by default, include_history traces the chain)
-- `vault_context(query)` — relevant history excerpts for the current task
-- `vault_search(query)` — full-text search over all snapshots
+- `vault_remember(query[, limit, include_history, budget_tokens])` — long-term memory with snapshot#block + time provenance (pinned-first, active-only by default)
+- `vault_context(query[, limit, budget_tokens])` — relevant history excerpts for the current task
+- `vault_search(query[, limit, budget_tokens])` — full-text search over all snapshots
 - `vault_recent(limit)` / `vault_snapshot(id)` / `vault_stats()`
 
 ## Docs
 
-- [Snapshot format spec v0.1](https://github.com/nghqqa/context-vault/blob/main/docs/snapshot-format.md): the vendor-neutral envelope, block types, what migrates and what cannot (incl. txcript six-block mapping)
+- [User Manual](https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.md): 3-minute quick start, console shortcuts, full CLI / AML / semantic / env-var reference & troubleshooting
+- [Snapshot format spec v0.1](https://github.com/nghqqa/context-vault/blob/main/docs/snapshot-format.md): vendor-neutral envelope, block types, what migrates and what cannot
 - [README](https://github.com/nghqqa/context-vault/blob/main/README.md): fidelity table ("what survives"), comparison with porters/memory layers, dependency boundary
-- [BENCHMARK](https://github.com/nghqqa/context-vault/blob/main/docs/BENCHMARK.md): CodingVault-Bench — 162 gold queries, 5 dimensions, full v0→v2 ablation tables + thousand-snapshot scale numbers (all script-generated)
-- [Releases](https://github.com/nghqqa/context-vault/releases): notes include verification receipts (tests, real-machine checks)
+- [BENCHMARK](https://github.com/nghqqa/context-vault/blob/main/docs/BENCHMARK.md): CodingVault-Bench — 162 gold queries, 5 dimensions + noisy/streaming panels (234 unit tests in CI)
+- [Releases](https://github.com/nghqqa/context-vault/releases): verification receipts (tests, real-machine checks)

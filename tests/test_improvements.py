@@ -233,6 +233,23 @@ class TestProjectImprovements(unittest.TestCase):
         finally:
             cv.sync_vault = orig_sync
 
+    def test_cli_help_and_docs_hygiene(self):
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with self.assertRaises(SystemExit) as cm:
+            with redirect_stdout(buf):
+                cv.main(["--help"])
+        self.assertEqual(cm.exception.code, 0)
+        help_txt = buf.getvalue()
+        self.assertIn("cv setup --mcp", help_txt)
+        self.assertIn("cv serve --open", help_txt)
+
+        # 文档卫生: 公开文档不得残留本机 file:/// 绝对路径死链
+        for rel in ("docs/USAGE.md", "README.md", "README.zh.md", "llms.txt"):
+            txt = (ROOT / rel).read_text(encoding="utf-8")
+            self.assertNotIn("file:///", txt, f"{rel} 不应包含本机 file:/// 死链")
+
 
 if __name__ == "__main__":
     unittest.main()

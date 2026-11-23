@@ -67,7 +67,7 @@ from cv_index import (  # noqa: F401 — re-exported as public engine API
 
 FORMAT_VERSION = "0.1"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # noconsole 进程 spawn 控制台程序不弹窗   # context-snapshot 格式版本
-VERSION = "0.7.0"  # 检索引擎 v2 / 双时态记忆 v2 / 预算简报 / CodingVault-Bench          # 工具版本 (发布节奏独立于格式)
+VERSION = "0.8.0"  # 本地多端账本 / 原生 Antigravity WAL 同步 / AML / 语义层 / 瑞士极简控制台
 TOOL_RESULT_LIMIT = 256 * 1024  # spec §8.2 裁决: 单块截断阈值 256KB
 HOME = Path.home()
 HEADROOM_DIR = HOME / ".headroom"
@@ -2720,7 +2720,19 @@ def cmd_semantic(args):
 
 def main(argv=None):
     _force_utf8_stdio()  # 全子命令统一 (曾仅 doctor 有: env -u PYTHONUTF8 下 list --top 管道崩)
-    ap = argparse.ArgumentParser(prog="cv", description="Context Vault — 本地优先上下文资产库")
+    ap = argparse.ArgumentParser(
+        prog="cv",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Context Vault — 本地优先的 AI 编程会话资产库 (零第三方依赖)\n\n"
+            "新手 3 步快速上手:\n"
+            "  1. cv setup --mcp      建库 → 同步全端会话 → 账本 → 提取记忆 → 接入 MCP\n"
+            "  2. cv serve --open     启动本地热索引服务并自动打开 Web 控制台\n"
+            "  3. cv migrate <文件> --target codex|claude   跨工具迁移 (默认 dry-run)\n\n"
+            "常用高频子命令: setup · serve · sync · migrate · mcp · ledger · memory · semantic"
+        ),
+        epilog="完整场景指南见 docs/USAGE.md；加 --vault <目录> 可切换库路径 (默认 ./vault)。",
+    )
     ap.add_argument("--version", action="version", version=f"context-vault {VERSION}")
     ap.add_argument("--vault", default="vault", help="vault 目录 (默认 ./vault)")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -2915,8 +2927,9 @@ def main(argv=None):
     wt.add_argument("--file", help="监听目标覆盖 (默认 ~/.headroom/upstream-profile.json; 测试用)")
     wt.set_defaults(func=cmd_watch)
 
-    sv = sub.add_parser("serve", help="常驻服务: 热索引 + HTTP API (127.0.0.1)")
+    sv = sub.add_parser("serve", help="常驻服务: 热索引 + Web 控制台 + /aml/* API (127.0.0.1)")
     sv.add_argument("--port", type=int, default=8791)
+    sv.add_argument("--open", action="store_true", help="启动后自动在默认浏览器打开 Web 控制台")
     sv.add_argument("--token", default=None,
                     help="启用鉴权 (或环境变量 CV_SERVE_TOKEN): 客户端首访 ?token= 自动登录, 脚本用 X-Vault-Token 头")
     sv.set_defaults(func=cmd_serve)

@@ -822,16 +822,34 @@ def cmd_serve(args):
     token = args.token or os.environ.get("CV_SERVE_TOKEN")
     srv, idx = build_vault_server(_cv().vault_dir(args), args.port, token=token)
     port = srv.server_address[1]  # 首选端口被保留时会退到备用端口: 打印实际地址
+    base_url = f"http://127.0.0.1:{port}/"
     print(f"vault 热索引就绪: {len(idx.meta)} 快照, {idx.term_count} 词项 (引擎 v2, SQLite 倒排)")
-    print(f"Context Vault 服务已启动: http://127.0.0.1:{port} (Ctrl+C 退出)")
+    print(f"Context Vault 服务已启动: {base_url} (Ctrl+C 退出)")
     if token:
         print("  鉴权已启用: 首访 http://127.0.0.1:{}/?token=*** 自动登录; "
               "MCP/脚本侧设 CV_SERVE_TOKEN 同值".format(port))
     print("  MCP server 自动发现本服务走热索引 (vault/serve.json; CV_VAULT_SVC 可显式覆盖)")
     print("  本地访问防护已启用: Host/Origin 回环校验 + POST 强制 application/json"
           " (浏览器跨站与 DNS rebinding 会被 403 拦截, 本地进程不受影响)")
+    if getattr(args, "open", False):
+        import threading
+        import time
+        import webbrowser
+        open_url = f"{base_url}?token={urllib.parse.quote(str(token))}" if token else base_url
+
+        def _open_browser():
+            time.sleep(0.35)
+            try:
+                webbrowser.open(open_url)
+            except Exception:
+                pass
+
+        threading.Thread(target=_open_browser, daemon=True).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         print("\n服务已停止")
+    finally:
+        srv.server_close()
+        idx._close()
 
