@@ -210,6 +210,17 @@ h2{font-size:clamp(20px,3vw,25px);font-weight:700;letter-spacing:-.015em;margin-
 .note code{font-family:var(--mono);font-size:11.5px}
 
 /* ============ 快速开始 ============ */
+.dl-card{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;
+  background:var(--bg-surface);border:1px solid var(--line-strong);border-radius:var(--rad-m);
+  padding:16px 18px;margin-bottom:18px}
+.dl-info{min-width:0;flex:1 1 320px}
+.dl-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:14.5px;font-weight:650;color:var(--ink)}
+.dl-tag{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--acc-strong);
+  background:var(--acc-soft);border:1px solid var(--acc-line);border-radius:2px;padding:1px 6px}
+.dl-desc{font-size:12.5px;color:var(--ink-2);margin-top:4px;line-height:1.6}
+.dl-acts{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.dl-sub{font-family:var(--mono);font-size:12px;color:var(--link)}
+.dl-sub:hover{text-decoration:underline;text-underline-offset:3px}
 .term{position:relative;background:#0f1419;border:1px solid #242e3a;border-radius:var(--rad-m);
   box-shadow:var(--shadow-1);overflow:hidden}
 .term pre{margin:0;padding:14px 16px;font:12.5px/1.95 var(--mono);color:#dfe5ea;overflow-x:auto;white-space:pre}
@@ -310,20 +321,24 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
   <!-- ============ Hero ============ -->
   <section class="hero" aria-label="简介">
     <div class="wrap">
-      <span class="badge"><span class="dot" aria-hidden="true"></span>v0.7 · 检索内核 v2 · 本地优先 · MIT 开源</span>
+      <span class="badge"><span class="dot" aria-hidden="true"></span>v0.8.0 · 完全免费 · 本地优先 · Windows 托盘直出</span>
       <h1>换模型、换工具，<br>会话上下文<em>不再清零</em></h1>
       <p class="lede">Context Vault 把 AI 编程会话导出为<b>你自己机器上的中立快照</b>：内容寻址、不可变、带谱系。双向迁移、深度检索、token 账本、双时态记忆、MCP 后端——agent 来来去去，vault 一直在。</p>
       <div class="cta">
-        <a class="btn primary" href="#quickstart">
+        <a class="btn primary" href="https://github.com/nghqqa/context-vault/releases/download/v0.8.0/ContextVault.exe">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19.5h14"/></svg>
+          下载 Windows 托盘版 (.exe)
+        </a>
+        <a class="btn" href="#quickstart">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14m0 0-5-5m5 5-5 5"/></svg>
-          快速开始
+          命令行快速开始
         </a>
         <a class="btn" href="https://github.com/nghqqa/context-vault">
           <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.1.68-.22.68-.48 0-.24-.01-.87-.01-1.7-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.64.07-.63.07-.63 1 .07 1.53 1.06 1.53 1.06.9 1.57 2.36 1.12 2.94.86.09-.67.35-1.12.63-1.38-2.22-.26-4.56-1.14-4.56-5.07 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.7 0 0 .84-.28 2.75 1.05a9.36 9.36 0 0 1 5 0c1.91-1.33 2.75-1.05 2.75-1.05.55 1.4.2 2.44.1 2.7.64.72 1.03 1.63 1.03 2.75 0 3.94-2.34 4.8-4.57 5.06.36.32.68.94.68 1.9 0 1.37-.01 2.47-.01 2.81 0 .27.18.59.69.48A10.06 10.06 0 0 0 22 12.25C22 6.58 17.52 2 12 2Z"/></svg>
           GitHub 仓库
         </a>
       </div>
-      <p class="meta">Python 3.9+ · 纯标准库零第三方依赖 · Windows / Linux / macOS</p>
+      <p class="meta">v0.8.0 · Windows 绿色单文件 (26.7 MB, 免配 Python) · 或 Python 3.9+ 纯标准库零依赖 · MIT 开源免费</p>
     </div>
   </section>
 
@@ -458,9 +473,23 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
     <div class="wrap">
       <div class="sec-head">
         <span class="kicker">04 · 快速开始</span>
-        <h2>三条命令跑起来</h2>
-        <p class="sub">纯 Python 标准库，克隆即用；核心功能不需要任何 API key。完整场景与快捷键指南见 <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.md" style="color:var(--link);text-decoration:underline">用户手册</a>。</p>
+        <h2>双击托盘，或三条命令跑起来</h2>
+        <p class="sub">全部功能免费使用，无订阅、无账号；核心功能不需要任何 API key。完整场景与快捷键指南见 <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.md" style="color:var(--link);text-decoration:underline">用户手册</a>。</p>
       </div>
+      <div class="dl-card">
+        <div class="dl-info">
+          <div class="dl-head">Windows 绿色托盘版（免装 Python，双击即用）<span class="dl-tag">v0.8.0 · 26.7 MB</span></div>
+          <p class="dl-desc">开箱内置热索引服务（<code>127.0.0.1:8791</code>）、Web 控制台、每 2 分钟自动增量同步、上游哨兵与每日自动备份。</p>
+        </div>
+        <div class="dl-acts">
+          <a class="btn primary" href="https://github.com/nghqqa/context-vault/releases/download/v0.8.0/ContextVault.exe">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19.5h14"/></svg>
+            下载 ContextVault.exe
+          </a>
+          <a class="dl-sub" href="https://github.com/nghqqa/context-vault/releases/tag/v0.8.0">Release 说明 &amp; SHA256</a>
+        </div>
+      </div>
+      <p class="term-label" style="margin-top:0">命令行安装（Windows / Linux / macOS，纯 Python 3.9+ 标准库零依赖）</p>
       <div class="term">
         <button class="copy" id="copy-clone" type="button">复制全部</button>
 <pre><span class="pr">$</span> git clone https://github.com/nghqqa/context-vault &amp;&amp; cd context-vault &amp;&amp; pip install -e .
@@ -475,7 +504,7 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
       <div class="privacy-row">
         <span class="pv"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>只读源文件 · 永不改写</span>
         <span class="pv"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><circle cx="8" cy="8" r="1.6" fill="currentColor" stroke="none"/></svg>只绑回环 127.0.0.1 · Host/Origin 校验</span>
-        <span class="pv"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 3l10 10M13 3 3 13"/></svg>零遥测 · 零账号 · 核心 0 API key</span>
+        <span class="pv"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 3l10 10M13 3 3 13"/></svg>完全免费 · 零遥测 · 零账号 · 核心 0 API key</span>
       </div>
     </div>
   </section>
@@ -484,8 +513,8 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
 
 <footer>
   <div class="wrap foot-in">
-    <div>Context Vault · 代码 MIT · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/snapshot-format.md">快照格式规范 CC-BY</a></div>
-    <div><a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.md">用户手册</a> · <a href="https://github.com/nghqqa/context-vault">GitHub</a> · <a href="https://github.com/nghqqa/context-vault/releases">Releases</a> · <a href="https://raw.githubusercontent.com/nghqqa/context-vault/main/llms.txt">llms.txt</a></div>
+    <div>Context Vault v0.8.0 · 完全免费 · 代码 MIT · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/snapshot-format.md">快照格式规范 CC-BY</a></div>
+    <div><a href="https://github.com/nghqqa/context-vault/releases/download/v0.8.0/ContextVault.exe">下载 Windows 托盘版</a> · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.md">用户手册</a> · <a href="https://github.com/nghqqa/context-vault">GitHub</a> · <a href="https://github.com/nghqqa/context-vault/releases">Releases</a> · <a href="https://raw.githubusercontent.com/nghqqa/context-vault/main/llms.txt">llms.txt</a></div>
   </div>
 </footer>
 

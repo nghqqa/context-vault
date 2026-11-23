@@ -32,6 +32,8 @@
 
 ## 🚀 快速开始
 
+> **Windows 绿色托盘版（免装 Python，双击即用）**：直接下载 [ContextVault.exe (v0.8.0)](https://github.com/nghqqa/context-vault/releases/download/v0.8.0/ContextVault.exe)（校验见 [Release 页](https://github.com/nghqqa/context-vault/releases/tag/v0.8.0)），自动常驻系统托盘、启动 Web 控制台（`127.0.0.1:8791`）、定时同步全端会话与每日自动备份。
+
 ```bash
 pip install -e .                   # 可选：注册全局命令 cv / cv-mcp / cv-aml (零第三方依赖)
 cv setup --mcp                     # 一步式初始化：建库 → 同步全端会话 → 账本 → 提取记忆 → 接入 MCP
@@ -159,7 +161,7 @@ vault/
 
 **有数据离开我的机器吗？** 没有。无遥测、无账号、核心功能不需要任何 API key。`serve` 只绑 127.0.0.1；`probe` 只访问你配置的 relay 端点。
 
-**免费吗？** 核心 MIT，永久。另有闭源 Windows 托盘伴侣（自动入库/每日备份/常驻控制台）；开源核心离开它完整可用。
+**免费吗？** 完全免费，目前没有任何付费计划。核心代码 MIT 永久开源，格式规范 CC-BY；Windows 绿色托盘版（`ContextVault.exe`）也在 [GitHub Releases](https://github.com/nghqqa/context-vault/releases) 免费提供下载。
 
 ## 贡献
 
@@ -167,4 +169,4 @@ Issue 与 PR 欢迎。格式规范的讨论是最高价值的贡献——[snapsh
 
 ## 许可
 
-代码 **MIT** · 格式规范 **CC-BY**（[snapshot-format.md](docs/snapshot-format.md)）。开源格式换生态位；伴侣便利养活开发。
+代码 **MIT** · 格式规范 **CC-BY**（[snapshot-format.md](docs/snapshot-format.md)）。目前所有功能与 Windows 托盘发行版均免费使用。

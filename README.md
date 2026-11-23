@@ -32,6 +32,8 @@ Your AI coding sessions are your most valuable work asset — yet they're locked
 
 ## 🚀 Quick Start
 
+> **Windows ready-to-run tray app (no Python required)**: Download [ContextVault.exe (v0.8.0)](https://github.com/nghqqa/context-vault/releases/download/v0.8.0/ContextVault.exe) ([Release notes & SHA256](https://github.com/nghqqa/context-vault/releases/tag/v0.8.0)) and double-click to run the resident hot-index server (`127.0.0.1:8791`), Web Console, periodic sync, and daily backups.
+
 ```bash
 pip install -e .                   # optional: installs global `cv`, `cv-mcp`, `cv-aml` commands (zero deps)
 cv setup --mcp                     # one-shot onboarding: init → sync → ledger → memory → MCP install
@@ -150,7 +152,7 @@ Porters are upstream adapters, not competitors — `cv ingest` and `cv export-ha
 
 **Does anything leave my machine?** No. No telemetry, no accounts, no API keys needed for core features. `serve` binds to 127.0.0.1; `probe` only calls the relay endpoints you configure.
 
-**Is it free?** The core is MIT, forever. A closed-source Windows tray companion (auto-sync, daily backup, resident console) exists; the open core works fully without it.
+**Is it free?** Completely free, with no paid plans. Core code is MIT open source and the format spec is CC-BY; the ready-to-run Windows tray binary (`ContextVault.exe`) is also distributed free on [GitHub Releases](https://github.com/nghqqa/context-vault/releases).
 
 ## Contributing
 
@@ -158,4 +160,4 @@ Issues and PRs welcome. Format-spec discussions are the highest-value contributi
 
 ## License
 
-Code **MIT** · format spec **CC-BY** ([snapshot-format.md](docs/snapshot-format.md)). Open format for the ecosystem seat; companion conveniences fund the work.
+Code **MIT** · format spec **CC-BY** ([snapshot-format.md](docs/snapshot-format.md)). All features and the Windows tray release are free to use.

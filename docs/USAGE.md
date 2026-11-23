@@ -6,6 +6,8 @@
 
 ## 0. 3 分钟快速上手（90% 用户只需要这 3 步）
 
+> **Windows 零配置免装 Python**：直接从 [GitHub Releases](https://github.com/nghqqa/context-vault/releases/tag/v0.8.0) 下载 [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.8.0/ContextVault.exe) 双击运行，即可在托盘常驻启动 Web 控制台（`127.0.0.1:8791`）、每 2 分钟自动同步全端会话与每日自动备份；CLI 与 MCP 命令按下方步骤即可开启。
+
 ### 第一步：安装全局命令（可选，零第三方依赖）
 ```bash
 git clone https://github.com/nghqqa/context-vault
