@@ -1360,9 +1360,18 @@ def _make_handler(ctx: _ServerCtx):
 def build_vault_server(vault: Path, port: int, token: str | None = None):
     """构建热索引 HTTP 服务 (不阻塞); cmd_serve 与 Pro 托盘共用, 避免实现漂移。"""
     from http.server import ThreadingHTTPServer
+    import socketserver
 
     class _VaultHTTPServer(ThreadingHTTPServer):
         allow_reuse_address = os.name != "nt"
+
+        def server_bind(self):
+            # 跳过 HTTPServer.server_bind() 的 socket.getfqdn(host) 反向 DNS 查询
+            # (macOS / 离线环境下对 127.0.0.1 反查可能阻塞 15s+)
+            socketserver.TCPServer.server_bind(self)
+            host, port = self.server_address[:2]
+            self.server_name = host or "127.0.0.1"
+            self.server_port = port
 
     sys.path.insert(0, str(Path(__file__).parent))
     from mcp_server import ledger_summary

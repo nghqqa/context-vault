@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -189,26 +190,37 @@ class TestAMLFeatures(unittest.TestCase):
 
         # 启动前用子线程运行 _AMLHTTPServer 以便优雅 shutdown (port=0 消除 TOCTOU 竞态)
         srv_holder = {}
+        err_holder = []
+        ready = threading.Event()
         orig_cls = aml_adapter._AMLHTTPServer
 
         class _CaptureSrv(orig_cls):
             def __init__(self, *a, **kw):
                 super().__init__(*a, **kw)
                 srv_holder["srv"] = self
+                ready.set()
+
+        def _run_srv():
+            try:
+                aml_adapter.serve_aml(self.tmp, "127.0.0.1", 0, None)
+            except Exception as exc:
+                err_holder.append(exc)
+            finally:
+                ready.set()
 
         aml_adapter._AMLHTTPServer = _CaptureSrv
-        th = threading.Thread(
-            target=aml_adapter.serve_aml,
-            args=(self.tmp, "127.0.0.1", 0, None),
-            daemon=True,
+        th = threading.Thread(target=_run_srv, daemon=True)
+        getfqdn_guard = mock.patch(
+            "socket.getfqdn",
+            side_effect=AssertionError("must not call socket.getfqdn on loopback bind"),
         )
+        getfqdn_guard.start()
         th.start()
         try:
-            for _ in range(250):
-                if "srv" in srv_holder:
-                    break
-                time.sleep(0.02)
+            ready.wait(timeout=5)
+            self.assertFalse(err_holder, f"serve_aml failed: {err_holder!r}")
             self.assertIn("srv", srv_holder)
+            self.assertEqual(srv_holder["srv"].server_name, "127.0.0.1")
             port = srv_holder["srv"].server_address[1]
             self.assertEqual(ThreadingHTTPServer.allow_reuse_address, orig_reuse)
 
@@ -324,6 +336,7 @@ class TestAMLFeatures(unittest.TestCase):
             )
             self.assertEqual(st7, 400)
         finally:
+            getfqdn_guard.stop()
             aml_adapter._AMLHTTPServer = orig_cls
             if "srv" in srv_holder:
                 srv_holder["srv"].shutdown()
