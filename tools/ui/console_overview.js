@@ -70,7 +70,10 @@ async function loadOv(){
     }
     const agEl=$("#ov-agents");
     if(agEl){
-      const ags=(ow.by_agent||[]).slice(0,6);
+      const ags=(ow.by_agent||[]).slice().sort((a,b)=>{
+        const sa=a.sessions!=null?a.sessions:(a.snapshots||0),sb=b.sessions!=null?b.sessions:(b.snapshots||0);
+        return (sb-sa)||((b.tokens_in||0)-(a.tokens_in||0));
+      }).slice(0,6);
       agEl.innerHTML=ags.length?ags.map(a=>{
         const sess=a.sessions!=null?a.sessions:(a.snapshots||0);
         const sub=(a.snapshots!=null&&a.snapshots!==sess)?(num(sess)+" 会话 · "+num(a.snapshots)+" 版本"):(num(sess)+" 独立会话");
@@ -116,7 +119,7 @@ async function loadOv(){
   })();
 
   const pMem=(async()=>{
-    let mr=[];try{mr=await api("/memory?q=&limit=6");mr=(mr&&mr.memories)||[]}catch(e){mr=[]}
+    let mr=[];try{mr=await api("/memory?q=&limit=7");mr=(mr&&mr.memories)||[]}catch(e){mr=[]}
     if(my!==ovGen)return;
     $("#ov-mem").innerHTML=mr.length?mr.map(m=>{
       const km=memKindMeta(m.kind);

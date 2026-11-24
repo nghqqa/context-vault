@@ -132,14 +132,16 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
       <button class="btn" id="snap-leaves" onclick="snapLeavesToggle()" aria-pressed="true"
         title="每个会话只列演进链的最新版本; 再点显示全部历史版本">仅最新版本</button>
     </div>
-    <div class="agent-pills" id="snap-agent-bar" role="group" aria-label="按来源筛选">
-      <button type="button" class="pill-btn on" data-a="" onclick="setSnapAgent('')">全部来源</button>
-      <button type="button" class="pill-btn" data-a="antigravity" onclick="setSnapAgent('antigravity')">Antigravity</button>
-      <button type="button" class="pill-btn" data-a="zcode" onclick="setSnapAgent('zcode')">ZCode</button>
-      <button type="button" class="pill-btn" data-a="codex" onclick="setSnapAgent('codex')">Codex</button>
-      <button type="button" class="pill-btn" data-a="claude" onclick="setSnapAgent('claude')">Claude Code</button>
+    <div class="snap-subbar">
+      <div class="agent-pills" id="snap-agent-bar" role="group" aria-label="按来源筛选">
+        <button type="button" class="pill-btn on" data-a="" onclick="setSnapAgent('')">全部来源</button>
+        <button type="button" class="pill-btn" data-a="antigravity" onclick="setSnapAgent('antigravity')">Antigravity</button>
+        <button type="button" class="pill-btn" data-a="zcode" onclick="setSnapAgent('zcode')">ZCode</button>
+        <button type="button" class="pill-btn" data-a="codex" onclick="setSnapAgent('codex')">Codex</button>
+        <button type="button" class="pill-btn" data-a="claude" onclick="setSnapAgent('claude')">Claude Code</button>
+      </div>
+      <div class="meta-line" id="snap-meta"></div>
     </div>
-    <div class="meta-line" id="snap-meta"></div>
     <div id="snap-list" aria-live="polite"><div class="skel" style="width:50%"></div><div class="skel" style="width:72%"></div><div class="skel" style="width:60%"></div></div>
   </section>
 
@@ -228,7 +230,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
     </div>
 
     <div id="mig-skills-pane" hidden>
-      <div class="mig-shell">
+      <div class="sk-shell">
         <div class="mig-col">
           <div class="mig-step">
             <div class="card-h">
@@ -252,7 +254,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
                 <button type="button" class="btn sm" onclick="skSelectBatch('none')">清空选择</button>
                 <button type="button" class="btn sm" onclick="loadSkills({refresh:true})" style="margin-left:auto">刷新扫描</button>
               </div>
-              <div class="sk-list" id="sk-list" aria-live="polite"><div class="skel" style="width:65%"></div></div>
+              <div class="sk-list-wrap"><div class="sk-list" id="sk-list" aria-live="polite"><div class="skel" style="width:65%"></div></div></div>
             </div>
           </div>
         </div>

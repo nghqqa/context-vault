@@ -15,7 +15,7 @@ async function loadOps(probeSem){
           '<span class="dot '+(c.installed?"ok":(c.detected?"warn":"off"))+'"></span>'+
           '<span class="ops-row-name">'+esc(c.name)+'</span>'+
           '<span class="pill '+(c.installed?"ok":(c.detected?"warn":""))+'">'+(c.installed?"已接入":(c.detected?"已检测到 · 未接入":"未检测到"))+'</span>'+
-          '<span class="ops-row-sub" title="'+esc(c.config||"")+'">'+esc(truncPath(c.config||"",34))+'</span></div>'+
+          '<span class="ops-row-sub" title="'+esc(c.config||"")+'">'+esc(truncPath(c.config||"",56))+'</span></div>'+
           '<button class="btn sm" onclick="opsInstallMcp(\''+esc(c.id)+'\')">'+(c.installed?"重检":"接入")+'</button></div>').join("")+
         '<div class="hint" style="margin-top:8px;word-break:break-all">MCP 启动命令：<code class="mono">'+esc((mcp&&mcp.server_cmd)||"")+'</code></div>'+
         '<div id="ops-mcp-out"></div>';

@@ -78,7 +78,7 @@ from cv_index import (  # noqa: F401 — re-exported as public engine API
 
 FORMAT_VERSION = "0.1"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # noconsole 进程 spawn 控制台程序不弹窗   # context-snapshot 格式版本
-VERSION = "0.10.2"  # 精简四分区零外发控制台 / 概览多端资产分布 / 轻量化托盘
+VERSION = "0.10.3"  # 宽屏四分区比例精调 / Skill 双列主工作台 / 设置卡片等高对齐
 TOOL_RESULT_LIMIT = 256 * 1024  # spec §8.2 裁决: 单块截断阈值 256KB
 HOME = Path.home()
 HEADROOM_DIR = HOME / ".headroom"

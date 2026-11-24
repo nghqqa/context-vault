@@ -47,7 +47,7 @@ Your AI coding sessions are your most valuable work asset — yet they're locked
 
 ## 🚀 Quick Start
 
-> **Windows ready-to-run tray app (no Python required, 14 MB single binary)**: Download [ContextVault.exe (v0.10.2)](https://github.com/nghqqa/context-vault/releases/download/v0.10.2/ContextVault.exe) ([Release notes & SHA256](https://github.com/nghqqa/context-vault/releases/tag/v0.10.2)) and double-click to launch the resident Web Console (`127.0.0.1:8791`), **built-in zero-Python MCP server (`--mcp`)**, periodic sync, and daily backups.
+> **Windows ready-to-run tray app (no Python required, 14 MB single binary)**: Download [ContextVault.exe (v0.10.3)](https://github.com/nghqqa/context-vault/releases/download/v0.10.3/ContextVault.exe) ([Release notes & SHA256](https://github.com/nghqqa/context-vault/releases/tag/v0.10.3)) and double-click to launch the resident Web Console (`127.0.0.1:8791`), **built-in zero-Python MCP server (`--mcp`)**, periodic sync, and daily backups.
 
 ```bash
 pip install -e .                   # optional: installs global `cv`, `cv-mcp`, `cv-aml` commands (zero deps)

@@ -47,7 +47,7 @@
 
 ## 🚀 快速开始
 
-> **Windows 绿色托盘版（免装 Python，14 MB 单文件双击即用）**：直接下载 [ContextVault.exe (v0.10.2)](https://github.com/nghqqa/context-vault/releases/download/v0.10.2/ContextVault.exe)（校验见 [Release 页](https://github.com/nghqqa/context-vault/releases/tag/v0.10.2)），内置 Web 控制台（`127.0.0.1:8791`）、**免 Python 原生 MCP 服务（`--mcp`）**、定时同步全端会话与每日自动备份。
+> **Windows 绿色托盘版（免装 Python，14 MB 单文件双击即用）**：直接下载 [ContextVault.exe (v0.10.3)](https://github.com/nghqqa/context-vault/releases/download/v0.10.3/ContextVault.exe)（校验见 [Release 页](https://github.com/nghqqa/context-vault/releases/tag/v0.10.3)），内置 Web 控制台（`127.0.0.1:8791`）、**免 Python 原生 MCP 服务（`--mcp`）**、定时同步全端会话与每日自动备份。
 
 ```bash
 pip install -e .                   # 可选：注册全局命令 cv / cv-mcp / cv-aml (零第三方依赖)

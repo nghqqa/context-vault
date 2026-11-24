@@ -113,7 +113,7 @@ Restrained neutral mineral slate surfaces paired with a single forest-teal accen
 
 ## Layout
 
-- **Desktop App Shell (`>900px`)**: Two-track grid `var(--sidebar-w) minmax(0,1fr)` (`216px` sidebar + fluid workspace) locked to `100dvh` with inner scrolling in `.content` (`max-width: 1420px`, `20px 26px 56px` padding) across 4 focused tabs (`概览`, `快照资产`, `迁移`, `设置与运维`).
+- **Desktop App Shell (`>900px`)**: Two-track grid `var(--sidebar-w) minmax(0,1fr)` (`216px` sidebar + fluid workspace) locked to `100dvh` with inner scrolling in `.content` (`max-width: 1600px`, `18px 24px 48px` padding) across 4 focused tabs (`概览`, `快照资产`, `迁移`, `设置与运维`).
 - **Overview (`#t-ov`)**: 4-cell integrated `.kpi-band` directly above `minmax(0,7fr) minmax(0,5fr)` `.ov-grid` (left: `最近入库会话`; right rail: `多端资产分布` `#ov-agents`, `最新记忆摘要` `#ov-mem`), with collapsible disclosure `#ov-quota-card` underneath showing live summary text.
 - **Migration (`#t-mig`)**: Split workbench `minmax(0,440px) minmax(0,1fr)` pairing source search/selection + 2-column target format tiles on the left with real-time fidelity preview + outbox/apply execution on the right so Steps 1–4 fit simultaneously within `1440×900`.
 - **Container-Adaptive Tables (`@container tbl`)**: Desktop (`tbl-ov`, `tbl-snap`) enforces `table-layout: fixed` with budgeted `<colgroup>` widths for zero horizontal scrollbars; under `<560px` container width, rows transform into labeled key-value ledger cards with multi-line wrapped summaries (`.sum-main`).
