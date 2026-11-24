@@ -85,8 +85,7 @@ const errEmpty=(msg,retry)=>'<div class="empty">'+ERRIC+'<div>'+esc(msg)+"</div>
 
 const TBL_COLS={
   "tbl-ov":'<colgroup><col class="c-src"><col><col class="c-dir"><col class="c-time"></colgroup>',
-  "tbl-snap":'<colgroup><col class="c-sid"><col><col class="c-src"><col class="c-num"><col class="c-time"><col class="c-dir"><col class="c-act"></colgroup>',
-  "tbl-probe":'<colgroup><col class="c-time"><col class="c-node"><col class="c-http"><col class="c-lat"><col></colgroup>'
+  "tbl-snap":'<colgroup><col class="c-sid"><col><col class="c-src"><col class="c-num"><col class="c-time"><col class="c-dir"><col class="c-act"></colgroup>'
 };
 const cell=c=>(c&&typeof c==="object")?c:{t:c};
 const table=(heads,rows,cls)=>{if(!rows||!rows.length)return"";
@@ -128,22 +127,14 @@ const memKindMeta=k=>{
   if(k==="fact")return{t:"事实",cls:""};
   return{t:k||"记忆",cls:""};
 };
-const formatNodeId=p=>{
-  const s=String(p||"").trim();
-  if(!s)return"—";
-  return /^\d+$/.test(s)?("节点 #"+s):s;
-};
-const relayBadge=p=>'<span class="relay-badge" title="上游节点 '+esc(p||"")+'">'+
-  '<span class="rn">'+esc(formatNodeId(p))+"</span></span>";
-
 const copyText=async(t,msg)=>{
   try{await navigator.clipboard.writeText(t)}
   catch(e){toast("复制失败: "+String(e&&e.message||e),1);return}
   toast(msg||"已复制")};
 
 /* ================= 分区导航 + 快捷键 ================= */
-const TABS=["ov","snap","mig","probe","ops"];
-const TAB_TITLE={ov:"概览",snap:"快照资产",mig:"迁移工作台",probe:"上游哨兵",ops:"设置与运维"};
+const TABS=["ov","snap","mig","ops"];
+const TAB_TITLE={ov:"概览",snap:"快照资产",mig:"迁移工作台",ops:"设置与运维"};
 let curTab="ov",booted=false,snapsLoaded=false;
 function setTab(t){
   if(!TABS.includes(t))t="ov";
@@ -156,7 +147,6 @@ function setTab(t){
   if(window.scrollTo)window.scrollTo(0,0);
   if(t==="snap"&&booted&&!snapsLoaded){snapsLoaded=true;refreshSnaps();}
   if(t==="mig"&&!$("#mig-sid").dataset.filled)fillMig();
-  if(t==="probe"&&!$("#probe-list").dataset.loaded)loadProbe();
   if(t==="ops"&&!$("#ops-mcp-box").dataset.loaded)loadOps(false);
   if(window.history)history.replaceState(null,"","#"+t);
 }

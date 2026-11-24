@@ -44,11 +44,10 @@
 - **可选敏感信息脱敏**——`cv export --redact` 或 `CV_REDACT_SECRETS=1` 在入库前自动对常见 API Key / GitHub Token / AWS Key / JWT / PEM 私钥打码。
 - **可选本地语义增强（Ollama / LLM）**——`cv semantic`（及控制台「设置与运维」页）支持接入本地 Ollama 做向量混合重排、LLM 记忆精炼与自动会话标题；默认关闭零外发。
 - **开箱即用 Web 控制台**——支持 `Ctrl/Cmd+K` 全局联想、空库 3 步新手向导、记忆手动置顶、Markdown 预算简报一键复制、MCP/备份/裁剪可视化运维与 SWR 异步秒开。
-- **上游哨兵**——定时探测 relay `/v1/models`，模型静默消失即刻告警并留审计痕。
 
 ## 🚀 快速开始
 
-> **Windows 绿色托盘版（免装 Python，14 MB 单文件双击即用）**：直接下载 [ContextVault.exe (v0.10.1)](https://github.com/nghqqa/context-vault/releases/download/v0.10.1/ContextVault.exe)（校验见 [Release 页](https://github.com/nghqqa/context-vault/releases/tag/v0.10.1)），内置 Web 控制台（`127.0.0.1:8791`）、**免 Python 原生 MCP 服务（`--mcp`）**、定时同步全端会话与每日自动备份。
+> **Windows 绿色托盘版（免装 Python，14 MB 单文件双击即用）**：直接下载 [ContextVault.exe (v0.10.2)](https://github.com/nghqqa/context-vault/releases/download/v0.10.2/ContextVault.exe)（校验见 [Release 页](https://github.com/nghqqa/context-vault/releases/tag/v0.10.2)），内置 Web 控制台（`127.0.0.1:8791`）、**免 Python 原生 MCP 服务（`--mcp`）**、定时同步全端会话与每日自动备份。
 
 ```bash
 pip install -e .                   # 可选：注册全局命令 cv / cv-mcp / cv-aml (零第三方依赖)

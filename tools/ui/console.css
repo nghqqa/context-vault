@@ -159,10 +159,6 @@ table.tbl-snap col.c-num{width:80px}
 table.tbl-snap col.c-time{width:116px}
 table.tbl-snap col.c-dir{width:186px}
 table.tbl-snap col.c-act{width:80px}
-table.tbl-probe col.c-time{width:136px}
-table.tbl-probe col.c-node{width:146px}
-table.tbl-probe col.c-http{width:96px}
-table.tbl-probe col.c-lat{width:128px}
 .sid-wrap{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;max-width:100%}
 @container tbl (inline-size < 740px){
   table.tbl-snap col.c-sid{width:160px}
@@ -263,7 +259,6 @@ tr.rowlink:hover{background:var(--bg-subtle)}
 .feed-main{display:flex;align-items:center;gap:8px;min-width:0;flex:1;overflow:hidden}
 .feed-txt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink);min-width:0}
 .feed-r{display:flex;align-items:center;gap:8px;flex:none;font-size:var(--fs-xs);color:var(--ink-3);font-family:var(--mono)}
-.audit-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;background:var(--line-soft)}
 .audit-cell{background:var(--bg-surface);padding:9px 14px;display:flex;flex-direction:column;gap:2px}
 .audit-cell .al{font-size:11.5px;color:var(--ink-3)}
 .audit-cell .av{font-family:var(--mono);font-size:15px;font-weight:650;font-variant-numeric:tabular-nums;color:var(--ink)}
@@ -307,15 +302,6 @@ details.card .card-b{border-top:1px solid var(--line-soft)}
 .sum-main{overflow:hidden;text-overflow:ellipsis;min-width:0;flex:0 1 auto}
 .mini-tag{flex:none;font-family:var(--mono);font-size:11px;color:var(--ink-3);
   background:var(--bg-subtle);border:1px solid var(--line);border-radius:4px;padding:0 5px;line-height:16px}
-.relay-badge{display:inline-flex;align-items:center;gap:5px;background:var(--bg-subtle);
-  border:1px solid var(--line);border-radius:5px;padding:1px 7px;line-height:1.45;vertical-align:middle}
-.relay-badge .rl{color:var(--ink-3);font-size:11.5px}
-.relay-badge .rn{font-family:var(--mono);color:var(--ink);font-weight:600;font-size:11.5px}
-.lat{font-family:var(--mono);font-size:12.5px;white-space:nowrap}
-.lat.good{color:var(--ok)}.lat.mid{color:var(--ink-2)}.lat.warm{color:var(--warn)}.lat.muted{color:var(--ink-3)}
-.latbar{width:44px;height:3px;background:var(--bg-inset);border-radius:2px;overflow:hidden;
-  display:inline-block;vertical-align:middle;margin-left:7px}
-.latbar i{display:block;height:100%;background:currentColor;border-radius:2px}
 .rel-cell{display:inline-flex;align-items:center;justify-content:flex-end;gap:6px;font-family:var(--mono);font-size:12px;color:var(--ink-2)}
 .relbar{width:34px;height:4px;background:var(--bg-inset);border-radius:2px;overflow:hidden;flex:none}
 .relbar i{display:block;height:100%;background:var(--acc);border-radius:2px}
@@ -389,21 +375,6 @@ details.card .card-b{border-top:1px solid var(--line-soft)}
 .result-card.err{border-color:var(--err-line);background:var(--err-bg)}
 .result-card .rt{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13.5px;margin-bottom:5px}
 .result-card .path-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:6px 0}
-
-/* ================= 哨兵 ================= */
-.probe-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px}
-.probe-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));background:var(--bg-surface);
-  border:1px solid var(--line);border-radius:var(--rad-m);margin-bottom:12px;box-shadow:var(--shadow-1);overflow:hidden}
-.probe-kpis .kpi{padding:11px 16px}
-.probe-kpis .kpi .v{font-size:18px}
-.stat-inline{display:inline-flex;align-items:baseline;gap:6px;font-size:12.5px;color:var(--ink-2)}
-.stat-inline b{font-family:var(--mono);font-weight:650;font-variant-numeric:tabular-nums;color:var(--ink)}
-.probe-state{display:inline-flex;align-items:center;gap:8px;padding:5px 13px;border-radius:999px;
-  font-size:13px;font-weight:600;border:1px solid var(--line)}
-.probe-state.off{color:var(--ink-3);background:var(--bg-subtle)}
-.probe-state.ok{color:var(--acc-strong);background:var(--acc-soft);border-color:var(--acc-line)}
-.probe-state.err{color:var(--err);background:var(--err-bg);border-color:var(--err-line)}
-.probe-state.warn{color:var(--warn);background:var(--warn-bg);border-color:var(--warn-line)}
 
 /* ================= 原生 <dialog> 抽屉 & 会话正文阅读器 & Confirm & Popover Toast ================= */
 .drawer,#confirm-dlg{overscroll-behavior:contain}
@@ -581,7 +552,7 @@ details[open]>.proj-head .tw,details.card[open]>summary .tw{transform:rotate(90d
   .kpi-band{grid-template-columns:minmax(0,1fr)}
   .kpi{border-right:none;border-bottom:1px solid var(--line-soft)}
   .kpi:last-child{border-bottom:none}
-  .ov-grid,.pv-cols,.tgt-cards,.probe-kpis{grid-template-columns:minmax(0,1fr)}
+  .ov-grid,.pv-cols,.tgt-cards{grid-template-columns:minmax(0,1fr)}
   .proj-toolbar .pt-end,.proj-sync .ps-right{margin-left:0}
   .kv{grid-template-columns:110px minmax(0,1fr)}
 }

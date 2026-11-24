@@ -10,6 +10,12 @@ function scheduleQuotaRefresh(gen,win){
     }catch(e){}
   },1200);
 }
+function openAgentSnaps(a){
+  snapTreeMode=false;snapMemMode=false;updateSnapTreeBtn();
+  snapsLoaded=true;
+  setTab("snap");
+  setSnapAgent(a);
+}
 async function loadOv(){
   const my=++ovGen;
   clearTimeout(quotaPendingTimer);
@@ -62,6 +68,18 @@ async function loadOv(){
           '</div></div>';
       }else{ob.hidden=true;ob.innerHTML="";}
     }
+    const agEl=$("#ov-agents");
+    if(agEl){
+      const ags=(ow.by_agent||[]).slice(0,6);
+      agEl.innerHTML=ags.length?ags.map(a=>{
+        const sess=a.sessions!=null?a.sessions:(a.snapshots||0);
+        const sub=(a.snapshots!=null&&a.snapshots!==sess)?(num(sess)+" 会话 · "+num(a.snapshots)+" 版本"):(num(sess)+" 独立会话");
+        return '<div class="feed-row click" data-a="'+esc(String(a.agent||""))+'" onclick="openAgentSnaps(this.dataset.a)" title="查看该来源全部快照">'+
+          '<span class="feed-main">'+agentCell(a.agent)+'<span class="feed-txt">'+sub+'</span></span>'+
+          '<span class="feed-r">'+bn(a.tokens_in||0)+' tok</span></div>';
+      }).join("")
+        :'<div class="hint" style="padding:10px 14px">暂无多端会话 · 点击右上角「同步」采集本机会话</div>';
+    }
     if(usageCur)renderQuota(usageCur,d);
   }).catch(e=>{
     if(my!==ovGen||(e&&e.stale))return;
@@ -97,38 +115,8 @@ async function loadOv(){
       '<button class="linklike" onclick="setTab(\'snap\')">浏览全部 →</button></div>';
   })();
 
-  const pProbe=(async()=>{
-    let pv=[];try{pv=(await api("/probe_events?limit=60")).filter(e=>e.status!=="prune")}catch(e){}
-    if(my!==ovGen)return;
-    if(Array.isArray(pv)&&pv.length){
-      const byNode={},orderNodes=[];
-      for(const e of pv){
-        const k=e.profile||"_";
-        if(!(k in byNode)){byNode[k]={head:e,errStreak:0,counting:true};orderNodes.push(k)}
-        const g=byNode[k];
-        if(g.counting){
-          if(e.status==="http_error"||e.status==="error")g.errStreak++;
-          else g.counting=false;
-        }
-      }
-      $("#ov-probe").innerHTML=orderNodes.slice(0,5).map(k=>{
-        const g=byNode[k],e=g.head,st=e.status||"?";
-        const miss=e.missing_models&&e.missing_models!=="[]";
-        const cls=miss?"err":st==="ok"?"ok":(st==="http_error"||st==="error")?"err":"warn";
-        const lbl=miss?"模型缺失":st==="ok"?((e.http_code||200)+" 正常"):(st==="http_error"||st==="error")?(e.http_code?(e.http_code+" 异常"):"无响应"):st==="switch"?"节点切换":esc(st);
-        const extra=(st==="ok"&&e.latency_ms)?('<span class="hint">'+e.latency_ms+'ms</span>')
-          :(g.errStreak>=2?('<span class="hint">连续 '+g.errStreak+' 次异常</span>'):"");
-        return '<div class="feed-row click" onclick="setTab(\'probe\')" title="查看哨兵节点详情"><span class="feed-main"><span class="dot '+cls+'"></span>'+
-          '<span class="mono">'+esc(formatNodeId(e.profile))+'</span>'+
-          '<span class="pill '+cls+'">'+esc(lbl)+'</span>'+extra+
-          '</span><span class="feed-r">'+frel(e.ts)+"</span></div>"}).join("");
-    }else{
-      $("#ov-probe").innerHTML='<div class="hint" style="padding:10px 14px">暂无探测记录 · 到哨兵页点击「立即探测上游」</div>';
-    }
-  })();
-
   const pMem=(async()=>{
-    let mr=[];try{mr=await api("/memory?q=&limit=4");mr=(mr&&mr.memories)||[]}catch(e){mr=[]}
+    let mr=[];try{mr=await api("/memory?q=&limit=6");mr=(mr&&mr.memories)||[]}catch(e){mr=[]}
     if(my!==ovGen)return;
     $("#ov-mem").innerHTML=mr.length?mr.map(m=>{
       const km=memKindMeta(m.kind);
@@ -143,20 +131,7 @@ async function loadOv(){
       :'<div class="hint" style="padding:10px 14px;display:flex;align-items:center;justify-content:space-between;gap:8px"><span>暂无跨会话记忆</span><button class="btn sm" onclick="openMemoryView()">提取记忆 →</button></div>';
   })();
 
-  const pAudit=(async()=>{
-    let au=null;try{au=await api("/audit?summary_only=1")}catch(e){}
-    if(my!==ovGen)return;
-    $("#ov-audit").innerHTML=au?
-      '<div class="audit-grid">'+
-      '<div class="audit-cell"><span class="al">累计事件</span><span class="av">'+num(au.total_events||0)+'</span></div>'+
-      '<div class="audit-cell"><span class="al">探测正常</span><span class="av" style="color:var(--ok)">'+num((au.summary||{}).ok_probes||0)+'</span></div>'+
-      '<div class="audit-cell"><span class="al">异常告警</span><span class="av" style="color:'+(((au.summary||{}).abnormal||0)>0?'var(--err)':'var(--ink)')+'">'+num((au.summary||{}).abnormal||0)+'</span></div>'+
-      '<div class="audit-cell"><span class="al">切换 / 缺失</span><span class="av">'+num((au.summary||{}).switches||0)+' / '+num((au.summary||{}).model_missing_events||0)+'</span></div>'+
-      '</div>'
-      :'<div class="hint" style="padding:10px 14px">—</div>';
-  })();
-
-  await Promise.allSettled([pLedger,pUsage,pRecent,pProbe,pMem,pAudit]);
+  await Promise.allSettled([pLedger,pUsage,pRecent,pMem]);
 }
 const kpi=(v,k,tip,sub)=>'<div class="kpi"'+(tip?' title="'+esc(tip)+'"':"")+'>'+
   '<div class="k"><span>'+k+'</span></div>'+

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "context-vault"
-version = "0.10.1"
+version = "0.10.2"
 description = "Local-first, vendor-neutral context asset vault for AI coding agents (zero third-party deps)"
 readme = "README.md"
 license = { file = "LICENSE" }

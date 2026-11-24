@@ -73,7 +73,7 @@ Context Vault Console is a zero-dependency local web workbench served directly f
 
 **Key Characteristics:**
 - Adaptive dual-scheme tokens via CSS `light-dark()` backed by `<meta name="color-scheme" content="light dark">` and a 3-state footer toggle (`跟随` / `浅色` / `深色`).
-- Hairline-integrated ledger strips (`.kpi-band`, `.probe-kpis`) and container-responsive zero-overflow tables (`@container tbl`).
+- Hairline-integrated ledger strips (`.kpi-band`) and container-responsive zero-overflow tables (`@container tbl`).
 - Honest, strict visual boundary between dry-run `vault/outbox/` operations (`primary` teal action) and confirmed live tool directory writes (`danger` action).
 
 ## Colors
@@ -96,7 +96,7 @@ Restrained neutral mineral slate surfaces paired with a single forest-teal accen
 - **Warning** (`--warn: light-dark(#9a5b05, #f5b942)` / `--warn-bg` / `--warn-line`): Decision memory tags, incomplete transcription flags, switch detections, and pending warnings.
 - **Danger / Error** (`--err: light-dark(#b42323, #f87171)` / `--err-bg` / `--err-line`): Service disconnects, unresponsive upstream relay states, and destructive/confirmed live directory write buttons (`.btn.danger`).
 
-**The Single Seal Rule.** Reserve forest-teal solid fills (`#0e7568`) exclusively for primary constructive CTAs (`筛选`, `生成到 outbox`, `立即探测上游`, `导出整项`, `一键补齐导入`); keep navigation highlights soft-tinted (`--acc-soft`) so interactive emphasis never competes across cards.
+**The Single Seal Rule.** Reserve forest-teal solid fills (`#0e7568`) exclusively for primary constructive CTAs (`筛选`, `生成到 outbox`, `导出整项`, `一键补齐导入`); keep navigation highlights soft-tinted (`--acc-soft`) so interactive emphasis never competes across cards.
 
 ## Typography
 
@@ -105,7 +105,6 @@ Restrained neutral mineral slate surfaces paired with a single forest-teal accen
 
 ### Hierarchy
 - **KPI Hero Figure**: `23px` monospace bold (`650`), `-0.02em` tracking, `tabular-nums` (`tnum`).
-- **Probe Summary Figure**: `18px` monospace bold (`650`), `tnum`.
 - **Page / Modal Title (`h1`, `h3`)**: `15px`, weight `650`.
 - **Body / Button / Control**: `13px–13.5px`, line-height `1.58`.
 - **Compact Metadata / Table Headers**: `12px–12.5px`, weight `600` on headers and card titles.
@@ -114,10 +113,10 @@ Restrained neutral mineral slate surfaces paired with a single forest-teal accen
 
 ## Layout
 
-- **Desktop App Shell (`>900px`)**: Two-track grid `var(--sidebar-w) minmax(0,1fr)` (`216px` sidebar + fluid workspace) locked to `100dvh` with inner scrolling in `.content` (`max-width: 1420px`, `20px 26px 56px` padding).
-- **Overview (`#t-ov`)**: 4-cell integrated `.kpi-band` directly above `minmax(0,7fr) minmax(0,5fr)` `.ov-grid` (left: `最近入库会话`; right rail: `哨兵 · 最近探测`, `最新记忆摘要`, `库内事件审计`), with collapsed progressive disclosure `#ov-usage-card` underneath showing live summary text.
+- **Desktop App Shell (`>900px`)**: Two-track grid `var(--sidebar-w) minmax(0,1fr)` (`216px` sidebar + fluid workspace) locked to `100dvh` with inner scrolling in `.content` (`max-width: 1420px`, `20px 26px 56px` padding) across 4 focused tabs (`概览`, `快照资产`, `迁移`, `设置与运维`).
+- **Overview (`#t-ov`)**: 4-cell integrated `.kpi-band` directly above `minmax(0,7fr) minmax(0,5fr)` `.ov-grid` (left: `最近入库会话`; right rail: `多端资产分布` `#ov-agents`, `最新记忆摘要` `#ov-mem`), with collapsible disclosure `#ov-quota-card` underneath showing live summary text.
 - **Migration (`#t-mig`)**: Split workbench `minmax(0,440px) minmax(0,1fr)` pairing source search/selection + 2-column target format tiles on the left with real-time fidelity preview + outbox/apply execution on the right so Steps 1–4 fit simultaneously within `1440×900`.
-- **Container-Adaptive Tables (`@container tbl`)**: Desktop (`tbl-ov`, `tbl-snap`, `tbl-probe`) enforces `table-layout: fixed` with budgeted `<colgroup>` widths for zero horizontal scrollbars; under `<560px` container width, rows transform into labeled key-value ledger cards with multi-line wrapped summaries (`.sum-main`).
+- **Container-Adaptive Tables (`@container tbl`)**: Desktop (`tbl-ov`, `tbl-snap`) enforces `table-layout: fixed` with budgeted `<colgroup>` widths for zero horizontal scrollbars; under `<560px` container width, rows transform into labeled key-value ledger cards with multi-line wrapped summaries (`.sum-main`).
 - **Mobile Shell (`<=900px`)**: `.sidebar` converts to a 2-row CSS Grid (row 1: brand left + 3-state theme switcher right; row 2: equal `repeat(4, minmax(0, 1fr))` nav tabs across full width), and `.topbar` wraps cleanly without page overflow down to `380px`.
 
 ## Elevation & Depth
@@ -131,7 +130,7 @@ Surfaces distinguish depth cleanly through tonal shifts (`--bg-canvas` -> `--bg-
 - **Compact Controls & Inputs (`--rad-s`)**: `6px` border radius on `.btn`, inputs, selects, target cards, and terminal command boxes.
 - **Primary Cards & Result Panes (`--rad-m`)**: `9px` radius on `.card`, `.cardbox`, `.kpi-band`, `.proj-dock`, `.result-card`, and `#toast`.
 - **Confirm Modals (`--rad-l`)**: `13px` radius on `#confirm-dlg`.
-- **Status Pills**: Full pill `999px` only on concise status indicators (`.status-pill`, `.probe-state`, `.pill`).
+- **Status Pills**: Full pill `999px` only on concise status indicators (`.status-pill`, `.pill`).
 
 ## Components
 
@@ -139,7 +138,7 @@ Surfaces distinguish depth cleanly through tonal shifts (`--bg-canvas` -> `--bg-
 - **Data Tables (`.cardbox` + `.tbl-wrap`)**: Sticky headers (`top: 0`), `44px` uniform row height on desktop (`sid-wrap` prevents version badge wrapping), full-width click affordability paired with accessible `<button class="sid">` / `.sumbtn` focus triggers.
 - **Project Workbench Dock (`.proj-dock`)**: Three cleanly separated horizontal bands: (1) source & archive filter + expand/collapse, (2) generic 10-target export format selector + conditional `#tree-apply` (auto-disabled for non-writable targets), (3) distinct subtle-tinted `.proj-sync` bar strictly for Antigravity bidirectional cleanup/batch import.
 - **Native Top-Layer Overlays**: Slide-over Detail `<dialog class="drawer" closedby="any">`, safety `<dialog id="confirm-dlg">` defaulting focus onto `取消`, and non-modal `<div id="toast" popover="manual">` always stacking cleanly above open dialogs.
-- **Markdown & Telemetry Sanitizers**: Strips raw `**`/`__`/`` ` `` markdown syntax and messy local URLs before table/memory display; translates raw numeric probe IDs and error states into clear Chinese status pills.
+- **Markdown & Telemetry Sanitizers**: Strips raw `**`/`__`/`` ` `` markdown syntax and messy local URLs before table/memory display; maps memory kinds and status indicators into clear Chinese pills.
 
 ## Do's and Don'ts
 

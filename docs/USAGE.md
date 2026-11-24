@@ -7,7 +7,7 @@
 ## 0. 3 分钟快速上手（90% 用户只需要这 3 步）
 
 > **路径 A · Windows 绿色托盘版（免装 Python，14 MB 单文件双击即用）**
-> 1. 前往 [GitHub Releases (v0.10.1)](https://github.com/nghqqa/context-vault/releases/tag/v0.10.1) 下载 [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.10.1/ContextVault.exe)（可用同页 `SHA256SUMS.txt` 校验：`certutil -hashfile ContextVault.exe SHA256`）。
+> 1. 前往 [GitHub Releases (v0.10.2)](https://github.com/nghqqa/context-vault/releases/tag/v0.10.2) 下载 [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.10.2/ContextVault.exe)（可用同页 `SHA256SUMS.txt` 校验：`certutil -hashfile ContextVault.exe SHA256`）。
 > 2. 双击启动：如首次触发 Windows SmartScreen 未知发布者提示，点击「更多信息 → 仍要运行」即可。托盘图标出现在右下角系统托盘，双击图标打开 Web 控制台 `http://127.0.0.1:8791/`。
 > 3. **免命令行用满全部功能**：首次空库会在概览顶部显示 **3 步引导卡**——点击即可完成全端会话同步、账本同步，并在「设置与运维」页一键将 `ContextVault.exe --mcp` 接入 Claude Code / Codex / Cursor / Antigravity（全程无需安装 Python）。
 > 4. **数据存放在哪 / 如何卸载**：首次在独立目录运行时自动初始化到 `~/.context-vault/vault`，并在 `~/.context-vault/config.json` 记录正本路径（移动 exe 位置也不丢数据）；右键托盘菜单提供「立即同步」「立即备份」「检查新版本」「开机自启」。如需彻底卸载：先取消勾选「开机自启」→ 退出托盘 → 删除 exe 及 `~/.context-vault/` 即可。
@@ -77,19 +77,19 @@ cv init          # 如需显式初始化空 vault（setup / sync 也会按需自
 ![Context Vault 概览视图](assets/console-overview-dark.png)
 
 ### 快捷键一览
-- **`1` / `2` / `3` / `4` / `5`**：切换「概览」「快照资产」「迁移」「哨兵」「设置与运维」五大分区
+- **`1` / `2` / `3` / `4`**：切换「概览」「快照资产」「迁移」「设置与运维」四大分区
 - **`Ctrl + K` / `Cmd + K`**（或点击顶栏 `/ · ⌘K`）：打开**全局快速命令面板**，实时并发联想「跨会话记忆 + 历史快照」，`↑↓` 选择、`Enter` 直达详情抽屉
 - **`/`**：快速聚焦顶部全局搜索框，`Enter` 跳转全库搜索
 - **`Esc`**：关闭抽屉或命令面板
 
 ### 核心视图亮点
-1. **概览页**：空库时自动呈现 3 步新手向导；4 格核心资产台账 + 最近入库会话 + 哨兵状态 + 最新记忆 + 事件审计 + **新版高密度「用量与配额窗口」**（5h/24h/7d/30d 切换、4 列 KPI 带、智谱与 Antigravity IDE 实时配额胶囊条、5h 冷却倒计时 ETA、多维排行）。
+1. **概览页**：空库时自动呈现 3 步新手向导；4 格核心资产台账 + 最近入库会话 + 多端资产分布 + 最新记忆摘要 + **新版高密度「用量与配额窗口」**（5h/24h/7d/30d 切换、4 列 KPI 带、智谱与 Antigravity IDE 实时配额胶囊条、5h 冷却倒计时 ETA、多维排行）。
 2. **快照资产页**：
    - **最近列表**：新增 **按来源胶囊筛选**（全部 / Antigravity / ZCode / Codex / Claude Code），支持按时间/相关性排序、切换「仅最新版本 / 全部历史版本」、点击任意行打开右侧详情抽屉（代码块复制、工具调用折叠、会话内搜索高亮、不可变分叉与「迁移此快照 →」直达）。
    - **项目树**：按项目文件夹折叠主对话，来源筛选支持 `ZCode` / `Antigravity` / `Claude Code` / `Codex` 及库内动态发现的其他来源，支持整项或单条一键迁移，以及 Antigravity 免命令行双向清理/补齐。
    - **记忆库**：按「决策 / 偏好 / 踩坑 / 红线 / 压缩摘要」筛选；支持 **「+ 手动记一条」** 直接录入个人红线、**置顶优先**、**删除**、**增量提取** 与 **去重合并**。
 3. **迁移工作台**：顶部可切换 **「会话迁移」** 与 **「Skill 技能迁移」**。会话迁移支持 Codex / Claude Code / Antigravity / ZCode / Markdown 交接简报（可选 Token 预算档位与一键复制正文）；Skill 迁移支持从 ZCode / Claude / Codex / Antigravity / Cursor 批量筛选并迁移 `SKILL.md` 技能包（实时估算 System Prompt Token 开销、检测冲突与源路径引用），迁往 Antigravity 时可自由切换 **直写全局目录** 或 **打包为可一键开关的独立插件**。
-4. **设置与运维页（`5`）**：免命令行管理 **MCP 客户端一键检测与接入**、**本地 Ollama 语义重排与 LLM 记忆精炼/自动标题**、**智谱 Coding Plan Token 配置与多端账本同步**、**一键一致性 zip 备份与中间版本裁剪（dry-run / 自动先备份后执行）**。
+4. **设置与运维页（`4`）**：免命令行管理 **MCP 客户端一键检测与接入**、**本地 Ollama 语义重排与 LLM 记忆精炼/自动标题**、**智谱 Coding Plan Token 配置与多端账本同步**、**一键一致性 zip 备份与中间版本裁剪（dry-run / 自动先备份后执行）**。
 
 ![Context Vault 设置与运维工作台](assets/console-ops-dark.png)
 

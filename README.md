@@ -44,11 +44,10 @@ Your AI coding sessions are your most valuable work asset — yet they're locked
 - **Optional secret redaction** — `cv export --redact` or `CV_REDACT_SECRETS=1` masks common API keys, GitHub/AWS tokens, JWTs and PEM private keys before persisting snapshots.
 - **Optional local semantic layer (Ollama / LLM)** — `cv semantic` (and the Console **Settings & Ops** tab) configures local Ollama dense reranking, LLM memory distillation, and automatic session titles; off by default with zero outbound traffic.
 - **Instant local Web Console** — `Ctrl/Cmd+K` global palette, empty-vault 3-step onboarding, manual memory pinning, budgeted Markdown brief 1-click copy, visual MCP/backup/prune controls, and non-blocking SWR quota caching.
-- **Upstream sentinel** — probes relay `/v1/models`, alerts and leaves an audit trail when a model silently disappears.
 
 ## 🚀 Quick Start
 
-> **Windows ready-to-run tray app (no Python required, 14 MB single binary)**: Download [ContextVault.exe (v0.10.1)](https://github.com/nghqqa/context-vault/releases/download/v0.10.1/ContextVault.exe) ([Release notes & SHA256](https://github.com/nghqqa/context-vault/releases/tag/v0.10.1)) and double-click to launch the resident Web Console (`127.0.0.1:8791`), **built-in zero-Python MCP server (`--mcp`)**, periodic sync, and daily backups.
+> **Windows ready-to-run tray app (no Python required, 14 MB single binary)**: Download [ContextVault.exe (v0.10.2)](https://github.com/nghqqa/context-vault/releases/download/v0.10.2/ContextVault.exe) ([Release notes & SHA256](https://github.com/nghqqa/context-vault/releases/tag/v0.10.2)) and double-click to launch the resident Web Console (`127.0.0.1:8791`), **built-in zero-Python MCP server (`--mcp`)**, periodic sync, and daily backups.
 
 ```bash
 pip install -e .                   # optional: installs global `cv`, `cv-mcp`, `cv-aml` commands (zero deps)
