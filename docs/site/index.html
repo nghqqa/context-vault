@@ -280,6 +280,108 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
   .cta .btn{height:40px;padding:0 16px;font-size:13.5px}
 }
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+[hidden]{display:none!important}
+.badge{transition:border-color .15s ease,color .15s ease}
+.badge:hover{border-color:var(--line-strong);color:var(--ink)}
+
+/* ============ 更新日志 (Changelog) ============ */
+.cl-head-links{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:10px;font-family:var(--mono);font-size:12px}
+.cl-head-links a{color:var(--link)}
+.cl-head-links a:hover{text-decoration:underline;text-underline-offset:3px}
+.cl-bar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;
+  background:var(--bg-surface);border:1px solid var(--line);border-radius:var(--rad-m);
+  padding:10px 12px;margin-bottom:14px}
+.cl-cats{display:flex;gap:6px;flex-wrap:wrap}
+.cl-cat{background:var(--bg-subtle);border:1px solid var(--line);border-radius:var(--rad-s);
+  color:var(--ink-2);font-family:var(--sans);font-size:12.5px;font-weight:500;padding:5px 11px;cursor:pointer;white-space:nowrap}
+.cl-cat:hover{border-color:var(--line-strong);color:var(--ink)}
+.cl-cat[aria-pressed="true"]{background:var(--acc-soft);border-color:var(--acc-line);color:var(--acc-strong);font-weight:600}
+.cl-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
+.cl-search{position:relative;display:flex;align-items:center}
+.cl-search svg{position:absolute;left:9px;width:13px;height:13px;color:var(--ink-3);pointer-events:none}
+.cl-search input{height:32px;width:240px;max-width:100%;padding:0 48px 0 28px;border:1px solid var(--line);
+  border-radius:var(--rad-s);background:var(--bg-subtle);color:var(--ink);font-family:var(--sans);font-size:12.5px}
+.cl-search input:focus{outline:2px solid var(--acc-strong);outline-offset:-1px;background:var(--bg-surface)}
+.cl-q-clr{position:absolute;right:5px;border:none;background:transparent;color:var(--ink-3);
+  font-size:11px;padding:2px 6px;cursor:pointer;font-family:var(--sans);border-radius:2px}
+.cl-q-clr:hover{color:var(--ink);background:var(--bg-inset)}
+.cl-act{height:32px;padding:0 11px;border:1px solid var(--line);border-radius:var(--rad-s);
+  background:var(--bg-surface);color:var(--ink-2);font-family:var(--sans);font-size:12.5px;font-weight:500;
+  cursor:pointer;white-space:nowrap}
+.cl-act:hover{border-color:var(--line-strong);color:var(--ink);background:var(--bg-subtle)}
+[command="--toggle-all"][aria-expanded="true"] .expand,
+[command="--toggle-all"][aria-expanded="false"] .collapse{display:none}
+.cl-count{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);white-space:nowrap}
+.cl-list{display:flex;flex-direction:column;gap:10px}
+.cl-item{background:var(--bg-surface);border:1px solid var(--line);border-radius:var(--rad-m);
+  overflow:hidden;scroll-margin-top:76px}
+.cl-item[open]{border-color:var(--line-strong)}
+.cl-item > summary{list-style:none;display:flex;align-items:center;gap:10px;padding:13px 16px;
+  cursor:pointer;user-select:none;font-size:14px;min-width:0}
+.cl-item > summary::-webkit-details-marker{display:none}
+.cl-item > summary:hover{background:var(--bg-subtle)}
+.cl-item > summary::before{content:"";inline-size:1em;block-size:1em;flex-shrink:0;background-color:currentColor;color:var(--ink-3);
+  -webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M4 6l4 4 4-4'/%3E%3C/svg%3E") no-repeat center / contain;
+  mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M4 6l4 4 4-4'/%3E%3C/svg%3E") no-repeat center / contain;
+  rotate:-90deg}
+details.cl-item[open] > summary::before{rotate:0deg;color:var(--acc-strong)}
+@media(prefers-reduced-motion:no-preference){
+  .cl-item > summary::before{transition:rotate .2s}
+  details.cl-item::details-content{transition:block-size,content-visibility,display;transition-duration:.25s;transition-timing-function:ease-in-out;transition-behavior:allow-discrete}
+}
+details.cl-item::details-content{interpolate-size:allow-keywords;overflow:clip;contain:layout}
+details.cl-item:not([open])::details-content{block-size:0}
+.cl-ver{display:inline-flex;align-items:center;gap:6px;flex:none;font-family:var(--mono);font-size:12.5px;
+  font-weight:700;padding:2px 8px;border-radius:var(--rad-s);border:1px solid var(--line);
+  background:var(--bg-subtle);color:var(--ink);white-space:nowrap}
+.cl-ver.latest{border-color:var(--acc-line);background:var(--acc-soft);color:var(--acc-strong)}
+.cl-ver b{font-size:10px;font-weight:700;padding:0 4px;border-radius:2px;background:var(--acc);color:var(--acc-ink)}
+.cl-title{font-weight:650;color:var(--ink);min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cl-tags{display:flex;gap:5px;flex:none}
+.cl-tag{font-size:11px;color:var(--ink-3);background:var(--bg-subtle);border:1px solid var(--line-soft);
+  border-radius:var(--rad-s);padding:1px 6px;white-space:nowrap}
+.cl-item > summary time{flex:none;font-family:var(--mono);font-size:12px;color:var(--ink-3);white-space:nowrap}
+.cl-body{padding:14px 18px 16px;border-top:1px solid var(--line-soft);background:var(--bg-surface)}
+.cl-lead{font-size:13.5px;color:var(--ink-2);line-height:1.72;margin-bottom:10px}
+.cl-lead code,.cl-pts code{font-family:var(--mono);font-size:11.5px;color:var(--ink);background:var(--bg-subtle);
+  border:1px solid var(--line-soft);border-radius:3px;padding:0 5px;overflow-wrap:anywhere}
+.cl-pts{list-style:none;display:flex;flex-direction:column;gap:7px;font-size:13px;color:var(--ink-2);line-height:1.68}
+.cl-pts li{display:flex;align-items:baseline;gap:8px;min-width:0}
+.cl-pts li > span:last-child{min-width:0;flex:1}
+.cl-kind{flex:none;font-family:var(--mono);font-size:10.5px;font-weight:600;padding:1px 6px;border-radius:2px;
+  border:1px solid var(--line);background:var(--bg-subtle);color:var(--ink-2);white-space:nowrap}
+.cl-kind.k-add{border-color:var(--acc-line);background:var(--acc-soft);color:var(--acc-strong)}
+.cl-kind.k-sec{border-color:var(--warn-line);background:var(--warn-bg);color:var(--warn)}
+.cl-metrics{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+.cl-m{font-family:var(--mono);font-size:11px;color:var(--ink-2);background:var(--bg-subtle);
+  border:1px solid var(--line-soft);border-radius:var(--rad-s);padding:2px 8px}
+.cl-links{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:12px;padding-top:10px;
+  border-top:1px solid var(--line-soft);font-family:var(--mono);font-size:12px}
+.cl-links a{color:var(--link)}
+.cl-links a:hover{text-decoration:underline;text-underline-offset:3px}
+.cl-copy-link{margin-left:auto;border:1px solid var(--line);background:var(--bg-subtle);color:var(--ink-2);
+  font-family:var(--mono);font-size:11.5px;padding:3px 9px;border-radius:var(--rad-s);cursor:pointer}
+.cl-copy-link:hover{border-color:var(--line-strong);color:var(--ink)}
+.cl-copy-link.ok{border-color:var(--acc-line);background:var(--acc-soft);color:var(--acc-strong)}
+.cl-empty{background:var(--bg-surface);border:1px dashed var(--line);border-radius:var(--rad-m);
+  padding:28px 16px;text-align:center;color:var(--ink-3);font-size:13.5px}
+.cl-empty p{margin-bottom:10px}
+@media(max-width:760px){
+  .cl-tools{width:100%;margin-left:0}
+  .cl-search{flex:1 1 200px}
+  .cl-search input{width:100%}
+}
+@media(max-width:640px){
+  .cl-tags{display:none}
+  .cl-item > summary{padding:11px 12px;gap:8px}
+  .cl-body{padding:12px 14px}
+}
+@media(max-width:430px){
+  .cl-item > summary{flex-wrap:wrap;row-gap:4px}
+  .cl-title{flex:1 1 100%;order:3;white-space:normal}
+  .cl-item > summary time{margin-left:auto}
+  .cl-copy-link{margin-left:0}
+}
 </style>
 </head>
 <body>
@@ -301,6 +403,7 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
       <a href="#console">界面</a>
       <a href="#metrics">实测</a>
       <a href="#quickstart">快速开始</a>
+      <a href="#changelog">更新日志</a>
     </nav>
     <div class="top-acts">
       <div class="theme-sw" role="group" aria-label="界面主题">
@@ -321,7 +424,7 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
   <!-- ============ Hero ============ -->
   <section class="hero" aria-label="简介">
     <div class="wrap">
-      <span class="badge"><span class="dot" aria-hidden="true"></span>v0.13.0 · 整端批量会话迁移 · Skill 差异回滚 · 14.4 MB 免 Python 托盘</span>
+      <a class="badge" href="#changelog"><span class="dot" aria-hidden="true"></span>v0.13.0 · 整端批量会话迁移 · Skill 差异回滚 · 14.4 MB 免 Python 托盘</a>
       <h1>换模型、换工具，<br>会话上下文<em>不再清零</em></h1>
       <p class="lede">Context Vault 把 AI 编程会话导出为<b>你自己机器上的中立快照</b>：内容寻址、不可变、带谱系。双向迁移、深度检索、token 账本、双时态记忆、MCP 后端——agent 来来去去，vault 一直在。</p>
       <div class="cta">
@@ -510,12 +613,370 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
     </div>
   </section>
 
+  <!-- ============ 更新日志 ============ -->
+  <section id="changelog" aria-labelledby="changelog-heading">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="kicker">05 · 更新日志</span>
+        <h2 id="changelog-heading">版本演进记录</h2>
+        <p class="sub">全部改动严格同步仓库发布说明，从检索内核重写到跨端整端迁移与免 Python 托盘的完整轨迹。</p>
+        <div class="cl-head-links">
+          <a href="https://github.com/nghqqa/context-vault/releases">全部 GitHub Releases</a>
+          <a href="https://github.com/nghqqa/context-vault/releases.atom">订阅 Releases (Atom)</a>
+          <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.md">中文完整手册</a>
+        </div>
+      </div>
+
+      <div class="cl-bar">
+        <div class="cl-cats" role="group" aria-label="按主题筛选版本">
+          <button type="button" class="cl-cat" data-cat="all" aria-pressed="true">全部</button>
+          <button type="button" class="cl-cat" data-cat="migrate" aria-pressed="false">迁移与 Skill</button>
+          <button type="button" class="cl-cat" data-cat="retrieval" aria-pressed="false">检索与记忆</button>
+          <button type="button" class="cl-cat" data-cat="ledger" aria-pressed="false">账本与 MCP</button>
+          <button type="button" class="cl-cat" data-cat="ui" aria-pressed="false">界面与托盘</button>
+        </div>
+        <div class="cl-tools">
+          <div class="cl-search">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+            <input type="search" id="cl-q" placeholder="搜索版本或关键词，如 DSH / Skill / 批量…" aria-label="搜索更新日志">
+            <button type="button" id="cl-q-clr" class="cl-q-clr" hidden>清空</button>
+          </div>
+          <button type="button" id="cl-toggle-all" class="cl-act" commandfor="cl-list" command="--toggle-all" aria-expanded="false">
+            <span class="expand">全部展开</span><span class="collapse">全部收起</span>
+          </button>
+          <span id="cl-count" class="cl-count" aria-live="polite">显示 11 / 11 个版本</span>
+        </div>
+      </div>
+
+      <div id="cl-list" class="cl-list">
+
+        <details class="cl-item" id="v0.13.0" data-cats="migrate ui" open>
+          <summary>
+            <span class="cl-ver latest">v0.13.0 <b>最新</b></span>
+            <span class="cl-title">整端全量 / 批量会话迁移工作台 · HTTP 与 CLI 批量迁出 · 显隐防溢出加固</span>
+            <span class="cl-tags"><span class="cl-tag">迁移与 Skill</span><span class="cl-tag">界面与托盘</span></span>
+            <time datetime="2026-11-25">2026-11-25</time>
+          </summary>
+          <div class="cl-body">
+            <p class="cl-lead">正式推出<strong>整端全量 / 批量会话迁移</strong>全链路能力：可在 Web 控制台、HTTP 接口与命令行一次性盘点并迁移整个 Harness 的顶层主对话，自动去重同源与已迁移会话，支持单条容错与单次主库备份。</p>
+            <ul class="cl-pts">
+              <li><span class="cl-kind k-add">新增</span><span><b>批量迁移规划与执行引擎</b>（<code>cv_migrate.py</code>）：新增 <code>plan_batch_migration()</code> 与 <code>run_batch_migration()</code>，自动将 <code>claude</code> / <code>claude-code</code> / <code>claude-transcript</code> 聚合归并在 <code>claude</code> 下；通过 <code>vault/migrations.jsonl</code> 记录 <code>"target"</code> 实现按目标端幂等去重；写入 <code>zcode</code> 前整批仅备份 1 次主库（<code>skip_backup=True</code>），单条失败记入结果行而不中断整批。</span></li>
+              <li><span class="cl-kind k-add">新增</span><span><b>HTTP 批量路由与 CLI 整端命令</b>：新增 <code>GET /migrate/batch</code> 与 <code>POST /migrate/batch</code>（写锁串行化 + <code>ctx.cache.clear()</code>）；<code>cv import --agent &lt;src&gt; --target &lt;tgt&gt; [--no-skip-migrated] [--apply]</code> 无需传入 <code>snapshot_id</code> 或 <code>--project</code> 即可执行整端批量迁移。</span></li>
+              <li><span class="cl-kind k-add">新增</span><span><b>控制台「整端批量迁移」双栏工作台</b>（<code>console.html</code> / <code>console_migrate.js</code>）：在「迁移 → 会话迁移」新增 <b>单条精调 / 整端批量迁移</b> 切换条，支持源 Harness pills、项目与关键词筛选、切源撞同源自动换目标、超 300 条预览上限保持全量提交，以及按状态展示的明细结果卡。</span></li>
+              <li><span class="cl-kind k-fix">修复</span><span><b>HTML 同级壳层修复与 Playwright 显隐断言</b>：修复 <code>#mig-single-shell</code> 闭合标签错位导致 <code>#mig-batch-shell</code> 连带隐藏的问题；升级 <code>check_console_overflow.py</code> 为 <code>mig:bat</code> 与 <code>mig:sk</code> 增加真实 <code>is_visible()</code> 与高度 <code>&gt;100</code> 校验。</span></li>
+            </ul>
+            <div class="cl-metrics">
+              <span class="cl-m">pytest 259 passed</span>
+              <span class="cl-m">JS 单元含 MB1-MB4 通过</span>
+              <span class="cl-m">Chromium 32/32 零溢出</span>
+              <span class="cl-m">Exe 14.42 MiB (15,121,015 B)</span>
+            </div>
+            <div class="cl-links">
+              <a href="https://github.com/nghqqa/context-vault/releases/tag/v0.13.0">GitHub Release</a>
+              <a href="https://github.com/nghqqa/context-vault/blob/main/docs/release-notes-v0.13.0.md">完整发布说明</a>
+              <a href="https://github.com/nghqqa/context-vault/compare/v0.12.0...v0.13.0">代码对比</a>
+              <a href="https://github.com/nghqqa/context-vault/releases/download/v0.13.0/ContextVault.exe">下载 .exe</a>
+              <button type="button" class="cl-copy-link" data-hash="#v0.13.0">复制版本链接</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="cl-item" id="v0.12.0" data-cats="migrate ledger ui">
+          <summary>
+            <span class="cl-ver">v0.12.0</span>
+            <span class="cl-title">Skill Diff 预览 / 安全移除 / 一键回滚闭环 · 并发与安全加固 · 核心模块化拆解</span>
+            <span class="cl-tags"><span class="cl-tag">迁移与 Skill</span><span class="cl-tag">界面与托盘</span></span>
+            <time datetime="2026-11-25">2026-11-25</time>
+          </summary>
+          <div class="cl-body">
+            <p class="cl-lead">将 <b>Skill 工作台</b>升级为可审、可删、可反悔的完整闭环，并系统消除并发隐蔽缺陷与安全隐患，同时把核心 Python 与前端模块无损瘦身拆解。</p>
+            <ul class="cl-pts">
+              <li><span class="cl-kind k-add">新增</span><span><b>Skill Diff 预览、安全移除与备份回滚</b>（<code>cv skills inspect/remove/backups/rollback</code>）：迁入前在右侧抽屉预览规范化 <code>SKILL.md</code>、逐行 <code>unified_diff</code> 与附属文件增删改；移除与覆盖前强制清洗 slug/backup_id 并写入 <code>vault/backups/skills-*</code> 与 <code>manifest.json</code> 校验一键回滚。</span></li>
+              <li><span class="cl-kind k-sec">安全</span><span><b>清零 <code>redirect_stdout</code> + 并发锁 + HTTP/XSS 加固</b>：抽出 <code>sync_usage_events()</code> 等结构化无打印 API，补齐 <code>_ServerCtx._write_lock</code> 与托盘 <code>TrayState._op_lock</code>（修复托盘同步未清缓存），兼容 IPv6 <code>[::1]</code> 与拒绝未鉴权 POST 前先清包，响应附加安全头，备份压缩纳入全部关键配置文件。</span></li>
+              <li><span class="cl-kind k-opt">优化</span><span><b>DSH 单次 Zstd 压缩与 SQL 聚合提速</b>：V4 双帧压缩合并为单次 Node 子进程，<code>_runway()</code> 改写为 SQL <code>COALESCE(SUM(...), 0)</code> 聚合；CI 增加 Ubuntu Python 3.9、macOS Python 3.12 与 20 模块纯标准库验证。</span></li>
+              <li><span class="cl-kind k-ref">重构</span><span><b>前后端模块化拆解</b>：将 <code>cv_mcp.py</code>、<code>cv_sync.py</code>、<code>cv_ledger_collect.py</code> 从主文件拆出并保留向后兼容重导出；前端抽出 <code>console_memory.js</code> 与 <code>console_reader.js</code>，严守单 <code>&lt;style&gt;</code>/单 <code>&lt;script&gt;</code>。</span></li>
+            </ul>
+            <div class="cl-metrics">
+              <span class="cl-m">pytest 258 passed</span>
+              <span class="cl-m">Chromium 28/28 零溢出</span>
+              <span class="cl-m">Exe 14.41 MiB</span>
+            </div>
+            <div class="cl-links">
+              <a href="https://github.com/nghqqa/context-vault/releases/tag/v0.12.0">GitHub Release</a>
+              <a href="https://github.com/nghqqa/context-vault/blob/main/docs/release-notes-v0.12.0.md">完整发布说明</a>
+              <a href="https://github.com/nghqqa/context-vault/compare/v0.11.0...v0.12.0">代码对比</a>
+              <a href="https://github.com/nghqqa/context-vault/releases/download/v0.12.0/ContextVault.exe">下载 .exe</a>
+              <button type="button" class="cl-copy-link" data-hash="#v0.12.0">复制版本链接</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="cl-item" id="v0.11.0" data-cats="migrate ledger ui">
+          <summary>
+            <span class="cl-ver">v0.11.0</span>
+            <span class="cl-title">DeepSeek Harness 五合一原生适配 · 按需勾选 MCP · 与后端对齐的 Skill 工作台</span>
+            <span class="cl-tags"><span class="cl-tag">迁移与 Skill</span><span class="cl-tag">账本与 MCP</span></span>
+            <time datetime="2026-11-24">2026-11-24</time>
+          </summary>
+          <div class="cl-body">
+            <p class="cl-lead">新增 <b>DeepSeek Harness (<code>dsh</code>) 五合一原生支持</b>，同时重做真程序探测与按需勾选 MCP 安装/卸载，并在控制台 Skill 工作台强一致遵循已接入 MCP 后端。</p>
+            <ul class="cl-pts">
+              <li><span class="cl-kind k-add">新增</span><span><b>DeepSeek Harness 全协议闭环</b>（<code>tools/cv_dsh.py</code>）：零硬依赖 5 级 Zstd 编解码链解析 V4/V3/V2 会话（含崩溃截断尾帧恢复）；迁移写回 V4 拼接式 <code>.v4.jsonl.zstd</code>、自动登记 <code>workspace.json</code> 并清理 <code>session_projcache</code>；账本纳入 DeepSeek V4/Flash 费率；支持 <code>$DSH_HOME/cordis.patch.yml</code> 全局 MCP 注入。</span></li>
+              <li><span class="cl-kind k-add">新增</span><span><b>按需自选 MCP 与残留目录识别</b>：探测真实可执行文件与扩展，自动识别已卸载客户端残留目录（<code>residual: true</code>）；支持 <code>cv mcp install --clients</code> 多选接入与 5 端单项安全卸载（自动写 <code>.bak-cv</code> 备份，不破坏同文件其它配置）。</span></li>
+              <li><span class="cl-kind k-opt">优化</span><span><b>Skill 工作台单源对齐</b>：Web 控制台启用 <code>connected_only=1</code>，自动隐藏未接入 MCP 后端与 0 Skill 工具，MCP 变更后立即失效缓存，服务端对未接入目标返回 <code>400</code> 拦截。</span></li>
+            </ul>
+            <div class="cl-metrics">
+              <span class="cl-m">DeepSeek Harness Desktop 真机实测通过</span>
+              <span class="cl-m">pytest 251 passed</span>
+              <span class="cl-m">Exe 14.39 MiB</span>
+            </div>
+            <div class="cl-links">
+              <a href="https://github.com/nghqqa/context-vault/releases/tag/v0.11.0">GitHub Release</a>
+              <a href="https://github.com/nghqqa/context-vault/blob/main/docs/release-notes-v0.11.0.md">完整发布说明</a>
+              <a href="https://github.com/nghqqa/context-vault/compare/v0.10.3...v0.11.0">代码对比</a>
+              <a href="https://github.com/nghqqa/context-vault/releases/download/v0.11.0/ContextVault.exe">下载 .exe</a>
+              <button type="button" class="cl-copy-link" data-hash="#v0.11.0">复制版本链接</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="cl-item" id="v0.10.3" data-cats="ui migrate">
+          <summary>
+            <span class="cl-ver">v0.10.3</span>
+            <span class="cl-title">宽屏比例精调 · 容器查询双列 Skill 工作台 · 等高卡片对齐</span>
+            <span class="cl-tags"><span class="cl-tag">界面与托盘</span></span>
+            <time datetime="2026-11-24">2026-11-24</time>
+          </summary>
+          <div class="cl-body">
+            <p class="cl-lead">聚焦宽屏人体工学与视觉对齐：全局容器放宽至 <code>1600px</code>，彻底翻转「Skill 技能迁移」布局并对齐四大分区卡片基线。</p>
+            <ul class="cl-pts">
+              <li><span class="cl-kind k-opt">优化</span><span><b>左宽右紧凑双列 Skill 工作台</b>：使用 <code>@container sklist &gt;= 680px</code> 容器查询在宽屏下自动呈双列网格，搭配 <code>380px–440px</code> 右侧吸顶操作栏（<code>&lt;=1100px</code> 自动折回单列）。</span></li>
+              <li><span class="cl-kind k-opt">优化</span><span><b>概览齐平、快照合并栏与设置 2×2 等高</b>：概览采用 <code>7fr : 4.5fr</code> 实现左右底部齐平，多端资产按独立会话数降序；合并快照来源筛选与统计条；设置 2×2 卡片改为等高贴底按钮并放宽桌面端 MCP 配置路径至 56 字符。</span></li>
+            </ul>
+            <div class="cl-metrics">
+              <span class="cl-m">pytest 241 passed</span>
+              <span class="cl-m">Chromium 28/28 零溢出</span>
+              <span class="cl-m">Exe 14.00 MiB</span>
+            </div>
+            <div class="cl-links">
+              <a href="https://github.com/nghqqa/context-vault/releases/tag/v0.10.3">GitHub Release</a>
+              <a href="https://github.com/nghqqa/context-vault/blob/main/docs/release-notes-v0.10.3.md">完整发布说明</a>
+              <a href="https://github.com/nghqqa/context-vault/compare/v0.10.2...v0.10.3">代码对比</a>
+              <a href="https://github.com/nghqqa/context-vault/releases/download/v0.10.3/ContextVault.exe">下载 .exe</a>
+              <button type="button" class="cl-copy-link" data-hash="#v0.10.3">复制版本链接</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="cl-item" id="v0.10.2" data-cats="ui ledger">
+          <summary>
+            <span class="cl-ver">v0.10.2</span>
+            <span class="cl-title">回归纯本地四分区控制台 · 零额外请求多端分布卡片 · 轻量化托盘</span>
+            <span class="cl-tags"><span class="cl-tag">界面与托盘</span></span>
+            <time datetime="2026-11-24">2026-11-24</time>
+          </summary>
+          <div class="cl-body">
+            <p class="cl-lead">围绕「纯粹本地化与零 API Key」做减法重构：移除早期代理哨兵分区与 30 秒轮询，让 Web 控制台与桌面托盘更加轻快专注。</p>
+            <ul class="cl-pts">
+              <li><span class="cl-kind k-ref">重构</span><span><b>精简为四大核心分区</b>：侧栏导航收敛为 <code>概览 / 快照资产 / 迁移 / 设置与运维</code>，移动端对齐 4 列布局，彻底清理遗留 <code>.probe-*</code> 样式。</span></li>
+              <li><span class="cl-kind k-add">新增</span><span><b>零额外请求「多端资产分布」卡片</b>：直接复用 <code>/ledger</code> 数据渲染各端会话数与输入量，点击卡片内客户端可直接跳至对应快照筛选视图。</span></li>
+              <li><span class="cl-kind k-opt">优化</span><span><b>轻量化双线程桌面托盘</b>：<code>pro/tray_app.py</code> 移除哨兵与切换守望线程，专注于热索引、原生 MCP 与自动同步/备份。</span></li>
+            </ul>
+            <div class="cl-metrics">
+              <span class="cl-m">pytest 241 passed</span>
+              <span class="cl-m">Exe 14.00 MiB</span>
+            </div>
+            <div class="cl-links">
+              <a href="https://github.com/nghqqa/context-vault/releases/tag/v0.10.2">GitHub Release</a>
+              <a href="https://github.com/nghqqa/context-vault/blob/main/docs/release-notes-v0.10.2.md">完整发布说明</a>
+              <a href="https://github.com/nghqqa/context-vault/compare/v0.10.1...v0.10.2">代码对比</a>
+              <a href="https://github.com/nghqqa/context-vault/releases/download/v0.10.2/ContextVault.exe">下载 .exe</a>
+              <button type="button" class="cl-copy-link" data-hash="#v0.10.2">复制版本链接</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="cl-item" id="v0.10.1" data-cats="retrieval ui">
+          <summary>
+            <span class="cl-ver">v0.10.1</span>
+            <span class="cl-title">Skill 与接口全线提速 10×–96× · 共享底座 cv_core.py · 表驱动路由与 UI 模块化</span>
+            <span class="cl-tags"><span class="cl-tag">界面与托盘</span><span class="cl-tag">检索与记忆</span></span>
+            <time datetime="2026-11-24">2026-11-24</time>
+          </summary>
+          <div class="cl-body">
+            <p class="cl-lead">纯标准库全栈性能提速与工程消重版本：Skill 扫描对比提速 <b>11×–52×</b>，热点 HTTP 接口全部压入 <b>2–20ms</b> 区间。</p>
+            <ul class="cl-pts">
+              <li><span class="cl-kind k-opt">优化</span><span><b>分层自失效 Skill 缓存</b>：单次 <code>os.scandir</code> + <code>(size, mtime_ns)</code> 自失效缓存 + 4 线程并行摘要，ZCode→Antigravity 从 1,181ms 降至 79.3ms、Claude 130 项暖态仅需 72.1ms，并配合前端 <code>{soft:true}</code> 切换零闪烁。</span></li>
+              <li><span class="cl-kind k-opt">优化</span><span><b>服务端 WAL 缓存与零冗余 DDL</b>：<code>/stats</code>（<b>96×</b> → 2.1ms）、<code>/ledger/usage</code>（<b>35×</b> → 4.9ms）、<code>/ledger</code>（<b>20×</b> → 2.3ms）、<code>/projects</code>（<b>8.2×</b> → 19.7ms）；已开启数据库不再重复跑 <code>WAL</code>/<code>ALTER TABLE</code>。</span></li>
+              <li><span class="cl-kind k-ref">重构</span><span><b>底座消重与路由展平</b>：抽出共享模块 <code>tools/cv_core.py</code>，<code>cv_dense</code> 并入 <code>cv_semantic</code>，<code>cv_server.py</code> 改为表驱动 <code>GET_ROUTES/POST_ROUTES</code> + 标准库日志轮换，2,313 行单文件 JS 拆分为 6 个模块。</span></li>
+            </ul>
+            <div class="cl-metrics">
+              <span class="cl-m">/stats 202.8ms → 2.1ms (96×)</span>
+              <span class="cl-m">Skill 扫描 11×–52×</span>
+              <span class="cl-m">pytest 241 passed</span>
+            </div>
+            <div class="cl-links">
+              <a href="https://github.com/nghqqa/context-vault/releases/tag/v0.10.1">GitHub Release</a>
+              <a href="https://github.com/nghqqa/context-vault/blob/main/docs/release-notes-v0.10.1.md">完整发布说明</a>
+              <a href="https://github.com/nghqqa/context-vault/compare/v0.10.0...v0.10.1">代码对比</a>
+              <a href="https://github.com/nghqqa/context-vault/releases/download/v0.10.1/ContextVault.exe">下载 .exe</a>
+              <button type="button" class="cl-copy-link" data-hash="#v0.10.1">复制版本链接</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="cl-item" id="v0.10.0" data-cats="migrate ui">
+          <summary>
+            <span class="cl-ver">v0.10.0</span>
+            <span class="cl-title">跨 Agent Skill 批量迁移引擎 · Antigravity 全局/插件双模一键切换</span>
+            <span class="cl-tags"><span class="cl-tag">迁移与 Skill</span></span>
+            <time datetime="2026-11-24">2026-11-24</time>
+          </summary>
+          <div class="cl-body">
+            <p class="cl-lead">首次引入零依赖跨端 <code>SKILL.md</code> 批量迁移引擎（<code>cv_skills.py</code>）及控制台双模式工作台，支持在多款 AI 编程工具间安全迁出技能包。</p>
+            <ul class="cl-pts">
+              <li><span class="cl-kind k-add">新增</span><span><b>全只读源发现与 SHA-256 幂等比对</b>：零依赖解析 ZCode / Claude Code / Codex / Antigravity / Cursor 与工作区 <code>.agents/skills/</code>；自动完成目标副本 Frontmatter slug 规范化，检测硬编码路径并监测 System Prompt Token 预算。</span></li>
+              <li><span class="cl-kind k-add">新增</span><span><b>Antigravity 双写模式</b>：支持直写全局目录（<code>skills</code> 热加载）与打包为包含 <code>plugin.json</code> 的可一键开关插件包（<code>plugin</code>）；覆盖同名冲突时自动备份到 <code>vault/backups/skills-*</code>。</span></li>
+            </ul>
+            <div class="cl-metrics">
+              <span class="cl-m">真机实测 77/77 ZCode Skill 迁入 Antigravity</span>
+              <span class="cl-m">pytest 240 passed</span>
+              <span class="cl-m">Exe 13.99 MiB</span>
+            </div>
+            <div class="cl-links">
+              <a href="https://github.com/nghqqa/context-vault/releases/tag/v0.10.0">GitHub Release</a>
+              <a href="https://github.com/nghqqa/context-vault/blob/main/docs/release-notes-v0.10.0.md">完整发布说明</a>
+              <a href="https://github.com/nghqqa/context-vault/compare/v0.9.0...v0.10.0">代码对比</a>
+              <a href="https://github.com/nghqqa/context-vault/releases/download/v0.10.0/ContextVault.exe">下载 .exe</a>
+              <button type="button" class="cl-copy-link" data-hash="#v0.10.0">复制版本链接</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="cl-item" id="v0.9.0" data-cats="ui ledger">
+          <summary>
+            <span class="cl-ver">v0.9.0</span>
+            <span class="cl-title">SWR 首屏 &lt;100ms · 设置与运维工作台 · 14.0 MB 瘦身托盘内置原生 MCP</span>
+            <span class="cl-tags"><span class="cl-tag">界面与托盘</span><span class="cl-tag">账本与 MCP</span></span>
+            <time datetime="2026-11-24">2026-11-24</time>
+          </summary>
+          <div class="cl-body">
+            <p class="cl-lead">全栈精修版本：控制台首屏加载从 ~6 秒骤降至 <b>&lt; 100ms（热态 65ms）</b>，独立托盘体积直降 <b>47.6%</b> 并首次原生内置 <code>--mcp</code> 服务。</p>
+            <ul class="cl-pts">
+              <li><span class="cl-kind k-opt">优化</span><span><b>并发渐进首屏 + SWR 异步配额缓存</b>：外网与本机 IDE 实时配额走 SWR 零阻塞刷新，<code>/audit?summary_only=1</code> 从 43 KB 降至 151 B，新增 4 个 SQLite 二级索引并启用自动 gzip、32 MB 限流与 5 MB 日志轮换。</span></li>
+              <li><span class="cl-kind k-add">新增</span><span><b>设置与运维工作台 + 3 步新手向导</b>：浏览器内可视化管理 MCP 一键接入、Ollama 语义层配置、额度 Token、在线 zip 备份与版本裁剪，新增英文完整手册 <code>docs/USAGE.en.md</code>。</span></li>
+              <li><span class="cl-kind k-opt">优化</span><span><b>瘦身免 Python 托盘 + 内置 <code>--mcp</code></b>：排除重型无关科学计算包使 <code>ContextVault.exe</code> 从 26.67 MiB 减至 <b>13.98 MiB</b>，并通过 <code>ContextVault.exe --mcp</code> 零 Python 直连 MCP 客户端。</span></li>
+            </ul>
+            <div class="cl-metrics">
+              <span class="cl-m">首屏 ~6s → &lt;100ms</span>
+              <span class="cl-m">Exe 体积 -47.6% (13.98 MiB)</span>
+              <span class="cl-m">pytest 236 passed</span>
+            </div>
+            <div class="cl-links">
+              <a href="https://github.com/nghqqa/context-vault/releases/tag/v0.9.0">GitHub Release</a>
+              <a href="https://github.com/nghqqa/context-vault/blob/main/docs/release-notes-v0.9.0.md">完整发布说明</a>
+              <a href="https://github.com/nghqqa/context-vault/compare/v0.8.0...v0.9.0">代码对比</a>
+              <a href="https://github.com/nghqqa/context-vault/releases/download/v0.9.0/ContextVault.exe">下载 .exe</a>
+              <button type="button" class="cl-copy-link" data-hash="#v0.9.0">复制版本链接</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="cl-item" id="v0.8.0" data-cats="ledger migrate ui">
+          <summary>
+            <span class="cl-ver">v0.8.0</span>
+            <span class="cl-title">多端用量账本与实时配额 · 原生 Antigravity WAL 极速同步 · 首个 Windows 托盘 .exe</span>
+            <span class="cl-tags"><span class="cl-tag">账本与 MCP</span><span class="cl-tag">界面与托盘</span></span>
+            <time datetime="2026-11-23">2026-11-23</time>
+          </summary>
+          <div class="cl-body">
+            <p class="cl-lead">首次上线零依赖多端用量账本、<b>0.2 秒</b>原生 Antigravity <code>.db</code>/WAL 同步、瑞士国际主义重构界面与免 Python Windows 绿色托盘单文件。</p>
+            <ul class="cl-pts">
+              <li><span class="cl-kind k-add">新增</span><span><b>免代理本地多端账本</b>（<code>cv_ledger.py</code>）：直采多端日志内嵌 usage，提供 5h 滚动窗口、恢复倒计时 ETA、7d/月跑道与实时配额卡片。</span></li>
+              <li><span class="cl-kind k-opt">优化</span><span><b>原生 Antigravity <code>.db</code>/WAL 解码器</b>：替代外部工具链将同步耗时从 ~60s 压缩至 <b>~0.2s</b>；<code>cv_index.py</code> 补齐 <code>idx_blockhash_h</code> 实现 O(1) 增量索引去重。</span></li>
+              <li><span class="cl-kind k-add">新增</span><span><b>AML 多租户适配器、脱敏与语义层</b>：内置 <code>cv-aml</code> / <code>Dockerfile.aml</code>（<code>request_id</code> 幂等 + <code>409</code> 冲突）、<code>--redact</code> 密钥脱敏、可选 Ollama <code>cv semantic</code> 以及首个独立 <code>ContextVault.exe</code> 发布附件。</span></li>
+            </ul>
+            <div class="cl-metrics">
+              <span class="cl-m">Antigravity 同步 ~60s → ~0.2s</span>
+              <span class="cl-m">pytest 234 passed</span>
+            </div>
+            <div class="cl-links">
+              <a href="https://github.com/nghqqa/context-vault/releases/tag/v0.8.0">GitHub Release</a>
+              <a href="https://github.com/nghqqa/context-vault/blob/main/docs/release-notes-v0.8.0.md">完整发布说明</a>
+              <a href="https://github.com/nghqqa/context-vault/compare/v0.7.0...v0.8.0">代码对比</a>
+              <a href="https://github.com/nghqqa/context-vault/releases/download/v0.8.0/ContextVault.exe">下载 .exe</a>
+              <button type="button" class="cl-copy-link" data-hash="#v0.8.0">复制版本链接</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="cl-item" id="v0.7.0" data-cats="retrieval">
+          <summary>
+            <span class="cl-ver">v0.7.0</span>
+            <span class="cl-title">Core v2 内核重写：代码感知 BM25 · SQLite 紧凑倒排 (-87%) · 双时态记忆与金标基准</span>
+            <span class="cl-tags"><span class="cl-tag">检索与记忆</span></span>
+            <time datetime="2026-11-18">2026-11-18</time>
+          </summary>
+          <div class="cl-body">
+            <p class="cl-lead">彻底重写检索与记忆内核，并用 162 题五维度消融基准（<b>CodingVault-Bench</b>）全程量化验收每一项结构改动。</p>
+            <ul class="cl-pts">
+              <li><span class="cl-kind k-opt">优化</span><span><b>代码感知 BM25 + Lineage 折叠 + SQLite 倒排</b>：复合词/子词双索引让跨写法检索 R@1 从 0.69 升至 <b>0.89</b>；Lineage 折叠与块角色加权终结老版本重复命中与 <code>tool_result</code> 刷分；2,006 快照实测索引体积 <b>778.5 MiB → 100.9 MiB (-87.0%)</b>，检索 <b>P95 39.0ms</b>。</span></li>
+              <li><span class="cl-kind k-add">新增</span><span><b>双时态记忆（v2）与五槽位交接简报</b>：带出处与主题签名的五类记忆支持冲突覆盖（<code>superseded</code>），过期记忆入侵率降至 <b>0.0</b>；4K 预算 Markdown 交接简报实现 <b>1.0</b> 触碰文件召回。</span></li>
+              <li><span class="cl-kind k-add">新增</span><span><b>CodingVault-Bench 开源基准</b>：<code>python benchmarks/run_bench.py</code> 30 秒复现 162 题五维度消融评测。</span></li>
+            </ul>
+            <div class="cl-metrics">
+              <span class="cl-m">索引体积 -87.0%</span>
+              <span class="cl-m">检索 P95 39.0ms</span>
+              <span class="cl-m">过期入侵率 0.0</span>
+              <span class="cl-m">pytest 124 passed</span>
+            </div>
+            <div class="cl-links">
+              <a href="https://github.com/nghqqa/context-vault/releases/tag/v0.7.0">GitHub Release</a>
+              <a href="https://github.com/nghqqa/context-vault/blob/main/docs/release-notes-v0.7.0.md">完整发布说明</a>
+              <a href="https://github.com/nghqqa/context-vault/compare/v0.6.0...v0.7.0">代码对比</a>
+              <button type="button" class="cl-copy-link" data-hash="#v0.7.0">复制版本链接</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="cl-item" id="v0.6.0" data-cats="migrate ui ledger">
+          <summary>
+            <span class="cl-ver">v0.4.2 – v0.6.0</span>
+            <span class="cl-title">奠基版本：内容寻址快照库 · 双向迁移 · 一致性备份 / MCP 服务 · 官网上线</span>
+            <span class="cl-tags"><span class="cl-tag">迁移与 Skill</span><span class="cl-tag">界面与托盘</span><span class="cl-tag">账本与 MCP</span></span>
+            <time datetime="2026-11-16">2026-10-29 ~ 11-16</time>
+          </summary>
+          <div class="cl-body">
+            <p class="cl-lead">确立供应商中立快照规范、Codex ⇄ Claude Code 真机双向迁移、MCP stdio 后端与单文件官网的早期里程碑阶段。</p>
+            <ul class="cl-pts">
+              <li><span class="cl-kind k-add">新增</span><span><b>v0.6.0（2026-11-16）</b>：现代多栏迁移工作台界面、Antigravity / ZCode 双向会话交换、按项目树批量同步与 <code>cv prune</code> 按天版本保留裁剪。</span></li>
+              <li><span class="cl-kind k-add">新增</span><span><b>v0.5.0（2026-10-31）</b>：Markdown 交接简报导出（<code>--target markdown</code>）、常驻服务令牌鉴权（<code>CV_SERVE_TOKEN</code>）与单文件静态官网首版上线。</span></li>
+              <li><span class="cl-kind k-add">新增</span><span><b>v0.4.2（2026-10-29）</b>：一致性 zip 快照备份与轮换（<code>cv backup</code>）、早期 MCP Server 联调与双向会话迁移真机验证通过。</span></li>
+            </ul>
+            <div class="cl-links">
+              <a href="https://github.com/nghqqa/context-vault/releases/tag/v0.6.0">v0.6.0 Release</a>
+              <a href="https://github.com/nghqqa/context-vault/releases/tag/v0.5.0">v0.5.0 Release</a>
+              <a href="https://github.com/nghqqa/context-vault/releases/tag/v0.4.2">v0.4.2 Release</a>
+              <button type="button" class="cl-copy-link" data-hash="#v0.6.0">复制版本链接</button>
+            </div>
+          </div>
+        </details>
+
+      </div>
+
+      <div id="cl-empty" class="cl-empty" hidden>
+        <p>当前筛选或搜索关键词下没有匹配的版本记录。</p>
+        <button type="button" id="cl-reset-empty" class="cl-act">重置筛选条件</button>
+      </div>
+    </div>
+  </section>
+
 </main>
 
 <footer>
   <div class="wrap foot-in">
     <div>Context Vault v0.13.0 · 完全免费 · 代码 MIT · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/snapshot-format.md">快照格式规范 CC-BY</a></div>
-    <div><a href="https://github.com/nghqqa/context-vault/releases/download/v0.13.0/ContextVault.exe">下载 Windows 托盘版</a> · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.md">中文手册</a> · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.en.md">English Guide</a> · <a href="https://github.com/nghqqa/context-vault">GitHub</a> · <a href="https://github.com/nghqqa/context-vault/releases">Releases</a> · <a href="https://raw.githubusercontent.com/nghqqa/context-vault/main/llms.txt">llms.txt</a></div>
+    <div><a href="https://github.com/nghqqa/context-vault/releases/download/v0.13.0/ContextVault.exe">下载 Windows 托盘版</a> · <a href="#changelog">更新日志</a> · <a href="https://github.com/nghqqa/context-vault/releases.atom">Atom 订阅</a> · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.md">中文手册</a> · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.en.md">English Guide</a> · <a href="https://github.com/nghqqa/context-vault">GitHub</a> · <a href="https://github.com/nghqqa/context-vault/releases">Releases</a> · <a href="https://raw.githubusercontent.com/nghqqa/context-vault/main/llms.txt">llms.txt</a></div>
   </div>
 </footer>
 
@@ -561,6 +1022,129 @@ if(copyBtn){
     p.then(function(){t("已复制","ok")},function(){t("复制失败","bad")});
     setTimeout(function(){t("复制全部")},1800);
   });
+}
+
+/* ============ 更新日志筛选、全部展开/收起、版本深链 ============ */
+var clList=document.getElementById("cl-list");
+if(clList){
+  var clItems=Array.prototype.slice.call(clList.querySelectorAll(":scope > details.cl-item"));
+  var clCats=Array.prototype.slice.call(document.querySelectorAll(".cl-cat"));
+  var clQ=document.getElementById("cl-q");
+  var clQClr=document.getElementById("cl-q-clr");
+  var clEmpty=document.getElementById("cl-empty");
+  var clReset=document.getElementById("cl-reset-empty");
+  var clCount=document.getElementById("cl-count");
+  var clToggleAll=document.getElementById("cl-toggle-all");
+  var activeCat="all",lastHadQ=false;
+
+  clItems.forEach(function(d){
+    d._defaultOpen=d.hasAttribute("open");
+    d._hay=(d.id+" "+(d.textContent||"")).toLowerCase();
+  });
+
+  function syncToggleBtn(){
+    if(!clToggleAll)return;
+    var vis=clItems.filter(function(d){return !d.hidden});
+    var allOpen=vis.length>0&&vis.every(function(d){return d.open});
+    clToggleAll.setAttribute("aria-expanded",allOpen?"true":"false");
+    clToggleAll.disabled=vis.length===0;
+  }
+
+  function filterChangelog(){
+    var q=(clQ?clQ.value:"").trim().toLowerCase();
+    if(clQClr)clQClr.hidden=!q;
+    var shown=0;
+    clItems.forEach(function(d){
+      var cats=(d.dataset.cats||"").split(/\s+/);
+      var okCat=(activeCat==="all")||cats.indexOf(activeCat)>=0;
+      var okQ=!q||d._hay.indexOf(q)>=0;
+      var vis=okCat&&okQ;
+      d.hidden=!vis;
+      if(vis){
+        shown++;
+        if(q)d.open=true;
+        else if(lastHadQ)d.open=!!d._defaultOpen;
+      }else if(!q&&lastHadQ){
+        d.open=!!d._defaultOpen;
+      }
+    });
+    lastHadQ=!!q;
+    if(clCount)clCount.textContent="显示 "+shown+" / "+clItems.length+" 个版本";
+    if(clEmpty)clEmpty.hidden=shown>0;
+    syncToggleBtn();
+  }
+
+  function resetFilters(){
+    activeCat="all";
+    clCats.forEach(function(b){b.setAttribute("aria-pressed",b.dataset.cat==="all"?"true":"false")});
+    if(clQ)clQ.value="";
+    filterChangelog();
+  }
+
+  clCats.forEach(function(b){
+    b.addEventListener("click",function(){
+      activeCat=b.dataset.cat||"all";
+      clCats.forEach(function(x){x.setAttribute("aria-pressed",x===b?"true":"false")});
+      filterChangelog();
+    });
+  });
+
+  if(clQ)clQ.addEventListener("input",filterChangelog);
+  if(clQClr)clQClr.addEventListener("click",function(){
+    if(clQ){clQ.value="";clQ.focus()}
+    filterChangelog();
+  });
+  if(clReset)clReset.addEventListener("click",resetFilters);
+
+  function runToggleAll(btn){
+    var target=btn||clToggleAll;
+    if(!target)return;
+    var expand=target.getAttribute("aria-expanded")!=="true";
+    clItems.forEach(function(d){if(!d.hidden)d.open=expand});
+    syncToggleBtn();
+  }
+
+  document.addEventListener("command",function(event){
+    if(event.command!=="--toggle-all")return;
+    runToggleAll(event.source||clToggleAll);
+  },{capture:true});
+  if(clToggleAll&&!(typeof Object.hasOwn==="function"?Object.hasOwn(HTMLButtonElement.prototype,"commandForElement"):("commandForElement" in HTMLButtonElement.prototype))){
+    clToggleAll.addEventListener("click",function(){runToggleAll(clToggleAll)});
+  }
+
+  clList.addEventListener("toggle",function(event){
+    if(event.target&&event.target.matches&&event.target.matches("#cl-list > details.cl-item"))syncToggleBtn();
+  },{capture:true});
+
+  function openVersionHash(){
+    var h=location.hash||"";
+    if(h.indexOf("#v")!==0)return;
+    var target=document.getElementById(h.slice(1));
+    if(!target||!target.matches("details.cl-item"))return;
+    if(target.hidden)resetFilters();
+    target.open=true;
+    syncToggleBtn();
+    target.scrollIntoView({behavior:"auto"});
+  }
+  window.addEventListener("hashchange",openVersionHash);
+
+  clList.addEventListener("click",function(e){
+    var btn=e.target&&e.target.closest?e.target.closest(".cl-copy-link"):null;
+    if(!btn)return;
+    var h=btn.dataset.hash||"";
+    var url=location.origin!=="null"?(location.origin+location.pathname+h):(location.href.split("#")[0]+h);
+    var resetTxt=function(txt,ok){btn.textContent=txt;btn.classList.toggle("ok",!!ok)};
+    var p;
+    try{
+      if(!(navigator.clipboard&&navigator.clipboard.writeText))throw new Error("clipboard unavailable");
+      p=navigator.clipboard.writeText(url);
+    }catch(_){resetTxt("复制失败",false);return}
+    p.then(function(){resetTxt("已复制链接",true)},function(){resetTxt("复制失败",false)});
+    setTimeout(function(){resetTxt("复制版本链接",false)},1800);
+  });
+
+  syncToggleBtn();
+  openVersionHash();
 }
 })();
 </script>
