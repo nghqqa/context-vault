@@ -65,33 +65,7 @@ def iso_utc(epoch: int) -> str:
     return dt.fromtimestamp(int(epoch), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S+00:00")
 
 
-def _is_eligible_cap(cap: dict, allowed_agents: set[str],
-                     arch_refs: set[str], sub_refs: set[str]) -> bool:
-    """统一校验来源与归档/子代理守卫；normal 路径与 --recover 共用，杜绝绕过过滤重导已归档或自回环会话。"""
-    cwd = cap.get("cwd") or ""
-    if not eligible_cwd(cwd):
-        return False
-    ag = (cap.get("agent") or "").lower()
-    if ag == "antigravity":
-        return False  # 绝不将 cv sync 回灌的 Antigravity 原生会话再倒回 Antigravity
-    if allowed_agents and ag not in allowed_agents:
-        return False
-    sref = cap.get("session_ref") or ""
-    if ag == "zcode" and sref in (arch_refs | sub_refs):
-        return False
-    orig = str(cap.get("originator") or "")
-    if cap.get("parent_session_ref") or orig.startswith("workflow subagent"):
-        return False
-    return True
-
-
-def _collect_existing_by_ref(vault: Path, have_rows: set[str]) -> set[tuple[str, str]]:
-    """已完整安装（.db 与 summaries 均在位）的 (agent, session_ref) 集合，防止同会话演化/换算法重导生成双份。"""
-    out: set[tuple[str, str]] = set()
-    for cid, entry in cv._collect_antigravity_migrated_dbs(vault).items():
-        if entry["session_ref"] and (CONV_DIR / f"{cid}.db").exists() and cid in have_rows:
-            out.add(((entry["agent"] or "").lower(), entry["session_ref"]))
-    return out
+from cv_antigravity import _is_eligible_antigravity_cap as _is_eligible_cap, plan_antigravity_batch  # noqa: E402,F401
 
 
 # ------------------------------------------------- 主流程
@@ -111,138 +85,27 @@ def main() -> None:
                     help="以 migrations.jsonl 为准恢复: 曾导入过但目标端缺失的会话（仍严格应用归档与来源筛选）")
     args = ap.parse_args()
     vault = cv.vault_dir(argparse.Namespace(vault=args.vault, cmd="batch")).resolve()
-    agent_arg = None if str(args.agent or "").strip().lower() in ("", "all") else args.agent
-    allowed_agents = set(cv._parse_agent_filter(agent_arg))
-    arch_refs = set() if args.include_archived else cv._zcode_archived_refs()
-    sub_refs = cv._zcode_subagent_refs()
 
-    if args.project:
-        items = cv._resolve_project_items(
-            vault, args.project, include_archived=args.include_archived, agent=agent_arg)
-    else:
-        items = cv.resolve_top_conversations(
-            vault, agent=agent_arg, include_archived=args.include_archived)
-    items = [it for it in items if eligible_cwd(it.get("cwd") or "")
-             and (it.get("agent") or "").lower() != "antigravity"]
-    if args.limit:
-        items = items[:args.limit]
-
-    # summaries 已注册的会话 id: db 文件在但行缺失 = 半安装, 需补装而不是跳过;
-    # 已注册的库才有指纹效力 (无行的半安装库不算, 否则会挡住自己的补装)
-    have_rows: set[str] = set()
-    if SUMMARY_DB.exists():
-        try:
-            conn0 = sqlite3.connect(SUMMARY_DB, timeout=30)
-            have_rows = {r[0] for r in conn0.execute("SELECT conversation_id FROM conversation_summaries")}
-            conn0.close()
-        except sqlite3.Error:
-            pass
-    existing_fps: set[str] = set()
-    if CONV_DIR.exists():
-        for f in CONV_DIR.glob("*.db"):
-            if f.stem not in have_rows:
-                continue
-            fp = db_first_user_text(f)
-            if fp:
-                existing_fps.add(fp)
-    print(f"既有库指纹: {len(existing_fps)} 条 (来自 {CONV_DIR})")
-
-    # migrations.jsonl 留痕 → sid→cascade 秒判
-    done_cascades: dict[str, str] = {}
-    mj = vault / "migrations.jsonl"
-    if mj.exists():
-        for line in mj.read_text(encoding="utf-8").splitlines():
-            try:
-                o = json.loads(line)
-            except ValueError:
-                continue
-            dest = o.get("dest") or ""
-            if "antigravity" in dest and "conversations" in dest:
-                done_cascades[o.get("source", "")] = Path(dest).stem
-
-    existing_refs = _collect_existing_by_ref(vault, have_rows)
-    plan, skipped = [], {"dup": 0, "done": 0}
-    seen_cascades: set[str] = set()
-    for it in items:
-        sid = it["id"]
-        ag = (it.get("agent") or "").lower()
-        sref = it.get("session_ref") or ""
-        try:
-            env = cv.load_snapshot(vault, sid)
-        except (ValueError, OSError):
-            continue
-        if not _is_eligible_cap(env.get("capture") or {}, allowed_agents, arch_refs, sub_refs):
-            continue
-        cascade = cv._deterministic_session_id(env)
-        prev_cid = done_cascades.get(sid)
-        if ((CONV_DIR / f"{cascade}.db").exists() and cascade in have_rows) \
-                or (prev_cid and (CONV_DIR / f"{prev_cid}.db").exists() and prev_cid in have_rows) \
-                or (sref and (ag, sref) in existing_refs):
-            skipped["done"] += 1
-            continue
-        fp = first_user_text(env)
-        if fp and fp in existing_fps:
-            skipped["dup"] += 1
-            continue
-        if cascade in seen_cascades:
-            continue
-        seen_cascades.add(cascade)
-        plan.append((it, cascade))
-
-    if args.recover:
-        # 恢复: 曾导入过 (migrations 有痕) 但目标端缺失的会话 — 仍严格遵守归档/来源/防自回环守卫
-        conn_v = cv.db(vault)
-        srows = conn_v.execute(
-            "SELECT id, agent, session_ref, created_at FROM snapshots").fetchall()
-        parents = {r["parent_snapshot"] for r in conn_v.execute(
-            "SELECT parent_snapshot FROM snapshots WHERE parent_snapshot IS NOT NULL")}
-        conn_v.close()
-        by_ref: dict[tuple, list] = {}
-        for r in srows:
-            if r["id"] in parents:
-                continue
-            by_ref.setdefault((r["agent"] or "", r["session_ref"] or ""), []).append(r)
-        for sid in done_cascades:
-            try:
-                env0 = cv.load_snapshot(vault, sid)
-            except (ValueError, OSError):
-                continue
-            cap0 = env0.get("capture") or {}
-            if not _is_eligible_cap(cap0, allowed_agents, arch_refs, sub_refs):
-                continue
-            ag0 = (cap0.get("agent") or "").lower()
-            sref0 = cap0.get("session_ref") or ""
-            cands = by_ref.get((cap0.get("agent") or "", sref0), [])
-            leaf = max(cands, key=lambda r: r["created_at"] or "")["id"] if cands else sid
-            try:
-                env = cv.load_snapshot(vault, leaf)
-            except (ValueError, OSError):
-                continue
-            cap = env.get("capture") or {}
-            if not _is_eligible_cap(cap, allowed_agents, arch_refs, sub_refs):
-                continue
-            cascade = cv._deterministic_session_id(env)
-            if ((CONV_DIR / f"{cascade}.db").exists() and cascade in have_rows) \
-                    or (sref0 and (ag0, sref0) in existing_refs):
-                skipped["done"] += 1
-                continue
-            fp = first_user_text(env)
-            if fp and fp in existing_fps:
-                skipped["dup"] += 1
-                continue
-            if cascade in seen_cascades:
-                continue
-            seen_cascades.add(cascade)
-            plan.append(({"id": leaf, "cwd": cap.get("cwd") or "",
-                          "title": cap.get("originator") or ""}, cascade))
+    planned = plan_antigravity_batch(
+        vault,
+        conv_dir=CONV_DIR,
+        summary_db=SUMMARY_DB,
+        agent=args.agent,
+        project=args.project,
+        include_archived=args.include_archived,
+        limit=args.limit,
+        recover=args.recover,
+    )
+    print(f"既有库指纹: {planned['existing_fps_count']} 条 (来自 {CONV_DIR})")
+    plan = planned["plan"]
 
     by_proj: dict[str, list] = {}
-    for it, cascade in plan:
-        by_proj.setdefault((it.get("cwd") or "").replace("\\", "/").rstrip("/"), []).append((it, cascade))
-    print(f"待导入 {len(plan)} 条 / 已存在跳过 {skipped['done']} / 指纹重复跳过 {skipped['dup']}；"
+    for p in plan:
+        by_proj.setdefault((p.get("cwd") or "").replace("\\", "/").rstrip("/"), []).append(p)
+    print(f"待导入 {len(plan)} 条 / 已存在跳过 {planned['skipped_done']} / 指纹重复跳过 {planned['skipped_dup']}；"
           f"涉及项目 {len(by_proj)} 个")
-    for p, lst in sorted(by_proj.items(), key=lambda x: -len(x[1]))[:20]:
-        print(f"  {len(lst):4}  {p}")
+    for proj_path, lst in sorted(by_proj.items(), key=lambda x: -len(x[1]))[:20]:
+        print(f"  {len(lst):4}  {proj_path}")
     if args.dry_run:
         return
 
@@ -254,17 +117,18 @@ def main() -> None:
     t0 = time.time()
     converted, errors = {}, []
 
-    def _conv(it, cascade):
-        sid = it["id"]
+    def _conv(p_item):
+        sid = p_item["sid"]
+        cascade = p_item["cascade"]
         try:
             res = cv._export_one_harness(vault, exe, sid, "antigravity", quiet=True,
                                          create_project=True, session_id=cascade)
-            return (sid, it, cascade, Path(res["dest"]), None)
+            return (sid, p_item, cascade, Path(res["dest"]), None)
         except Exception as exc:  # 单条失败不断链
-            return (sid, it, cascade, None, str(exc)[:160])
+            return (sid, p_item, cascade, None, str(exc)[:160])
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futs = [pool.submit(_conv, it, cascade) for it, cascade in plan]
+        futs = [pool.submit(_conv, p_item) for p_item in plan]
         for n, fut in enumerate(as_completed(futs), 1):
             sid, it, cascade, out, err = fut.result()
             if err:

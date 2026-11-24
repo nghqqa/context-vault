@@ -260,7 +260,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
                 <button type="button" class="btn sm" onclick="skSelectBatch('visible')">全选当前筛选</button>
                 <button type="button" class="btn sm" onclick="skSelectBatch('new')">仅选未同步</button>
                 <button type="button" class="btn sm" onclick="skSelectBatch('none')">清空选择</button>
-                <button type="button" class="btn sm" onclick="loadSkills()" style="margin-left:auto">刷新扫描</button>
+                <button type="button" class="btn sm" onclick="loadSkills({refresh:true})" style="margin-left:auto">刷新扫描</button>
               </div>
               <div class="sk-list" id="sk-list" aria-live="polite"><div class="skel" style="width:65%"></div></div>
             </div>
@@ -294,7 +294,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
                 </div>
                 <div class="ops-form-row" id="sk-plugin-row" style="display:none;margin-top:8px">
                   <label for="sk-plugin-name" style="font-size:12px;color:var(--ink-2);white-space:nowrap">插件目录名</label>
-                  <input type="text" id="sk-plugin-name" placeholder="migrated-from-zcode" aria-label="Antigravity 插件目录名" onchange="loadSkills()">
+                  <input type="text" id="sk-plugin-name" placeholder="migrated-from-zcode" aria-label="Antigravity 插件目录名" onchange="loadSkills({soft:true})">
                 </div>
               </div>
 

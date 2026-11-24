@@ -13,9 +13,7 @@ import uuid
 from pathlib import Path
 
 
-def _cv():
-    import cv
-    return cv
+from cv_core import cv_mod as _cv  # noqa: E402
 
 
 # ------------------------------------------------- ingest: 经 session-migrate 接入任意 harness
@@ -1233,12 +1231,43 @@ def _antigravity_db_fingerprint(db_path: Path) -> str:
         return ""
 
 
-def sync_to_antigravity_batch(vault: Path, agent: str = "zcode", project: str | None = None,
-                              include_archived: bool = False, limit: int = 0,
-                              apply: bool = False) -> dict:
-    """差量同步活跃顶层主对话 → Antigravity（Web 控制台与批量同步共用，默认仅 preview）。"""
-    conv_dir = _cv().HOME / ".gemini" / "antigravity" / "conversations"
-    summary_db = conv_dir.parent / "conversation_summaries.db"
+def _is_eligible_antigravity_cap(
+    cap: dict,
+    allowed_agents: set[str],
+    arch_refs: set[str],
+    sub_refs: set[str],
+) -> bool:
+    """统一校验来源与归档/子代理守卫；常规批导与 --recover 共用，杜绝复活已归档或自回环会话。"""
+    if not _antigravity_eligible_cwd(cap.get("cwd") or ""):
+        return False
+    ag = (cap.get("agent") or "").lower()
+    if ag == "antigravity":
+        return False
+    if allowed_agents and ag not in allowed_agents:
+        return False
+    sref = cap.get("session_ref") or ""
+    if ag == "zcode" and sref in (arch_refs | sub_refs):
+        return False
+    orig = str(cap.get("originator") or "")
+    if cap.get("parent_session_ref") or orig.startswith("workflow subagent"):
+        return False
+    return True
+
+
+def plan_antigravity_batch(
+    vault: Path,
+    *,
+    conv_dir: Path | None = None,
+    summary_db: Path | None = None,
+    agent: str = "zcode",
+    project: str | None = None,
+    include_archived: bool = False,
+    limit: int = 0,
+    recover: bool = False,
+) -> dict:
+    """生成待导入 Antigravity 的幂等计划 (供 Web 控制台与 antigravity_batch CLI 共用)。"""
+    conv_dir = Path(conv_dir) if conv_dir is not None else (_cv().HOME / ".gemini" / "antigravity" / "conversations")
+    summary_db = Path(summary_db) if summary_db is not None else (conv_dir.parent / "conversation_summaries.db")
     eff_agent = None if str(agent or "").strip().lower() in ("", "all") else agent
     allowed_agents = set(_cv()._parse_agent_filter(eff_agent))
     arch_refs = set() if include_archived else _cv()._zcode_archived_refs()
@@ -1256,7 +1285,7 @@ def sync_to_antigravity_batch(vault: Path, agent: str = "zcode", project: str | 
     summary_error = None
     if summary_db.exists():
         try:
-            sc = sqlite3.connect(f"file:{summary_db}?mode=ro", uri=True, timeout=5)
+            sc = sqlite3.connect(f"file:{summary_db}?mode=ro", uri=True, timeout=15)
             try:
                 have_rows = {str(r[0]).lower() for r in sc.execute("SELECT conversation_id FROM conversation_summaries") if r[0]}
             finally:
@@ -1273,6 +1302,17 @@ def sync_to_antigravity_batch(vault: Path, agent: str = "zcode", project: str | 
                     existing_fps.add(fp)
 
     existing_refs: set[tuple[str, str]] = set()
+    done_cascades: dict[str, str] = {}
+    mj = vault / "migrations.jsonl"
+    if mj.exists():
+        for line in mj.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                o = json.loads(line)
+            except ValueError:
+                continue
+            dest = o.get("dest") or ""
+            if "antigravity" in dest and "conversations" in dest:
+                done_cascades[o.get("source", "")] = Path(dest).stem.lower()
     for cid, ent in _collect_antigravity_migrated_dbs(vault).items():
         if ent["session_ref"] and (conv_dir / f"{cid}.db").exists() and cid.lower() in have_rows:
             existing_refs.add(((ent["agent"] or "").lower(), ent["session_ref"]))
@@ -1281,42 +1321,86 @@ def sync_to_antigravity_batch(vault: Path, agent: str = "zcode", project: str | 
     seen_cascades: set[str] = set()
     skipped_done = 0
     skipped_dup = 0
-    for it in items:
-        sid = it["id"]
+
+    def _consider(sid: str, fallback_cwd: str = "", fallback_title: str = "") -> None:
+        nonlocal skipped_done, skipped_dup
         try:
             env = _cv().load_snapshot(vault, sid)
         except (ValueError, OSError, _cv().SnapshotNotFound):
-            continue
+            return
         cap = env.get("capture") or {}
+        if not _is_eligible_antigravity_cap(cap, allowed_agents, arch_refs, sub_refs):
+            return
         ag = (cap.get("agent") or "").lower()
         sref = cap.get("session_ref") or ""
-        orig = str(cap.get("originator") or "")
-        if ag == "antigravity" or (allowed_agents and ag not in allowed_agents):
-            continue
-        if ag == "zcode" and sref in (arch_refs | sub_refs):
-            continue
-        if cap.get("parent_session_ref") or orig.startswith("workflow subagent"):
-            continue
         cascade = _cv()._deterministic_session_id(env).lower()
+        prev_cid = done_cascades.get(sid)
         if ((conv_dir / f"{cascade}.db").exists() and cascade in have_rows) \
+                or (recover and prev_cid and (conv_dir / f"{prev_cid}.db").exists() and prev_cid in have_rows) \
                 or (sref and (ag, sref) in existing_refs):
             skipped_done += 1
-            continue
+            return
         fp = _antigravity_first_user_text(env).lower()[:80]
         if fp and fp in existing_fps:
             skipped_dup += 1
-            continue
+            return
         if cascade in seen_cascades:
-            continue
+            return
         seen_cascades.add(cascade)
         plan.append({
             "sid": sid,
             "agent": ag,
-            "cwd": cap.get("cwd") or "",
-            "title": orig or fp or sid,
+            "cwd": cap.get("cwd") or fallback_cwd,
+            "title": str(cap.get("originator") or fallback_title or fp or sid),
             "cascade": cascade,
         })
 
+    for it in items:
+        _consider(it["id"], it.get("cwd") or "", it.get("originator") or "")
+
+    if recover and done_cascades:
+        conn_v = _cv().db(vault)
+        try:
+            srows = conn_v.execute("SELECT id, agent, session_ref, created_at FROM snapshots").fetchall()
+            parents = {r["parent_snapshot"] for r in conn_v.execute(
+                "SELECT parent_snapshot FROM snapshots WHERE parent_snapshot IS NOT NULL")}
+        finally:
+            conn_v.close()
+        by_ref: dict[tuple, list] = {}
+        for r in srows:
+            if r["id"] not in parents:
+                by_ref.setdefault((r["agent"] or "", r["session_ref"] or ""), []).append(r)
+        for sid0 in done_cascades:
+            try:
+                env0 = _cv().load_snapshot(vault, sid0)
+            except (ValueError, OSError, _cv().SnapshotNotFound):
+                continue
+            cap0 = env0.get("capture") or {}
+            if not _is_eligible_antigravity_cap(cap0, allowed_agents, arch_refs, sub_refs):
+                continue
+            cands = by_ref.get((cap0.get("agent") or "", cap0.get("session_ref") or ""), [])
+            leaf = max(cands, key=lambda r: r["created_at"] or "")["id"] if cands else sid0
+            _consider(leaf)
+
+    return {
+        "plan": plan,
+        "skipped_done": skipped_done,
+        "skipped_dup": skipped_dup,
+        "existing_fps_count": len(existing_fps),
+        "summary_error": summary_error,
+        "conv_dir": conv_dir,
+        "summary_db": summary_db,
+    }
+
+
+def sync_to_antigravity_batch(vault: Path, agent: str = "zcode", project: str | None = None,
+                              include_archived: bool = False, limit: int = 0,
+                              apply: bool = False) -> dict:
+    """差量同步活跃顶层主对话 → Antigravity（Web 控制台与批量同步共用，默认仅 preview）。"""
+    planned = plan_antigravity_batch(
+        vault, agent=agent, project=project, include_archived=include_archived, limit=limit, recover=False
+    )
+    plan = planned["plan"]
     by_proj: dict[str, int] = {}
     for p in plan:
         key = _cv()._norm_win_path(p["cwd"]) or "(无项目)"
@@ -1328,7 +1412,7 @@ def sync_to_antigravity_batch(vault: Path, agent: str = "zcode", project: str | 
     if apply and plan:
         if not _cv().find_smigrate():
             raise _cv().BadMigrateTarget("未找到 smigrate: uv tool install session-migrate")
-        _probe_antigravity_summary_writable(summary_db, "写入 Antigravity 摘要库")
+        _probe_antigravity_summary_writable(planned["summary_db"], "写入 Antigravity 摘要库")
         for p in plan:
             try:
                 _cv().do_import(vault, p["sid"], "antigravity", apply=True, session_id=p["cascade"])
@@ -1342,11 +1426,11 @@ def sync_to_antigravity_batch(vault: Path, agent: str = "zcode", project: str | 
         "imported": imported,
         "failed": len(errors),
         "errors": errors[:10],
-        "skipped_done": skipped_done,
-        "skipped_dup": skipped_dup,
+        "skipped_done": planned["skipped_done"],
+        "skipped_dup": planned["skipped_dup"],
         "projects": proj_summary,
         "items": plan[:50],
-        "summary_error": summary_error,
+        "summary_error": planned["summary_error"],
     }
 
 

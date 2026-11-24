@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "context-vault"
-version = "0.10.0"
+version = "0.10.1"
 description = "Local-first, vendor-neutral context asset vault for AI coding agents (zero third-party deps)"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -20,6 +20,7 @@ cv-aml = "aml_adapter:main"
 package-dir = {"" = "tools"}
 py-modules = [
   "cv",
+  "cv_core",
   "cv_index",
   "cv_memory",
   "cv_ledger",

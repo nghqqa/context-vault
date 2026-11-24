@@ -57,6 +57,7 @@ from urllib.request import Request, urlopen
 # 同目录兄弟模块: HOME/CODEX_SESSIONS/db/SCHEMA/iter_jsonl/now_iso/vault_dir。
 # 全部路径取自 cv.HOME / cv.CODEX_SESSIONS 的运行时属性访问 — 测试 monkeypatch cv.HOME 即全隔离。
 import cv
+from cv_core import fmt_usd
 
 WINDOW_5H = 5 * 3600
 WINDOW_CHOICES = {"5h": 5 * 3600, "24h": 24 * 3600, "7d": 7 * 86400, "30d": 30 * 86400}
@@ -2277,8 +2278,7 @@ def _fmt_eta(v):
     return f"{h}h{m:02d}m 后" if h else f"{m}m 后"
 
 
-def fmt_usd(x):
-    return f"${x:,.2f}" if isinstance(x, (int, float)) else "-"
+# fmt_usd 已收敛至 cv_core (顶部导入)
 
 
 def cmd_ledger_quota(args):

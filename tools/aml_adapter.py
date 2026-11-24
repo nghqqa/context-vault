@@ -109,56 +109,14 @@ def _safe_tenant_id(user_id: str) -> str:
 
 def _atomic_write_text(path: Path, text: str) -> None:
     """同目录临时文件 + os.replace 原子写入, 避免并发读到半写 JSON。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp_name, path)
-    except Exception:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+    from cv_core import atomic_write_text
+    atomic_write_text(path, text, fsync=True)
 
 
-def _parse_budget_tokens(val) -> int | None:
-    if val is None:
-        return None
-    if isinstance(val, bool):
-        raise ValueError("budget_tokens 必须为整数, 不能是布尔值")
-    if isinstance(val, int):
-        return val
-    if isinstance(val, str) and val.strip():
-        try:
-            return int(val.strip())
-        except ValueError as e:
-            raise ValueError(f"无效的 budget_tokens: {val!r}") from e
-    raise ValueError(f"无效的 budget_tokens: {val!r}")
-
-
-def _truncate_to_tokens(text: str, max_tokens: int) -> str:
-    """二分截断文本, 确保估算 token 数不超过 max_tokens。"""
-    if max_tokens <= 0 or not text:
-        return ""
-    if cv.estimate_text_tokens(text) <= max_tokens:
-        return text
-    if max_tokens <= 1:
-        return "…"
-    lo, hi = 0, len(text)
-    best = 0
-    while lo <= hi:
-        mid = (lo + hi) // 2
-        cand = text[:mid] + "…"
-        if cv.estimate_text_tokens(cand) <= max_tokens:
-            best = mid
-            lo = mid + 1
-        else:
-            hi = mid - 1
-    return (text[:best] + "…") if best > 0 else "…"
+from cv_core import (  # noqa: E402
+    parse_budget_tokens as _parse_budget_tokens,
+    truncate_to_tokens as _truncate_to_tokens,
+)
 
 
 class TenantRouter:
@@ -397,7 +355,7 @@ class AMLMemoryAdapter:
             ctx_results = list(ctx.get("results", []))
             # 若显式配置了 CV_EMBEDDINGS_URL, 自动用稠密向量 RRF 语义重排快照候选 (零配置零开销)
             try:
-                from cv_dense import DenseProvider, hybrid_search
+                from cv_semantic import DenseProvider, hybrid_search
                 prov = DenseProvider(vault=self.vault)
                 if prov.available and ctx_results:
                     hyb = hybrid_search(self._idx, self.vault, query, top_k, provider=prov)

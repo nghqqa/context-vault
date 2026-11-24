@@ -13,9 +13,7 @@ from pathlib import Path
 from cv_ui import load_dashboard_html as _load_dashboard_html
 
 
-def _cv():
-    import cv
-    return cv
+from cv_core import cv_mod as _cv  # noqa: E402
 
 
 # ------------------------------------------------- probe: 上游可用性探测

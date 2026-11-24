@@ -193,6 +193,52 @@ class TestCvSkills(unittest.TestCase):
             srv.server_close()
             idx._close()
 
+    def test_cache_self_invalidation_and_refresh_param(self):
+        # 1) 首次迁入后进入温缓存态, 状态为 identical
+        cv_skills.migrate_skills(
+            source="zcode", target="antigravity", selected=["academic-figure-prompt"], apply=True
+        )
+        r1 = cv_skills.list_skills_api(source="zcode", target="antigravity")
+        st1 = {s["slug"]: s["target_status"] for s in r1["skills"]}
+        self.assertEqual(st1["academic-figure-prompt"], "identical")
+
+        # 2) 不清缓存直接改动目标 SKILL.md -> mtime/size 自失效立即识出 conflict
+        dst_dir = self.home / ".gemini" / "config" / "skills" / "academic-figure-prompt"
+        dst_md = dst_dir / "SKILL.md"
+        dst_md.write_text(dst_md.read_text(encoding="utf-8") + "\n<!-- edited -->\n", encoding="utf-8")
+        r2 = cv_skills.list_skills_api(source="zcode", target="antigravity")
+        st2 = {s["slug"]: s["target_status"] for s in r2["skills"]}
+        self.assertEqual(st2["academic-figure-prompt"], "conflict")
+
+        # 3) 覆盖修复一致后, 再直接改动源端附属脚本 scripts/gen.py -> 立即识出 conflict
+        cv_skills.migrate_skills(
+            source="zcode", target="antigravity", selected=["academic-figure-prompt"],
+            conflict="overwrite", apply=True, vault=self.vault,
+        )
+        src_gen = self.home / ".zcode" / "skills" / "academic-figure-prompt" / "scripts" / "gen.py"
+        src_gen.write_text("print('modified-in-test')\n", encoding="utf-8")
+        r3 = cv_skills.list_skills_api(source="zcode", target="antigravity")
+        st3 = {s["slug"]: s["target_status"] for s in r3["skills"]}
+        self.assertEqual(st3["academic-figure-prompt"], "conflict")
+
+        # 4) HTTP GET /skills/list?refresh=1 正常强制重扫并返回最新状态
+        srv, idx = cv.build_vault_server(self.vault, 0)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            c = HTTPConnection("127.0.0.1", port, timeout=5)
+            c.request("GET", "/skills/list?source=zcode&target=antigravity&refresh=1")
+            resp = c.getresponse()
+            data = json.loads(resp.read().decode("utf-8"))
+            c.close()
+            self.assertEqual(resp.status, 200)
+            st_http = {s["slug"]: s["target_status"] for s in data["skills"]}
+            self.assertEqual(st_http["academic-figure-prompt"], "conflict")
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            idx._close()
+
 
 if __name__ == "__main__":
     unittest.main()

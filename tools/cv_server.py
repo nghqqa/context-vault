@@ -1,39 +1,41 @@
 """Context Vault 常驻 HTTP 热索引服务、Web 控制台、记忆 CRUD、语义增强与统一 /aml/* 接口。"""
 from __future__ import annotations
 
+from collections import Counter
+import contextlib
 import datetime as dt
 import gzip
 import hmac
+import io
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import os
 import re
 import sqlite3
 import sys
 import threading
 import time
+from types import SimpleNamespace
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from cv_core import cv_mod as _cv
 from cv_index import VaultIndex, block_text, format_snapshot_messages
 from cv_ui import load_console_html as _load_console_html
 
 
-def _cv():
-    import cv
-    return cv
-
-
-# ------------------------------------------------- serve: 常驻服务 + 热索引 (M2)
-# 索引实现已解耦至 tools/cv_index.py, 前端模板解耦至 tools/ui/ (经 cv_ui 组装)
+# ------------------------------------------------- 缓存、数据库护栏与上下文
 
 CONSOLE_HTML = _load_console_html()
-
 
 _CLIENT_DISCONNECT = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
 MAX_POST_BYTES = 32 * 1024 * 1024  # 单次 POST 上限 32 MiB, 防异常大包 OOM
 GZIP_MIN_BYTES = 4096              # ≥4KB 响应在客户端声明 gzip 时自动压缩 (零依赖)
+SERVE_FALLBACK_PORTS = [18791, 28791]
+_SID_RE = re.compile(r"cv_[0-9a-f]{8,64}")
 
 
 def _file_stamp(p: Path):
@@ -90,25 +92,33 @@ class _KeyStub:
     key = None
 
 
-def build_vault_server(vault: Path, port: int, token: str | None = None):
-    """构建热索引 HTTP 服务 (不阻塞); cmd_serve 与 Pro 托盘共用, 避免实现漂移。
-    token: 商业化/局域网档的可选鉴权 — 设置后所有请求需凭据 (X-Vault-Token 头 /
-    Cookie vault_token / 首访 ?token= 自动 Set-Cookie), 未授权一律 401。"""
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+def _make_http_logger(log_path: Path) -> logging.Logger:
+    """使用标准库 RotatingFileHandler 记录脱敏后的访问日志 (delay=True, 无请求不开句柄)。"""
+    logger = logging.getLogger(f"cv.http.{id(log_path)}.{time.monotonic_ns()}")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    handler = RotatingFileHandler(
+        str(log_path), maxBytes=5 * 1024 * 1024, backupCount=1, encoding="utf-8", delay=True
+    )
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+    return logger
 
-    # 用局部子类隔离端口复用策略: Windows 下置 False 防止静默双绑抢占; Linux 容器允许复用防 TIME_WAIT 撞端口
-    class _VaultHTTPServer(ThreadingHTTPServer):
-        allow_reuse_address = os.name != "nt"
 
-    from urllib.parse import urlparse, parse_qs
-    sys.path.insert(0, str(Path(__file__).parent))
-    from mcp_server import ledger_summary
-    import cv_ledger  # 本地多端账本 (usage_events); 延迟导入防循环 (cv_ledger 顶层 import cv)  # ledger_summary: /stats 端点 (曾漏导入致 500)
-    idx = VaultIndex(vault, block_text)  # block_text 用本模块规范实现, 与 mcp 冷回退同源
-    cache = _ServerCache()
-    aml_router_holder = [None]
+class _ServerCtx:
+    """单个服务实例的共享状态、缓存与资源清理上下文 (替代巨型闭包的扁平持参对象)。"""
 
-    def _compute_zcode_usage():
+    def __init__(self, vault: Path, idx: VaultIndex, token: str | None, cv_ledger_mod, ledger_summary_fn):
+        self.vault = vault
+        self.idx = idx
+        self.token = token
+        self.cache = _ServerCache()
+        self.cv_ledger = cv_ledger_mod
+        self.ledger_summary = ledger_summary_fn
+        self._aml_router = None
+        self.http_logger = _make_http_logger(vault / "serve_http.log")
+
+    def compute_zcode_usage(self) -> dict:
         zcode_usage = {}
         try:  # 真相源: zcode 主库 model_usage (全量调用); model-io 审计文件仅零头
             zdb = sqlite3.connect(f"file:{_cv().ZCODE_DB}?mode=ro", uri=True)
@@ -121,11 +131,11 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
             finally:
                 zdb.close()
         except sqlite3.Error:
-            pass  # 无 zcode / 无表 = 无自有用量, 合法空态
+            pass
         return zcode_usage
 
-    def _compute_ledger():
-        conn = _cv().db(vault)
+    def compute_ledger(self) -> dict:
+        conn = _cv().db(self.vault)
         try:
             _ensure_vault_tables_if_missing(conn)
             try:
@@ -133,19 +143,18 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
             except sqlite3.OperationalError:
                 mem_n = 0
             prices = {}
-            prices_p = vault / "prices.json"  # {"模型": {"input":x,"output":y,"cache_read":z}} $/Mtok
+            prices_p = self.vault / "prices.json"
             num_ok = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool)
             if prices_p.exists():
                 try:
                     pj = json.loads(prices_p.read_text(encoding="utf-8"))
-                    # bool 是 int 子类, float(True)=1.0 会编造假成本 (二轮 regression-1)
                     prices = {m: v for m, v in pj.items()
                               if isinstance(v, dict) and num_ok(v.get("input")) and num_ok(v.get("output"))}
                 except (ValueError, AttributeError, OSError):
-                    pass  # 非法 JSON/顶层非 dict/prices 是目录: 无价目诚实显示, 不 500
-            zcode_raw = cache.get_or_compute(
+                    pass
+            zcode_raw = self.cache.get_or_compute(
                 ("zcode_usage", str(_cv().ZCODE_DB), _db_stamp(_cv().ZCODE_DB)),
-                _compute_zcode_usage,
+                self.compute_zcode_usage,
             )
             zcode_usage = {m: dict(v) for m, v in zcode_raw.items()}
             zcode_snapshots = 0
@@ -160,7 +169,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                 if pr is None:
                     a["cost"] = None
                     continue
-                try:  # 值级坏形状 (字符串/null/list) 只损失该模型成本, 不拖垮整个 /ledger
+                try:
                     crp = pr.get("cache_read")
                     a["cost"] = round((a["tin"] * float(pr["input"]) + a["tout"] * float(pr["output"])
                                        + a["cr"] * (float(crp) if num_ok(crp) else 0)) / 1e6, 2)
@@ -181,52 +190,860 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                              "saved_usd": lt["cost_usd"] if lt else 0, **raw},
                 "by_model": [dict(r) for r in by_model],
                 "monthly": [dict(r) for r in monthly],
-                "owned": _cv().owned_stats(vault), "memories": mem_n,
+                "owned": _cv().owned_stats(self.vault), "memories": mem_n,
                 "zcode_usage": zcode_usage, "zcode_snapshots": zcode_snapshots}
 
-    def _get_ledger_cached():
+    def get_ledger_cached(self) -> dict:
         key = (
             "ledger",
-            _db_stamp(vault / "vault.db"),
-            _file_stamp(vault / "snapshots"),
-            _file_stamp(vault / "prices.json"),
+            _db_stamp(self.vault / "vault.db"),
+            _file_stamp(self.vault / "snapshots"),
+            _file_stamp(self.vault / "prices.json"),
             str(_cv().ZCODE_DB),
             _db_stamp(_cv().ZCODE_DB),
         )
-        return cache.get_or_compute(key, _compute_ledger)
+        return self.cache.get_or_compute(key, self.compute_ledger)
 
-    def _get_usage_base_cached(w: str, acct):
+    def get_stats_cached(self) -> dict:
+        key = (
+            "stats",
+            _db_stamp(self.vault / "vault.db"),
+            _file_stamp(self.vault / "snapshots"),
+        )
+        return self.cache.get_or_compute(
+            key,
+            lambda: {
+                "stats": self.ledger_summary(self.vault),
+                "owned": _cv().owned_stats(self.vault),
+                "usage": self.cv_ledger.usage_stats_summary(self.vault),
+            },
+        )
+
+    def get_usage_base_cached(self, w: str, acct) -> dict:
         key = (
             "usage",
-            _db_stamp(vault / "vault.db"),
-            _file_stamp(vault / "accounts.json"),
-            _file_stamp(vault / "prices.json"),
-            _file_stamp(vault / "pricing.json"),
+            _db_stamp(self.vault / "vault.db"),
+            _file_stamp(self.vault / "accounts.json"),
+            _file_stamp(self.vault / "prices.json"),
+            _file_stamp(self.vault / "pricing.json"),
             w,
             acct,
-            int(time.time() // 15),
+            int(time.time() // 30),
         )
-        return cache.get_or_compute(key, lambda: cv_ledger.usage_payload(vault, window=w, account=acct))
+        return self.cache.get_or_compute(key, lambda: self.cv_ledger.usage_payload(self.vault, window=w, account=acct))
 
-    def _get_aml_router():
-        if aml_router_holder[0] is None:
+    def get_projects_cached(self, p_proj, p_sub: bool, p_arch: bool, p_ag):
+        key = (
+            "projects",
+            _db_stamp(self.vault / "vault.db"),
+            str(_cv().ZCODE_DB),
+            int(time.time() // 30),
+            p_proj,
+            p_sub,
+            p_arch,
+            p_ag,
+        )
+        return self.cache.get_or_compute(
+            key,
+            lambda: _cv().group_conversations_by_project(
+                self.vault, project=p_proj, include_subagents=p_sub, include_archived=p_arch, agent=p_ag
+            ),
+        )
+
+    def get_aml_router(self):
+        if self._aml_router is None:
             import aml_adapter as _aml
-            aml_router_holder[0] = _aml.TenantRouter(vault, default_idx=idx)
-        return aml_router_holder[0]
+            self._aml_router = _aml.TenantRouter(self.vault, default_idx=self.idx)
+        return self._aml_router
+
+    def stats_overlay(self, sid: str, s: dict) -> dict:
+        """快照文件不可变: zcode 历史版本的用量在索引层回填, 详情/预览优先展示回填值。"""
+        if s.get("usage_events"):
+            return s
+        try:
+            c = _cv().db(self.vault)
+            r = c.execute("SELECT tokens_in, tokens_out, reasoning_tokens, cache_read, cache_write,"
+                          " total_tokens, usage_events FROM snapshots WHERE id=?", (sid,)).fetchone()
+            c.close()
+        except sqlite3.Error:
+            return s
+        return {**s, **dict(r)} if r and r["usage_events"] else s
+
+    def close(self) -> None:
+        if self._aml_router is not None:
+            self._aml_router.close_all()
+        for h in list(self.http_logger.handlers):
+            try:
+                h.flush()
+                h.close()
+            except Exception:
+                pass
+            self.http_logger.removeHandler(h)
+
+
+def _sid_ok(sid: str) -> bool:
+    return bool(_SID_RE.fullmatch(str(sid or "")))
+
+
+def _parse_int_arg(raw, name: str, *, lo: int | None = None, hi: int | None = None) -> int:
+    if isinstance(raw, bool):
+        raise ValueError(f"invalid {name}: 需要整数")
+    try:
+        v = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid {name}: 需要整数") from exc
+    if lo is not None:
+        v = max(lo, v)
+    if hi is not None:
+        v = min(hi, v)
+    return v
+
+
+def _agy_sync_json(res: dict) -> dict:
+    return {
+        "applied": res["applied"],
+        "targets_count": len(res["targets"]),
+        "targets": [
+            {
+                "cid": t["cid"], "sid": t["sid"], "agent": t["agent"],
+                "cwd": t["cwd"], "title": t["title"], "reason": t["reason"],
+                "has_db": t["has_db"], "has_summary": t["has_summary"], "has_proto": t["has_proto"],
+            }
+            for t in res["targets"]
+        ],
+        "empty_projects": [
+            {"id": e["id"], "name": e["name"], "cwd": e["cwd"]}
+            for e in res.get("empty_projects") or []
+        ],
+        "db_files": res["db_files"],
+        "summary_ids": res["summary_ids"],
+        "proto_ids": res["proto_ids"],
+        "dup_count": res["dup_count"],
+        "agent_count": res["agent_count"],
+        "removed_dbs": res["removed_dbs"],
+        "removed_projects": res.get("removed_projects", 0),
+        "cleaned_summaries": res["cleaned_summaries"],
+        "cleaned_proto": res["cleaned_proto"],
+        "summary_check_error": res.get("summary_check_error"),
+    }
+
+
+# ------------------------------------------------- GET 路由处理函数 (表驱动分派)
+
+def _get_root(h, ctx: _ServerCtx, q: dict):
+    h._send(_load_console_html().encode("utf-8"), "text/html; charset=utf-8")
+
+
+def _get_healthz(h, ctx: _ServerCtx, q: dict):
+    ctx.idx.request_rebuild(60)
+    h._json({"service": "context-vault", "status": "ok",
+             "snapshots": len(ctx.idx.meta), "terms": ctx.idx.term_count})
+
+
+def _get_audit(h, ctx: _ServerCtx, q: dict):
+    since = q.get("since", "")
+    sum_only = (q.get("summary_only") == "1")
+    akey = ("audit", _db_stamp(ctx.vault / "vault.db"), since, sum_only)
+    h._json(ctx.cache.get_or_compute(
+        akey, lambda: _cv().audit_summary_and_timeline(ctx.vault, since, "all", summary_only=sum_only)))
+
+
+def _get_memory(h, ctx: _ServerCtx, q: dict):
+    try:
+        mlim = _parse_int_arg(q.get("limit", 8), "limit", lo=1, hi=200)
+    except ValueError:
+        return h._json({"error": "invalid limit: 需要整数"}, 400)
+    mkind = q.get("kind", "")
+    h._json({
+        "query": q.get("q", ""),
+        "kind": mkind,
+        "counts": _cv().memory_counts_api(ctx.vault),
+        "memories": _cv().memory_search_api(ctx.vault, q.get("q", ""), mlim, kind=mkind,
+                                            include_history=(q.get("history") == "1")),
+    })
+
+
+def _get_semantic_status(h, ctx: _ServerCtx, q: dict):
+    import cv_semantic as _sem
+    h._json(_sem.semantic_status(ctx.vault, probe=(q.get("probe") == "1")))
+
+
+def _get_skills_list(h, ctx: _ServerCtx, q: dict):
+    import cv_skills as _sk
+    try:
+        ws = Path(q["workspace"]) if q.get("workspace") else None
+        h._json(_sk.list_skills_api(
+            source=q.get("source") or "zcode",
+            include_plugins=(q.get("include_plugins") == "1"),
+            target=q.get("target") or "antigravity",
+            agy_mode=q.get("agy_mode") or "skills",
+            plugin_name=q.get("plugin_name") or "",
+            workspace_dir=ws,
+            refresh=(q.get("refresh") == "1"),
+        ))
+    except ValueError as e:
+        h._json({"error": str(e)}, 400)
+
+
+def _get_ops_mcp(h, ctx: _ServerCtx, q: dict):
+    h._json(_cv().mcp_status_api(ctx.vault))
+
+
+def _get_ops_status(h, ctx: _ServerCtx, q: dict):
+    import cv_semantic as _sem
+    vdb = ctx.vault / "vault.db"
+    idb = ctx.vault / "search_index.db"
+    bdir = ctx.vault / "backups"
+    bfiles = sorted(bdir.glob("cv-backup-*.zip")) if bdir.is_dir() else []
+    latest_b = bfiles[-1] if bfiles else None
+    tok = ctx.cv_ledger.load_plan_token(ctx.vault) or ""
+    tok_hint = (tok[:4] + "…" + tok[-4:]) if len(tok) >= 10 else ("***" if tok else "")
+    accts = ctx.cv_ledger.load_accounts(ctx.vault)
+    h._json({
+        "version": _cv().VERSION,
+        "vault": str(ctx.vault.resolve()),
+        "frozen": bool(getattr(sys, "frozen", False)),
+        "snapshots": len(ctx.idx.meta),
+        "terms": ctx.idx.term_count,
+        "db_mb": round(vdb.stat().st_size / 1048576, 2) if vdb.is_file() else 0.0,
+        "index_mb": round(idb.stat().st_size / 1048576, 2) if idb.is_file() else 0.0,
+        "backups_count": len(bfiles),
+        "latest_backup": {
+            "name": latest_b.name,
+            "size_mb": round(latest_b.stat().st_size / 1048576, 2),
+        } if latest_b and latest_b.is_file() else None,
+        "plan_token_set": bool(tok),
+        "plan_token_hint": tok_hint,
+        "accounts_configured": bool(accts.get("profiles")),
+        "semantic": _sem.semantic_status(ctx.vault, probe=(q.get("probe") == "1")),
+    })
+
+
+def _get_probe_events(h, ctx: _ServerCtx, q: dict):
+    conn = _cv().db(ctx.vault)
+    try:
+        try:
+            plim = _parse_int_arg(q.get("limit", 100), "limit")
+        except ValueError:
+            return h._json({"error": "invalid limit: 需要整数"}, 400)
+        try:
+            rows = conn.execute("SELECT ts,profile,status,http_code,latency_ms,models,missing_models"
+                                " FROM probe_events ORDER BY id DESC LIMIT ?", (plim,)).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+    finally:
+        conn.close()
+    h._json([dict(r) for r in rows])
+
+
+def _get_ledger(h, ctx: _ServerCtx, q: dict):
+    h._json(ctx.get_ledger_cached())
+
+
+def _get_ledger_usage(h, ctx: _ServerCtx, q: dict):
+    w = q.get("window", "5h") or "5h"
+    if w not in ctx.cv_ledger.WINDOW_CHOICES:
+        return h._json({"error": "invalid window: 可选 5h|24h|7d|30d"}, 400)
+    acct = q.get("account") or None
+    payload = dict(ctx.get_usage_base_cached(w, acct))
+    fast = (q.get("fast") == "1")
+    pending = False
+    rq = ctx.cv_ledger.remote_quota_cached(ctx.vault, swr=True, nonblocking_cold=fast)
+    if isinstance(rq, dict) and rq.get("_pending"):
+        pending = True
+    elif rq is not None:
+        payload["remote_quota"] = rq
+    aq = ctx.cv_ledger.agv_quota_cached(swr=True, nonblocking_cold=fast)
+    if isinstance(aq, dict) and aq.get("_pending"):
+        pending = True
+    elif aq is not None:
+        payload["remote_quota_agv"] = aq
+    if pending:
+        payload["quota_pending"] = True
+    h._json(payload)
+
+
+def _get_preview(h, ctx: _ServerCtx, q: dict):
+    qid = q.get("id", "")
+    if not _sid_ok(qid):
+        return h._json({"error": "invalid id: 需要 cv_ 前缀的快照 id"}, 400)
+    env2 = ctx.idx.load_env(qid)
+    if not env2:
+        return h._json({"error": "not found"}, 404)
+    blocks = env2["conversation"]
+    dist = dict(Counter(b["type"] for b in blocks))
+    live, comp = _cv().live_context(blocks)
+    live_dist = dict(Counter(b["type"] for b in live))
+    s = ctx.stats_overlay(qid, env2["stats"])
+    h._json({"id": qid, "agent": env2["capture"].get("agent"),
+             "completeness": env2["capture"].get("completeness"),
+             "cwd": env2["capture"].get("cwd"),
+             "block_dist": dist, "live_blocks": len(live),
+             "live_dist": live_dist, "compactions": dist.get("compaction", 0),
+             "live_tokens_est": _cv().estimate_tokens(live),
+             "history_tokens_in": s["tokens_in"],
+             "thinking": dist.get("thinking", 0),
+             "agent_messages": dist.get("agent_message", 0),
+             "dropped_source": s["blocks_dropped"],
+             "no_assistant": env2["capture"].get("completeness") == "no_assistant_text"})
+
+
+def _get_search(h, ctx: _ServerCtx, q: dict):
+    ctx.idx.rebuild()
+    try:
+        lim = _parse_int_arg(q.get("limit", 5), "limit")
+    except ValueError:
+        return h._json({"error": "invalid limit: 需要整数"}, 400)
+    hyb = q.get("hybrid")
+    use_dense = (hyb == "1")
+    if hyb is None:
+        try:
+            from cv_semantic import DenseProvider
+            use_dense = DenseProvider(vault=ctx.vault).available
+        except Exception:
+            use_dense = False
+    if use_dense:
+        try:
+            from cv_semantic import DenseProvider, hybrid_search
+            return h._json(hybrid_search(
+                ctx.idx, ctx.vault, q.get("q", ""), lim, provider=DenseProvider(vault=ctx.vault)))
+        except Exception:
+            pass
+    h._json(ctx.idx.search(q.get("q", ""), lim))
+
+
+def _get_context(h, ctx: _ServerCtx, q: dict):
+    ctx.idx.rebuild()
+    try:
+        lim = _parse_int_arg(q.get("limit", 3), "limit")
+    except ValueError:
+        return h._json({"error": "invalid limit: 需要整数"}, 400)
+    h._json(ctx.idx.context(q.get("q", ""), lim))
+
+
+def _get_recent(h, ctx: _ServerCtx, q: dict):
+    ctx.idx.request_rebuild(60)
+    meta, sids = ctx.idx.recent_pair()
+    total = len(meta)
+    try:
+        lim = _parse_int_arg(q.get("limit", 5), "limit/offset", lo=1, hi=200)
+        off = _parse_int_arg(q.get("offset", 0), "limit/offset", lo=0)
+    except ValueError:
+        return h._json({"error": "invalid limit/offset: 需要整数"}, 400)
+    desc = q.get("order", "desc") != "asc"
+    agent_f = (q.get("agent") or "").strip().lower()
+    pairs = [(sid, meta[sid]) for sid in sids]
+    if agent_f:
+        pairs = [(sid, m) for sid, m in pairs if str(m.get("agent") or "").lower() == agent_f]
+        total = len(pairs)
+    versions = {}
+    if q.get("leaves") == "1":
+        def _load_leaves():
+            c = _cv().db(ctx.vault)
+            try:
+                parents_ = {r[0] for r in c.execute(
+                    "SELECT parent_snapshot FROM snapshots WHERE parent_snapshot IS NOT NULL")}
+                per_sess_ = {(r[0], r[1]): r[2] for r in c.execute(
+                    "SELECT agent, session_ref, COUNT(*) FROM snapshots GROUP BY agent, session_ref")}
+                sess_of_ = {r[0]: (r[1], r[2]) for r in c.execute(
+                    "SELECT id, agent, session_ref FROM snapshots")}
+                return parents_, per_sess_, sess_of_
+            finally:
+                c.close()
+        try:
+            parents, per_sess, sess_of = ctx.cache.get_or_compute(
+                ("recent_leaves", _db_stamp(ctx.vault / "vault.db")), _load_leaves)
+            pairs = [kv for kv in pairs if kv[0] not in parents]
+            versions = {sid: per_sess.get(sess_of.get(sid), 1) for sid, _ in pairs}
+        except sqlite3.Error:
+            pass
+        total = len(pairs)
+    rows = sorted(pairs, key=lambda kv: kv[1]["created_at"] or "", reverse=desc)[off:off + lim]
+    h._json({"total": total, "versions_total": len(meta),
+             "rows": [{"sid": k, **v, **({"versions": versions[k]} if k in versions else {})}
+                      for k, v in rows]})
+
+
+def _get_timeline(h, ctx: _ServerCtx, q: dict):
+    ref = q.get("session", "")
+    agent = q.get("agent", "")
+    if not ref:
+        return h._json({"error": "invalid session: 需要 session_ref"}, 400)
+    try:
+        c = _cv().db(ctx.vault)
+        try:
+            if agent:
+                rows = c.execute("SELECT id, created_at, tokens_in, total_tokens, blocks_total,"
+                                 " parent_snapshot FROM snapshots WHERE session_ref=? AND agent=?"
+                                 " ORDER BY created_at", (ref, agent)).fetchall()
+            else:
+                rows = c.execute("SELECT id, created_at, tokens_in, total_tokens, blocks_total,"
+                                 " parent_snapshot FROM snapshots WHERE session_ref=?"
+                                 " ORDER BY created_at", (ref,)).fetchall()
+        finally:
+            c.close()
+    except sqlite3.Error:
+        rows = []
+    child = {r[5] for r in rows if r[5]}
+    days = {}
+    for r in rows:
+        days.setdefault(str(r["created_at"] or "")[:10], []).append(
+            {"sid": r["id"], "time": str(r["created_at"] or "")[11:19],
+             "tokens_in": r["tokens_in"] or 0, "total_tokens": r["total_tokens"] or 0,
+             "blocks": r["blocks_total"] or 0, "leaf": r["id"] not in child})
+    h._json({"session": ref, "agent": agent,
+             "days": [{"day": d, "versions": days[d]} for d in sorted(days)]})
+
+
+def _get_stats(h, ctx: _ServerCtx, q: dict):
+    h._json(ctx.get_stats_cached())
+
+
+def _get_projects(h, ctx: _ServerCtx, q: dict):
+    h._json(ctx.get_projects_cached(
+        q.get("project") or None,
+        q.get("subagents") == "1",
+        q.get("archived") == "1",
+        q.get("agent") or None,
+    ))
+
+
+def _get_agy_sync(h, ctx: _ServerCtx, q: dict):
+    only_ag = q["only_agent"].strip() or None if "only_agent" in q else "zcode"
+    res = _cv().sync_antigravity_archived(
+        ctx.vault, project=q.get("project") or None, apply=False,
+        dedup=(q.get("dedup", "1") == "1"), only_agent=only_ag,
+    )
+    h._json(_agy_sync_json(res))
+
+
+def _get_agy_batch(h, ctx: _ServerCtx, q: dict):
+    try:
+        lim = _parse_int_arg(q.get("limit", 0) or 0, "limit")
+    except ValueError:
+        return h._json({"error": "invalid limit: 需要整数"}, 400)
+    h._json(_cv().sync_to_antigravity_batch(
+        ctx.vault, agent=q.get("agent", "zcode"), project=q.get("project") or None,
+        include_archived=(q.get("archived") == "1"), limit=lim, apply=False,
+    ))
+
+
+def _get_messages(h, ctx: _ServerCtx, q: dict):
+    qid = q.get("id", "")
+    if not _sid_ok(qid):
+        return h._json({"error": "invalid id: 需要 cv_ 前缀的快照 id"}, 400)
+    try:
+        off = _parse_int_arg(q.get("offset", 0) or 0, "offset/limit", lo=0)
+        lim = _parse_int_arg(q.get("limit", 40) or 40, "offset/limit", lo=1, hi=100)
+    except ValueError:
+        return h._json({"error": "invalid offset/limit: 需要整数"}, 400)
+    env_m = ctx.idx.load_env(qid)
+    if not env_m:
+        return h._json({"error": "not found"}, 404)
+    res_m = format_snapshot_messages(
+        env_m, scope=q.get("scope", "live"), offset=off, limit=lim, query=q.get("q", ""),
+    )
+    res_m["id"] = qid
+    h._json(res_m)
+
+
+def _get_snapshot(h, ctx: _ServerCtx, q: dict):
+    qid = q.get("id", "")
+    if not _sid_ok(qid):
+        return h._json({"error": "invalid id: 需要 cv_ 前缀的快照 id"}, 400)
+    env = ctx.idx.load_env(qid)
+    if not env:
+        return h._json({"error": "not found"}, 404)
+    dist = dict(Counter(b["type"] for b in env["conversation"]))
+    h._json({"id": qid, "capture": env["capture"], "lineage": env.get("lineage") or {},
+             "stats": ctx.stats_overlay(qid, env["stats"]), "block_dist": dist})
+
+
+GET_ROUTES = {
+    "/": _get_root,
+    "/healthz": _get_healthz,
+    "/audit": _get_audit,
+    "/memory": _get_memory,
+    "/semantic/status": _get_semantic_status,
+    "/skills/list": _get_skills_list,
+    "/ops/mcp": _get_ops_mcp,
+    "/ops/status": _get_ops_status,
+    "/probe_events": _get_probe_events,
+    "/ledger": _get_ledger,
+    "/ledger/usage": _get_ledger_usage,
+    "/preview": _get_preview,
+    "/search": _get_search,
+    "/context": _get_context,
+    "/recent": _get_recent,
+    "/timeline": _get_timeline,
+    "/stats": _get_stats,
+    "/projects": _get_projects,
+    "/antigravity/sync": _get_agy_sync,
+    "/antigravity/batch": _get_agy_batch,
+    "/messages": _get_messages,
+    "/snapshot": _get_snapshot,
+}
+
+
+# ------------------------------------------------- POST 路由处理函数 (表驱动分派)
+
+def _post_migrate(h, ctx: _ServerCtx, body: dict):
+    mid = str(body.get("id", ""))
+    if not _sid_ok(mid):
+        return h._json({"error": "invalid id: 需要 cv_ 前缀的快照 id"}, 400)
+    if not (ctx.vault / "snapshots" / f"{mid}.json").exists():
+        return h._json({"error": f"snapshot not found: {mid}"}, 404)
+    try:
+        r = _cv().do_import(ctx.vault, mid, body.get("target", "codex"),
+                            bool(body.get("apply")), budget_tokens=body.get("budget_tokens"))
+    except _cv().SnapshotNotFound as e:
+        return h._json({"error": str(e)}, 404)
+    except _cv().BadMigrateTarget as e:
+        return h._json({"error": str(e)}, 400)
+    if str(body.get("target") or "").lower() == "markdown" and r.get("dest"):
+        try:
+            dp = Path(r["dest"])
+            if dp.is_file() and dp.stat().st_size <= 65536:
+                r = {**r, "content": dp.read_text(encoding="utf-8", errors="replace")}
+        except OSError:
+            pass
+    h._json(r)
+
+
+def _post_migrate_project(h, ctx: _ServerCtx, body: dict):
+    proj = str(body.get("project") or "").strip()
+    if not proj:
+        return h._json({"error": "missing project: 需要 project 参数"}, 400)
+    target = str(body.get("target") or "antigravity")
+    try:
+        lim = _parse_int_arg(body.get("limit") or 0, "limit")
+    except ValueError:
+        return h._json({"error": "invalid limit: 需要整数"}, 400)
+    items = _cv()._resolve_project_items(
+        ctx.vault, proj, limit=lim, include_archived=bool(body.get("archived")),
+        agent=str(body.get("agent") or "").strip() or None,
+    )
+    if not items:
+        return h._json({"error": f"未找到项目的顶层主对话: {proj}"}, 404)
+    apply_flag = bool(body.get("apply")) and target in ("codex", "claude", "antigravity", "zcode")
+    results = []
+    try:
+        for it in items:
+            results.append(_cv().do_import(ctx.vault, it["id"], target, apply_flag))
+    except _cv().SnapshotNotFound as e:
+        return h._json({"error": str(e)}, 404)
+    except _cv().BadMigrateTarget as e:
+        return h._json({"error": str(e)}, 400)
+    h._json({
+        "project": proj, "target": target, "applied": apply_flag,
+        "count": len(results), "dest_dir": str(Path(results[0]["dest"]).parent),
+        "files": [r["dest"] for r in results], "total_lines": sum(r["lines"] for r in results),
+    })
+
+
+def _post_sync(h, ctx: _ServerCtx, body: dict):
+    res = _cv().sync_vault(ctx.vault, debounce=bool(body.get("debounce")), quiet=True)
+    ctx.idx.rebuild()
+    ctx.cache.clear()
+    if body.get("extract_memory", True):
+        try:
+            mres = _cv().extract_memories_incremental(ctx.vault)
+            res["memories_added"] = mres["added"]
+            res["memories_total"] = mres["total"]
+        except Exception:
+            res["memories_added"] = 0
+    h._json(res)
+
+
+def _post_memory_extract(h, ctx: _ServerCtx, body: dict):
+    mres = _cv().extract_memories_incremental(ctx.vault, force=bool(body.get("force")))
+    ctx.cache.clear()
+    h._json(mres)
+
+
+def _post_memory_dedup(h, ctx: _ServerCtx, body: dict):
+    dres = _cv().memory_dedup(ctx.vault)
+    ctx.cache.clear()
+    h._json(dres)
+
+
+def _post_memory_add(h, ctx: _ServerCtx, body: dict):
+    try:
+        mres = _cv().memory_add_manual(
+            ctx.vault, body.get("content", ""), kind=body.get("kind") or "decision",
+            project=body.get("project") or "manual", pinned=bool(body.get("pinned", False)),
+        )
+        ctx.cache.clear()
+        h._json(mres)
+    except ValueError as e:
+        h._json({"error": str(e)}, 400)
+
+
+def _post_memory_delete(h, ctx: _ServerCtx, body: dict):
+    try:
+        dres = _cv().memory_delete(ctx.vault, body.get("id"))
+        ctx.cache.clear()
+        h._json(dres)
+    except (TypeError, ValueError) as e:
+        h._json({"error": str(e)}, 400)
+
+
+def _post_memory_pin(h, ctx: _ServerCtx, body: dict):
+    try:
+        pres = _cv().memory_set_pin(ctx.vault, body.get("id"), pinned=bool(body.get("pinned", True)))
+        ctx.cache.clear()
+        h._json(pres)
+    except (TypeError, ValueError) as e:
+        h._json({"error": str(e)}, 400)
+
+
+def _post_aml_add(h, ctx: _ServerCtx, body: dict):
+    import aml_adapter as _aml
+    try:
+        uid = body.get("user_id")
+        adapter = ctx.get_aml_router().for_user(uid)
+        req_id = body.get("request_id")
+        if req_id is None:
+            req_id = h.headers.get("Idempotency-Key") or h.headers.get("X-Idempotency-Key")
+        ares = adapter.add(
+            body.get("messages") or [], session_id=body.get("session_id"), request_id=req_id,
+            project=body.get("project") or "aml", cwd=body.get("cwd") or "",
+            agent=body.get("agent") or "aml", parent_snapshot=body.get("parent_snapshot"),
+            extract_memory=bool(body.get("extract_memory", True)), redact=body.get("redact"),
+        )
+        if not uid:
+            ctx.idx.rebuild()
+            ctx.cache.clear()
+        h._json(ares)
+    except _aml.RequestConflictError as e:
+        h._json({"error": str(e)}, 409)
+    except ValueError as e:
+        h._json({"error": str(e)}, 400)
+
+
+def _post_aml_search(h, ctx: _ServerCtx, body: dict):
+    try:
+        uid = body.get("user_id")
+        adapter = ctx.get_aml_router().for_user(uid)
+        top_k = _parse_int_arg(body.get("top_k", 100), "top_k")
+        ares = adapter.search(
+            body.get("query") or "", top_k=top_k, budget_tokens=body.get("budget_tokens"),
+            include_memories=bool(body.get("include_memories", True)),
+            include_history=bool(body.get("include_history", False)),
+        )
+        h._json(ares)
+    except ValueError as e:
+        h._json({"error": str(e)}, 400)
+
+
+def _post_fork(h, ctx: _ServerCtx, body: dict):
+    fid = str(body.get("id") or "")
+    if not _sid_ok(fid):
+        return h._json({"error": "invalid id: 需要 cv_ 前缀的快照 id"}, 400)
+    msg = str(body.get("message") or "").strip()[:200] or None
+    try:
+        fres = _cv().fork_snapshot(ctx.vault, fid, msg)
+    except _cv().SnapshotNotFound as e:
+        return h._json({"error": str(e)}, 404)
+    ctx.idx.rebuild()
+    ctx.cache.clear()
+    h._json(fres)
+
+
+def _post_agy_sync(h, ctx: _ServerCtx, body: dict):
+    only_ag = str(body["only_agent"]).strip() or None if "only_agent" in body else "zcode"
+    try:
+        res = _cv().sync_antigravity_archived(
+            ctx.vault, project=str(body.get("project") or "").strip() or None,
+            apply=bool(body.get("apply")), dedup=bool(body.get("dedup", True)), only_agent=only_ag,
+        )
+    except _cv().BadMigrateTarget as e:
+        return h._json({"error": str(e)}, 400)
+    h._json(_agy_sync_json(res))
+
+
+def _post_agy_batch(h, ctx: _ServerCtx, body: dict):
+    try:
+        lim = _parse_int_arg(body.get("limit") or 0, "limit")
+    except ValueError:
+        return h._json({"error": "invalid limit: 需要整数"}, 400)
+    ag = str(body.get("agent") if "agent" in body else "zcode").strip()
+    try:
+        res = _cv().sync_to_antigravity_batch(
+            ctx.vault, agent=ag, project=str(body.get("project") or "").strip() or None,
+            include_archived=bool(body.get("archived")), limit=lim, apply=bool(body.get("apply")),
+        )
+    except _cv().BadMigrateTarget as e:
+        return h._json({"error": str(e)}, 400)
+    h._json(res)
+
+
+def _post_probe(h, ctx: _ServerCtx, body: dict):
+    baseline_p = ctx.vault / "probe_baseline.json"
+    baseline = json.loads(baseline_p.read_text(encoding="utf-8")) if baseline_p.exists() else {}
+    alerts = _cv().probe_once(ctx.vault, _cv().load_profiles(), _cv().resolve_key(_KeyStub()), baseline, verbose=False)
+    _cv().atomic_write_text(baseline_p, json.dumps(baseline, ensure_ascii=False, indent=1))
+    ctx.cache.clear()
+    h._json({"alerts": alerts})
+
+
+def _post_semantic_config(h, ctx: _ServerCtx, body: dict):
+    import cv_semantic as _sem
+    if body.get("ollama"):
+        return h._json(_sem.configure_ollama(
+            ctx.vault, host=str(body.get("host") or "http://127.0.0.1:11434"),
+            embed_model=body.get("embeddings_model") or body.get("embed_model"),
+            llm_model=body.get("llm_model"), enable_llm=bool(body.get("enable_llm", True)),
+        ))
+    _sem.save_ai_config(ctx.vault, body)
+    h._json(_sem.semantic_status(ctx.vault, probe=False))
+
+
+def _post_semantic_refine(h, ctx: _ServerCtx, body: dict):
+    import cv_semantic as _sem
+    try:
+        lim = _parse_int_arg(body.get("limit") or 10, "limit", lo=1, hi=100)
+    except ValueError:
+        return h._json({"error": "invalid limit: 需要整数"}, 400)
+    sid = str(body.get("snapshot_id") or "").strip() or None
+    if sid and not _sid_ok(sid):
+        return h._json({"error": "invalid snapshot_id"}, 400)
+    h._json(_sem.refine_memories_with_llm(ctx.vault, limit=lim, snapshot_id=sid, force=bool(body.get("force"))))
+
+
+def _post_semantic_titles(h, ctx: _ServerCtx, body: dict):
+    import cv_semantic as _sem
+    try:
+        lim = _parse_int_arg(body.get("limit") or 30, "limit", lo=1, hi=200)
+    except ValueError:
+        return h._json({"error": "invalid limit: 需要整数"}, 400)
+    h._json(_sem.generate_session_titles(
+        ctx.vault, limit=lim, force=bool(body.get("force")), use_llm=bool(body.get("use_llm", True)),
+    ))
+
+
+def _post_ops_mcp_install(h, ctx: _ServerCtx, body: dict):
+    try:
+        h._json(_cv().mcp_install_api(ctx.vault, str(body.get("client") or "all")))
+    except ValueError as e:
+        h._json({"error": str(e)}, 400)
+
+
+def _post_ops_backup(h, ctx: _ServerCtx, body: dict):
+    try:
+        keep_n = _parse_int_arg(body.get("keep") or 10, "keep")
+    except ValueError:
+        return h._json({"error": "invalid keep"}, 400)
+    try:
+        h._json(_cv().backup_vault_api(ctx.vault, keep=keep_n))
+    except SystemExit as e:
+        h._json({"error": str(e)}, 400)
+
+
+def _post_ops_prune(h, ctx: _ServerCtx, body: dict):
+    apply_flag = bool(body.get("apply"))
+    res = _cv().prune_snapshots_api(ctx.vault, apply=apply_flag)
+    if apply_flag:
+        ctx.idx.rebuild(force=True)
+        ctx.cache.clear()
+    h._json(res)
+
+
+def _post_ops_plan_token(h, ctx: _ServerCtx, body: dict):
+    p = ctx.vault / "plan_token.json"
+    if body.get("clear"):
+        if p.exists():
+            p.unlink()
+        ctx.cv_ledger._REMOTE_Q.update(at=0.0, data=None)
+        ctx.cache.clear()
+        return h._json({"ok": True, "plan_token_set": False, "message": "已清除智谱 Coding Plan Token"})
+    tok = str(body.get("token") or "").strip()
+    if not tok:
+        return h._json({"error": "token 不能为空 (如需清除请传 clear=true)"}, 400)
+    _cv().atomic_write_text(p, json.dumps({"token": tok, "set_at": _cv().now_iso()}, ensure_ascii=False))
+    ctx.cv_ledger._REMOTE_Q.update(at=0.0, data=None)
+    ctx.cache.clear()
+    probe = ctx.cv_ledger.remote_quota_cached(ctx.vault, ttl=0.0) if body.get("verify", True) else None
+    h._json({"ok": True, "plan_token_set": True,
+             "plan_token_hint": (tok[:4] + "…" + tok[-4:]) if len(tok) >= 10 else "***",
+             "probe": probe})
+
+
+def _post_ops_ledger_sync(h, ctx: _ServerCtx, body: dict):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        ctx.cv_ledger.cmd_ledger_sync(SimpleNamespace(vault=str(ctx.vault)))
+    ctx.cache.clear()
+    lines = [ln.strip() for ln in buf.getvalue().splitlines() if ln.strip()]
+    h._json({"ok": True, "message": lines[-1] if lines else "账本同步完成"})
+
+
+def _post_skills_migrate(h, ctx: _ServerCtx, body: dict):
+    import cv_skills as _sk
+    sel = body.get("selected")
+    if sel is not None and not isinstance(sel, list):
+        return h._json({"error": "selected 必须为字符串数组"}, 400)
+    ws_raw = str(body.get("workspace") or "").strip()
+    try:
+        res = _sk.migrate_skills(
+            source=str(body.get("source") or "zcode"),
+            target=str(body.get("target") or "antigravity"),
+            selected=sel,
+            include_plugins=bool(body.get("include_plugins")),
+            agy_mode=str(body.get("agy_mode") or "skills"),
+            plugin_name=str(body.get("plugin_name") or ""),
+            conflict=str(body.get("conflict") or "skip"),
+            normalize=bool(body.get("normalize", True)),
+            workspace_dir=Path(ws_raw) if ws_raw else None,
+            apply=bool(body.get("apply")),
+            vault=ctx.vault,
+        )
+        h._json(res)
+    except ValueError as e:
+        h._json({"error": str(e)}, 400)
+
+
+POST_ROUTES = {
+    "/migrate": _post_migrate,
+    "/migrate_project": _post_migrate_project,
+    "/sync": _post_sync,
+    "/memory/extract": _post_memory_extract,
+    "/memory/dedup": _post_memory_dedup,
+    "/memory/add": _post_memory_add,
+    "/memory/delete": _post_memory_delete,
+    "/memory/pin": _post_memory_pin,
+    "/aml/add": _post_aml_add,
+    "/aml/search": _post_aml_search,
+    "/fork": _post_fork,
+    "/antigravity/sync": _post_agy_sync,
+    "/antigravity/batch": _post_agy_batch,
+    "/probe": _post_probe,
+    "/semantic/config": _post_semantic_config,
+    "/semantic/refine": _post_semantic_refine,
+    "/semantic/titles": _post_semantic_titles,
+    "/ops/mcp/install": _post_ops_mcp_install,
+    "/ops/backup": _post_ops_backup,
+    "/ops/prune": _post_ops_prune,
+    "/ops/plan_token": _post_ops_plan_token,
+    "/ops/ledger_sync": _post_ops_ledger_sync,
+    "/skills/migrate": _post_skills_migrate,
+}
+
+
+# ------------------------------------------------- HTTP 服务装配与启动
+
+def _make_handler(ctx: _ServerCtx):
+    from http.server import BaseHTTPRequestHandler
+    from urllib.parse import parse_qs, urlparse
 
     class H(BaseHTTPRequestHandler):
-        # HTTP/1.0 下 Chromium 系 webview 会复用已被服务端关闭的连接, fetch 全部挂起
-        # (HTML 导航走新连接所以页面能开, 数据接口全卡"加载中")。1.1 + 全端点 Content-Length = 正确 keep-alive。
+        # HTTP/1.1 + 全端点 Content-Length = 正确 keep-alive
         protocol_version = "HTTP/1.1"
 
         def log_message(self, *a):
             pass
 
         def log_request(self, code="-", size="-"):
-            # 请求落盘: 诊断"浏览器 fetch 挂起"类问题的关键证据 (请求到没到服务)。
-            # token 脱敏 (B03): ?token= 会随 requestline 落盘, 不能明文进日志。
-            # parse_qs 会解码百分号编码键名 (%74oken= 也是有效凭据) — 先解码再匹配,
-            # 且大小写不敏感, 否则编码形态的 token 明文绕过脱敏 (二轮 serve-8)
             line = self.requestline
             try:
                 line = urllib.parse.unquote(line)
@@ -234,19 +1051,17 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                 pass
             line = re.sub(r"([?&])token=[^& ]*", r"\1token=***", line, flags=re.IGNORECASE)
             try:
-                log_p = vault / "serve_http.log"
-                _cv().rotate_log_if_needed(log_p)
-                with log_p.open("a", encoding="utf-8") as fh:
-                    fh.write(f"{dt.datetime.now().isoformat(timespec='seconds')} "
-                             f"{self.client_address[0]} \"{line}\" {code} "
-                             f"UA={str(self.headers.get('User-Agent', ''))[:48]}\n")
+                ctx.http_logger.info(
+                    f"{dt.datetime.now().isoformat(timespec='seconds')} "
+                    f"{self.client_address[0]} \"{line}\" {code} "
+                    f"UA={str(self.headers.get('User-Agent', ''))[:48]}"
+                )
             except OSError:
                 pass
 
         def _send(self, body: bytes, ctype: str, code: int = 200):
-            """统一响应出口: _new_cookie 对 HTML/JSON 一视同仁; 大包按 Accept-Encoding 自动 gzip。"""
-            ae = (self.headers.get("Accept-Encoding") or "").lower()
-            use_gzip = len(body) >= GZIP_MIN_BYTES and "gzip" in ae
+            use_gzip = (len(body) >= GZIP_MIN_BYTES
+                        and "gzip" in (self.headers.get("Accept-Encoding") or "").lower())
             out_body = gzip.compress(body, compresslevel=5) if use_gzip else body
             self.send_response(code)
             nc = getattr(self, "_new_cookie", None)
@@ -264,51 +1079,28 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
             except _CLIENT_DISCONNECT:
                 pass
 
-        def _json(self, obj, code=200):
+        def _json(self, obj, code: int = 200):
             self._send(json.dumps(obj, ensure_ascii=False).encode("utf-8"),
                        "application/json; charset=utf-8", code)
 
-        def _stats_overlay(self, sid: str, s: dict) -> dict:
-            """快照文件不可变: zcode 历史版本的用量在索引层回填 (backfill_zcode_usage), 文件里
-            仍是 0 — 详情/迁移预览优先展示索引里的回填值, 不再对有用量的会话显示"0 tokens"。"""
-            if s.get("usage_events"):
-                return s
-            try:
-                c = _cv().db(vault)
-                r = c.execute("SELECT tokens_in, tokens_out, reasoning_tokens, cache_read, cache_write,"
-                              " total_tokens, usage_events FROM snapshots WHERE id=?", (sid,)).fetchone()
-                c.close()
-            except sqlite3.Error:
-                return s
-            return {**s, **dict(r)} if r and r["usage_events"] else s
-
-        @staticmethod
-        def _sid_ok(sid: str) -> bool:
-            # 快照 id 形态校验 (cv_ + hex): 挡路径穿越与任意文件读; 同时给迁移一个
-            # 稳定的 JSON 400/404, 而不是让 load_snapshot 的 SystemExit 逃过 except 断连
-            import re as _re
-            return bool(_re.fullmatch(r"cv_[0-9a-f]{8,64}", str(sid or "")))
-
         def _guard(self, post: bool) -> bool:
-            """本地访问防护: Host 必须回环 (挡 DNS rebinding 读会话史); Origin 若带必须回环
-            (挡恶意网页跨站); POST 强制 application/json (跨站简单请求发不出该类型 = 强制预检,
-            预检无 CORS 应答即被浏览器拦截)。本地进程 (MCP 热索引/托盘/CLI) 不受影响。"""
+            """本地访问防护: Host/Origin 必须回环 + POST 强制 application/json + 可选 token 校验。"""
             host = (self.headers.get("Host") or "").strip().lower()
             hn = host.rsplit(":", 1)[0].strip("[]") if host.count(":") == 1 else host.strip("[]")
             if hn not in ("127.0.0.1", "localhost", "::1"):
                 self._json({"error": f"forbidden: host '{host}' 不在本地白名单"}, 403)
                 return False
             org = self.headers.get("Origin")
-            if org:
-                if (urlparse(org).hostname or "").lower() not in ("127.0.0.1", "localhost", "::1"):
-                    self._json({"error": f"forbidden: origin '{org}' 非本地"}, 403)
-                    return False
+            if org and (urlparse(org).hostname or "").lower() not in ("127.0.0.1", "localhost", "::1"):
+                self._json({"error": f"forbidden: origin '{org}' 非本地"}, 403)
+                return False
             if post:
                 ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
                 if ctype != "application/json":
                     self._json({"error": "forbidden: POST 需要 Content-Type: application/json"}, 403)
                     return False
-            if token:  # 鉴权档: 头 / Cookie / 首访 query(种 cookie) 三种凭据形态
+            tok = ctx.token
+            if tok:
                 header = self.headers.get("X-Vault-Token")
                 cookie = ""
                 for part in (self.headers.get("Cookie") or "").split(";"):
@@ -316,19 +1108,11 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                         cookie = part.split("=", 1)[1].strip()
                         break
                 qtok = "" if post else parse_qs(urlparse(self.path).query).get("token", [""])[0]
-                # 候选顺序 header > ?token= > cookie: 旧 cookie (token 轮换前/他实例所种, cookie 不按
-                # 端口隔离) 曾先占位导致 ?token= 首访永久 401 且 HttpOnly 前端清不掉 (二轮 serve-5)
-                ok = False
-                for cand in (header, qtok, cookie):
-                    if cand and hmac.compare_digest(str(cand), str(token)):
-                        ok = True
-                        break
-                if not ok:
+                if not any(cand and hmac.compare_digest(str(cand), str(tok)) for cand in (header, qtok, cookie)):
                     self._json({"error": "unauthorized: 需要 token (?token= 首访, 或 X-Vault-Token 头)"}, 401)
                     return False
-                if "vault_token=" not in (self.headers.get("Cookie") or "") or (cookie and cookie != token):
-                    self._new_cookie = f"vault_token={token}; Path=/; HttpOnly; SameSite=Strict"  # 失效 cookie 轮换刷新
-                return True
+                if "vault_token=" not in (self.headers.get("Cookie") or "") or (cookie and cookie != tok):
+                    self._new_cookie = f"vault_token={tok}; Path=/; HttpOnly; SameSite=Strict"
             return True
 
         def do_GET(self):
@@ -337,387 +1121,28 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
             if not self._guard(False):
                 return
             try:
-                if u.path == "/":
-                    self._send(_load_console_html().encode("utf-8"), "text/html; charset=utf-8")
-                    return
-                if u.path == "/healthz":
-                    idx.request_rebuild(60)  # 后台单飞重建; 本请求拿现态秒回, 增长期绝不阻塞
-                    # 单次读取 meta/term_count: 快照数与词项数出自同一代索引 (v2 SQLite 倒排)
-                    return self._json({"service": "context-vault", "status": "ok",
-                                       "snapshots": len(idx.meta), "terms": idx.term_count})
-                if u.path == "/audit":
-                    since = q.get("since", "")
-                    sum_only = (q.get("summary_only") == "1")
-                    akey = ("audit", _db_stamp(vault / "vault.db"), since, sum_only)
-                    return self._json(cache.get_or_compute(
-                        akey, lambda: _cv().audit_summary_and_timeline(
-                            vault, since, "all", summary_only=sum_only)))
-                if u.path == "/memory":
-                    try:
-                        mlim = max(1, min(int(q.get("limit", 8)), 200))
-                    except ValueError:
-                        return self._json({"error": "invalid limit: 需要整数"}, 400)
-                    mkind = q.get("kind", "")
-                    return self._json({
-                        "query": q.get("q", ""),
-                        "kind": mkind,
-                        "counts": _cv().memory_counts_api(vault),
-                        "memories": _cv().memory_search_api(vault, q.get("q", ""), mlim, kind=mkind,
-                                                      include_history=(q.get("history") == "1")),
-                    })
-                if u.path == "/semantic/status":
-                    import cv_semantic as _sem
-                    return self._json(_sem.semantic_status(vault, probe=(q.get("probe") == "1")))
-                if u.path == "/skills/list":
-                    import cv_skills as _sk
-                    try:
-                        ws = Path(q["workspace"]) if q.get("workspace") else None
-                        return self._json(_sk.list_skills_api(
-                            source=q.get("source") or "zcode",
-                            include_plugins=(q.get("include_plugins") == "1"),
-                            target=q.get("target") or "antigravity",
-                            agy_mode=q.get("agy_mode") or "skills",
-                            plugin_name=q.get("plugin_name") or "",
-                            workspace_dir=ws,
-                        ))
-                    except ValueError as e:
-                        return self._json({"error": str(e)}, 400)
-                if u.path == "/ops/mcp":
-                    return self._json(_cv().mcp_status_api(vault))
-                if u.path == "/ops/status":
-                    import cv_semantic as _sem
-                    vdb = vault / "vault.db"
-                    idb = vault / "search_index.db"
-                    bdir = vault / "backups"
-                    bfiles = sorted(bdir.glob("cv-backup-*.zip")) if bdir.is_dir() else []
-                    latest_b = bfiles[-1] if bfiles else None
-                    tok = cv_ledger.load_plan_token(vault) or ""
-                    tok_hint = (tok[:4] + "…" + tok[-4:]) if len(tok) >= 10 else ("***" if tok else "")
-                    accts = cv_ledger.load_accounts(vault)
-                    return self._json({
-                        "version": _cv().VERSION,
-                        "vault": str(vault.resolve()),
-                        "frozen": bool(getattr(sys, "frozen", False)),
-                        "snapshots": len(idx.meta),
-                        "terms": idx.term_count,
-                        "db_mb": round(vdb.stat().st_size / 1048576, 2) if vdb.is_file() else 0.0,
-                        "index_mb": round(idb.stat().st_size / 1048576, 2) if idb.is_file() else 0.0,
-                        "backups_count": len(bfiles),
-                        "latest_backup": {
-                            "name": latest_b.name,
-                            "size_mb": round(latest_b.stat().st_size / 1048576, 2),
-                        } if latest_b and latest_b.is_file() else None,
-                        "plan_token_set": bool(tok),
-                        "plan_token_hint": tok_hint,
-                        "accounts_configured": bool(accts.get("profiles")),
-                        "semantic": _sem.semantic_status(vault, probe=(q.get("probe") == "1")),
-                    })
-                if u.path == "/probe_events":
-                    conn = _cv().db(vault)  # ThreadingHTTPServer 每请求短连接; 显式关闭归还 WAL 句柄
-                    try:
-                        plim = int(q.get("limit", 100))
-                    except ValueError:
-                        conn.close()
-                        return self._json({"error": "invalid limit: 需要整数"}, 400)
-                    try:
-                        rows = conn.execute("SELECT ts,profile,status,http_code,latency_ms,models,missing_models"
-                                            " FROM probe_events ORDER BY id DESC LIMIT ?",
-                                            (plim,)).fetchall()
-                    except sqlite3.OperationalError:
-                        rows = []  # 零表空库: 诚实空态, 不落 500 (二轮 concurrency-1)
-                    conn.close()
-                    return self._json([dict(r) for r in rows])
-                if u.path == "/ledger":
-                    return self._json(_get_ledger_cached())
-                if u.path == "/ledger/usage":
-                    # 本地多端账本滚动窗口 (无 headroom 主账本): 5h 进度/恢复 ETA/跑道/多维聚合
-                    w = q.get("window", "5h") or "5h"
-                    if w not in cv_ledger.WINDOW_CHOICES:
-                        return self._json({"error": "invalid window: 可选 5h|24h|7d|30d"}, 400)
-                    acct = q.get("account") or None
-                    payload = dict(_get_usage_base_cached(w, acct))
-                    fast = (q.get("fast") == "1")
-                    pending = False
-                    rq = cv_ledger.remote_quota_cached(vault, swr=True, nonblocking_cold=fast)
-                    if isinstance(rq, dict) and rq.get("_pending"):
-                        pending = True
-                    elif rq is not None:
-                        payload["remote_quota"] = rq  # 厂商实时套餐额度 (TTL 60s + SWR 异步刷新)
-                    aq = cv_ledger.agv_quota_cached(swr=True, nonblocking_cold=fast)
-                    if isinstance(aq, dict) and aq.get("_pending"):
-                        pending = True
-                    elif aq is not None:
-                        payload["remote_quota_agv"] = aq
-                    if pending:
-                        payload["quota_pending"] = True
-                    return self._json(payload)
-                if u.path == "/preview":
-                    qid = q.get("id", "")
-                    if not self._sid_ok(qid):
-                        return self._json({"error": "invalid id: 需要 cv_ 前缀的快照 id"}, 400)
-                    env2 = idx.load_env(qid)
-                    if not env2:
-                        return self._json({"error": "not found"}, 404)
-                    from collections import Counter
-                    blocks = env2["conversation"]
-                    dist = dict(Counter(b["type"] for b in blocks))
-                    live, comp = _cv().live_context(blocks)
-                    live_dist = dict(Counter(b["type"] for b in live))
-                    s = self._stats_overlay(qid, env2["stats"])
-                    return self._json({"id": q.get("id"), "agent": env2["capture"].get("agent"),
-                                       "completeness": env2["capture"].get("completeness"),
-                                       "cwd": env2["capture"].get("cwd"),
-                                       "block_dist": dist, "live_blocks": len(live),
-                                       "live_dist": live_dist, "compactions": dist.get("compaction", 0),
-                                       "live_tokens_est": _cv().estimate_tokens(live),
-                                       "history_tokens_in": s["tokens_in"],
-                                       "thinking": dist.get("thinking", 0),
-                                       "agent_messages": dist.get("agent_message", 0),
-                                       "dropped_source": s["blocks_dropped"],
-                                       "no_assistant": env2["capture"].get("completeness") == "no_assistant_text"})
-                if u.path == "/search":
-                    idx.rebuild()
-                    try:
-                        lim = int(q.get("limit", 5))
-                    except ValueError:
-                        return self._json({"error": "invalid limit: 需要整数"}, 400)
-                    hyb = q.get("hybrid")
-                    use_dense = (hyb == "1")
-                    if hyb is None:
-                        try:
-                            from cv_dense import DenseProvider
-                            use_dense = DenseProvider(vault=vault).available
-                        except Exception:
-                            use_dense = False
-                    if use_dense:  # 可选稠密重排 (CV_EMBEDDINGS_URL 或 ai_config.json 配置时生效;
-                        # 未配置/故障时 hybrid_search 内部回退纯结构化, 行为不变)
-                        try:
-                            from cv_dense import DenseProvider, hybrid_search
-                            return self._json(hybrid_search(
-                                idx, vault, q.get("q", ""), lim,
-                                provider=DenseProvider(vault=vault)))
-                        except Exception:
-                            pass
-                    return self._json(idx.search(q.get("q", ""), lim))
-                if u.path == "/context":
-                    idx.rebuild()
-                    try:
-                        lim = int(q.get("limit", 3))
-                    except ValueError:
-                        return self._json({"error": "invalid limit: 需要整数"}, 400)
-                    return self._json(idx.context(q.get("q", ""), lim))
-                if u.path == "/recent":
-                    idx.request_rebuild(60)  # 后台单飞重建; 分页总数与徽章同源同新鲜度且秒回
-                    meta, sids = idx.recent_pair()  # 锁内同代一次读取 (两次独立属性读可能跨代撕裂)
-                    total = len(meta)  # 可列出库存 = 唯一对外口径: 徽章/资产卡/分页同一数字
-                    try:
-                        lim = max(1, min(int(q.get("limit", 5)), 200))
-                        off = max(int(q.get("offset", 0)), 0)
-                    except ValueError:
-                        return self._json({"error": "invalid limit/offset: 需要整数"}, 400)
-                    desc = q.get("order", "desc") != "asc"
-                    agent_f = (q.get("agent") or "").strip().lower()
-                    # 迭代只追加的 sids 而非 dict.items(): 增量插入并发时 dict 迭代会 RuntimeError
-                    pairs = [(sid, meta[sid]) for sid in sids]
-                    if agent_f:
-                        pairs = [(sid, m) for sid, m in pairs if str(m.get("agent") or "").lower() == agent_f]
-                        total = len(pairs)
-                    versions = {}
-                    if q.get("leaves") == "1":
-                        # 每个会话只列演进链的当前版本 (叶子), 附该会话的版本数 (×N 徽章);
-                        # 口径与 owned_stats 一致 (库内 parent_snapshot), 库不可读时退化为全量
-                        def _load_leaves():
-                            c = _cv().db(vault)
-                            try:
-                                parents_ = {r[0] for r in c.execute(
-                                    "SELECT parent_snapshot FROM snapshots WHERE parent_snapshot IS NOT NULL")}
-                                per_sess_ = {(r[0], r[1]): r[2] for r in c.execute(
-                                    "SELECT agent, session_ref, COUNT(*) FROM snapshots GROUP BY agent, session_ref")}
-                                sess_of_ = {r[0]: (r[1], r[2]) for r in c.execute(
-                                    "SELECT id, agent, session_ref FROM snapshots")}
-                                return parents_, per_sess_, sess_of_
-                            finally:
-                                c.close()
-                        try:
-                            parents, per_sess, sess_of = cache.get_or_compute(
-                                ("recent_leaves", _db_stamp(vault / "vault.db")), _load_leaves)
-                            pairs = [kv for kv in pairs if kv[0] not in parents]
-                            versions = {sid: per_sess.get(sess_of.get(sid), 1) for sid, _ in pairs}
-                        except sqlite3.Error:
-                            pass
-                        total = len(pairs)  # leaves 模式分页按会话数
-                    rows = sorted(pairs, key=lambda kv: kv[1]["created_at"] or "",
-                                  reverse=desc)[off:off + lim]
-                    return self._json({"total": total, "versions_total": len(meta),
-                                       "rows": [{"sid": k, **v, **({"versions": versions[k]}
-                                                                   if k in versions else {})}
-                                                for k, v in rows]})
-                if u.path == "/timeline":
-                    # 会话时间线: 该 session 的全部版本按天分组 (T3 leaves 的下钻视图)
-                    ref = q.get("session", "")
-                    agent = q.get("agent", "")
-                    if not ref:
-                        return self._json({"error": "invalid session: 需要 session_ref"}, 400)
-                    try:
-                        c = _cv().db(vault)
-                        if agent:
-                            rows = c.execute("SELECT id, created_at, tokens_in, total_tokens, blocks_total,"
-                                             " parent_snapshot FROM snapshots WHERE session_ref=? AND agent=?"
-                                             " ORDER BY created_at", (ref, agent)).fetchall()
-                        else:
-                            rows = c.execute("SELECT id, created_at, tokens_in, total_tokens, blocks_total,"
-                                             " parent_snapshot FROM snapshots WHERE session_ref=?"
-                                             " ORDER BY created_at", (ref,)).fetchall()
-                        c.close()
-                    except sqlite3.Error:
-                        rows = []
-                    child = {r[5] for r in rows if r[5]}  # parent_snapshot 列 (index 5); 曾误用 x[4] 块数
-                    days = {}
-                    for r in rows:
-                        days.setdefault(str(r["created_at"] or "")[:10], []).append(
-                            {"sid": r["id"], "time": str(r["created_at"] or "")[11:19],
-                             "tokens_in": r["tokens_in"] or 0, "total_tokens": r["total_tokens"] or 0,
-                             "blocks": r["blocks_total"] or 0,
-                             "leaf": r["id"] not in child})
-                    return self._json({"session": ref, "agent": agent,
-                                       "days": [{"day": d, "versions": days[d]}
-                                                for d in sorted(days)]})
-                if u.path == "/stats":
-                    return self._json({"stats": ledger_summary(vault), "owned": _cv().owned_stats(vault),
-                                       "usage": cv_ledger.usage_stats_summary(vault)})
-                if u.path == "/projects":
-                    p_proj = q.get("project") or None
-                    p_sub = (q.get("subagents") == "1")
-                    p_arch = (q.get("archived") == "1")
-                    p_ag = q.get("agent") or None
-                    pkey = ("projects", _db_stamp(vault / "vault.db"), str(_cv().ZCODE_DB),
-                            _db_stamp(_cv().ZCODE_DB), p_proj, p_sub, p_arch, p_ag)
-                    return self._json(cache.get_or_compute(
-                        pkey, lambda: _cv().group_conversations_by_project(
-                            vault, project=p_proj, include_subagents=p_sub,
-                            include_archived=p_arch, agent=p_ag)))
-                if u.path == "/antigravity/sync":
-                    only_ag = q["only_agent"].strip() or None if "only_agent" in q else "zcode"
-                    res = _cv().sync_antigravity_archived(
-                        vault,
-                        project=q.get("project") or None,
-                        apply=False,
-                        dedup=(q.get("dedup", "1") == "1"),
-                        only_agent=only_ag,
-                    )
-                    return self._json(self._agy_sync_json(res))
-                if u.path == "/antigravity/batch":
-                    try:
-                        lim = int(q.get("limit", 0) or 0)
-                    except ValueError:
-                        return self._json({"error": "invalid limit: 需要整数"}, 400)
-                    res = _cv().sync_to_antigravity_batch(
-                        vault,
-                        agent=q.get("agent", "zcode"),
-                        project=q.get("project") or None,
-                        include_archived=(q.get("archived") == "1"),
-                        limit=lim,
-                        apply=False,
-                    )
-                    return self._json(res)
-                if u.path == "/messages":
-                    qid = q.get("id", "")
-                    if not self._sid_ok(qid):
-                        return self._json({"error": "invalid id: 需要 cv_ 前缀的快照 id"}, 400)
-                    try:
-                        off = max(0, int(q.get("offset", 0) or 0))
-                        lim = max(1, min(int(q.get("limit", 40) or 40), 100))
-                    except ValueError:
-                        return self._json({"error": "invalid offset/limit: 需要整数"}, 400)
-                    env_m = idx.load_env(qid)
-                    if not env_m:
-                        return self._json({"error": "not found"}, 404)
-                    res_m = format_snapshot_messages(
-                        env_m,
-                        scope=q.get("scope", "live"),
-                        offset=off,
-                        limit=lim,
-                        query=q.get("q", ""),
-                    )
-                    res_m["id"] = qid
-                    return self._json(res_m)
-                if u.path == "/snapshot":
-                    qid = q.get("id", "")
-                    if not self._sid_ok(qid):
-                        return self._json({"error": "invalid id: 需要 cv_ 前缀的快照 id"}, 400)
-                    env = idx.load_env(qid)
-                    if not env:
-                        return self._json({"error": "not found"}, 404)
-                    from collections import Counter
-                    dist = dict(Counter(b["type"] for b in env["conversation"]))
-                    return self._json({"id": q.get("id"), "capture": env["capture"],
-                                       "lineage": env.get("lineage") or {},
-                                       "stats": self._stats_overlay(qid, env["stats"]), "block_dist": dist})
-                self._json({"error": "unknown route",
-                            "routes": ["/", "/healthz", "/search?q=", "/context?q=", "/preview?id=",
-                                       "/recent", "/projects", "/timeline?session=", "/stats",
-                                       "/snapshot?id=", "/messages?id=", "/memory", "/ledger",
-                                       "/ledger/usage?window=", "/probe_events",
-                                       "/antigravity/sync", "/antigravity/batch",
-                                       "POST /sync", "POST /migrate", "POST /migrate_project",
-                                       "POST /fork", "POST /memory/extract", "POST /memory/dedup",
-                                       "POST /antigravity/sync", "POST /antigravity/batch", "POST /probe"]}, 404)
+                fn = GET_ROUTES.get(u.path)
+                if fn is not None:
+                    return fn(self, ctx, q)
+                self._json({
+                    "error": "unknown route",
+                    "routes": [*GET_ROUTES.keys(), *(f"POST {p}" for p in POST_ROUTES)],
+                }, 404)
             except _CLIENT_DISCONNECT:
                 pass
             except Exception as e:
                 self._json({"error": str(e)}, 500)
 
-        @staticmethod
-        def _agy_sync_json(res: dict) -> dict:
-            return {
-                "applied": res["applied"],
-                "targets_count": len(res["targets"]),
-                "targets": [
-                    {
-                        "cid": t["cid"],
-                        "sid": t["sid"],
-                        "agent": t["agent"],
-                        "cwd": t["cwd"],
-                        "title": t["title"],
-                        "reason": t["reason"],
-                        "has_db": t["has_db"],
-                        "has_summary": t["has_summary"],
-                        "has_proto": t["has_proto"],
-                    }
-                    for t in res["targets"]
-                ],
-                "empty_projects": [
-                    {"id": e["id"], "name": e["name"], "cwd": e["cwd"]}
-                    for e in res.get("empty_projects") or []
-                ],
-                "db_files": res["db_files"],
-                "summary_ids": res["summary_ids"],
-                "proto_ids": res["proto_ids"],
-                "dup_count": res["dup_count"],
-                "agent_count": res["agent_count"],
-                "removed_dbs": res["removed_dbs"],
-                "removed_projects": res.get("removed_projects", 0),
-                "cleaned_summaries": res["cleaned_summaries"],
-                "cleaned_proto": res["cleaned_proto"],
-                "summary_check_error": res.get("summary_check_error"),
-            }
-
         def do_POST(self):
-            import urllib.parse as _up
-            u = _up.urlparse(self.path)
-            # 先按 Content-Length 读净 body 再守卫: 守卫拒绝 (401/403) 若不读 body 就应答,
-            # 残留字节会被 keep-alive 连接的下一轮当成请求行解析, 污染整条连接 (全面测试 M1)
+            u = urlparse(self.path)
             try:
                 n = int(self.headers.get("Content-Length", 0) or 0)
             except ValueError:
-                self._json({"error": "invalid Content-Length"}, 400)
-                return
+                return self._json({"error": "invalid Content-Length"}, 400)
             if n < 0:
-                self._json({"error": "invalid Content-Length"}, 400)
-                return
+                return self._json({"error": "invalid Content-Length"}, 400)
             if n > MAX_POST_BYTES:
-                self._json({"error": f"payload too large: 上限 {MAX_POST_BYTES // 1048576} MB"}, 413)
-                return
+                return self._json({"error": f"payload too large: 上限 {MAX_POST_BYTES // 1048576} MB"}, 413)
             raw = self.rfile.read(n) if n > 0 else b""
             if not self._guard(True):
                 return
@@ -726,339 +1151,54 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     body = json.loads(raw.decode("utf-8")) if raw else {}
                 except ValueError:
                     return self._json({"error": "invalid JSON body: 需要对象"}, 400)
-                if not isinstance(body, dict):  # [1,2]/null/"str"/42 曾落 500 兜底回显异常 (二轮 serve-6)
+                if not isinstance(body, dict):
                     return self._json({"error": "invalid JSON body: 需要对象"}, 400)
-                if u.path == "/migrate":
-                    # 回归: 不存在的 sid 曾让 load_snapshot 抛 SystemExit (BaseException),
-                    # 逃过 except Exception 断连无 JSON; 先校验形态与存在性, 稳定 400/404
-                    mid = str(body.get("id", ""))
-                    if not self._sid_ok(mid):
-                        return self._json({"error": "invalid id: 需要 cv_ 前缀的快照 id"}, 400)
-                    if not (vault / "snapshots" / f"{mid}.json").exists():
-                        return self._json({"error": f"snapshot not found: {mid}"}, 404)
-                    try:
-                        r = _cv().do_import(vault, mid, body.get("target", "codex"),
-                                      bool(body.get("apply")),
-                                      budget_tokens=body.get("budget_tokens"))
-                    except _cv().SnapshotNotFound as e:  # 存在性检查到加载之间被删的竞态兜底
-                        return self._json({"error": str(e)}, 404)
-                    except _cv().BadMigrateTarget as e:  # HTTP 层没有 argparse choices, 未知 target 挡在这
-                        return self._json({"error": str(e)}, 400)
-                    # Markdown 交接简报附带正文 (≤64KB), 控制台可直接一键复制/预览
-                    if str(body.get("target") or "").lower() == "markdown" and r.get("dest"):
-                        try:
-                            dp = Path(r["dest"])
-                            if dp.is_file() and dp.stat().st_size <= 65536:
-                                r = {**r, "content": dp.read_text(encoding="utf-8", errors="replace")}
-                        except OSError:
-                            pass
-                    return self._json(r)
-                if u.path == "/migrate_project":
-                    proj = str(body.get("project") or "").strip()
-                    if not proj:
-                        return self._json({"error": "missing project: 需要 project 参数"}, 400)
-                    target = str(body.get("target") or "antigravity")
-                    try:
-                        lim = int(body.get("limit") or 0)
-                    except (TypeError, ValueError):
-                        return self._json({"error": "invalid limit: 需要整数"}, 400)
-                    items = _cv()._resolve_project_items(
-                        vault, proj, limit=lim,
-                        include_archived=bool(body.get("archived")),
-                        agent=str(body.get("agent") or "").strip() or None,
-                    )
-                    if not items:
-                        return self._json({"error": f"未找到项目的顶层主对话: {proj}"}, 404)
-                    apply_flag = bool(body.get("apply")) and target in ("codex", "claude", "antigravity", "zcode")
-                    results = []
-                    try:
-                        for it in items:
-                            results.append(_cv().do_import(vault, it["id"], target, apply_flag))
-                    except _cv().SnapshotNotFound as e:
-                        return self._json({"error": str(e)}, 404)
-                    except _cv().BadMigrateTarget as e:
-                        return self._json({"error": str(e)}, 400)
-                    return self._json({
-                        "project": proj,
-                        "target": target,
-                        "applied": apply_flag,
-                        "count": len(results),
-                        "dest_dir": str(Path(results[0]["dest"]).parent),
-                        "files": [r["dest"] for r in results],
-                        "total_lines": sum(r["lines"] for r in results),
-                    })
-                if u.path == "/sync":
-                    res = _cv().sync_vault(vault, debounce=bool(body.get("debounce")), quiet=True)
-                    idx.rebuild()
-                    cache.clear()
-                    if body.get("extract_memory", True):
-                        try:
-                            mres = _cv().extract_memories_incremental(vault)
-                            res["memories_added"] = mres["added"]
-                            res["memories_total"] = mres["total"]
-                        except Exception:
-                            res["memories_added"] = 0
-                    return self._json(res)
-                if u.path == "/memory/extract":
-                    mres = _cv().extract_memories_incremental(vault, force=bool(body.get("force")))
-                    cache.clear()
-                    return self._json(mres)
-                if u.path == "/memory/dedup":
-                    dres = _cv().memory_dedup(vault)
-                    cache.clear()
-                    return self._json(dres)
-                if u.path == "/memory/add":
-                    try:
-                        mres = _cv().memory_add_manual(
-                            vault,
-                            body.get("content", ""),
-                            kind=body.get("kind") or "decision",
-                            project=body.get("project") or "manual",
-                            pinned=bool(body.get("pinned", False)),
-                        )
-                        cache.clear()
-                        return self._json(mres)
-                    except ValueError as e:
-                        return self._json({"error": str(e)}, 400)
-                if u.path == "/memory/delete":
-                    try:
-                        dres = _cv().memory_delete(vault, body.get("id"))
-                        cache.clear()
-                        return self._json(dres)
-                    except (TypeError, ValueError) as e:
-                        return self._json({"error": str(e)}, 400)
-                if u.path == "/memory/pin":
-                    try:
-                        pres = _cv().memory_set_pin(vault, body.get("id"), pinned=bool(body.get("pinned", True)))
-                        cache.clear()
-                        return self._json(pres)
-                    except (TypeError, ValueError) as e:
-                        return self._json({"error": str(e)}, 400)
-                if u.path in ("/aml/add", "/aml/search"):
-                    import aml_adapter as _aml
-                    try:
-                        uid = body.get("user_id")
-                        adapter = _get_aml_router().for_user(uid)
-                        if u.path == "/aml/add":
-                            req_id = body.get("request_id")
-                            if req_id is None:
-                                req_id = (
-                                    self.headers.get("Idempotency-Key")
-                                    or self.headers.get("X-Idempotency-Key")
-                                )
-                            ares = adapter.add(
-                                body.get("messages") or [],
-                                session_id=body.get("session_id"),
-                                request_id=req_id,
-                                project=body.get("project") or "aml",
-                                cwd=body.get("cwd") or "",
-                                agent=body.get("agent") or "aml",
-                                parent_snapshot=body.get("parent_snapshot"),
-                                extract_memory=bool(body.get("extract_memory", True)),
-                                redact=body.get("redact"),
-                            )
-                            if not uid:
-                                idx.rebuild()  # 默认主库写入同步刷新热索引
-                                cache.clear()
-                            return self._json(ares)
-                        top_k_raw = body.get("top_k", 100)
-                        if isinstance(top_k_raw, bool):
-                            raise ValueError("top_k 必须为整数")
-                        ares = adapter.search(
-                            body.get("query") or "",
-                            top_k=int(top_k_raw),
-                            budget_tokens=body.get("budget_tokens"),
-                            include_memories=bool(body.get("include_memories", True)),
-                            include_history=bool(body.get("include_history", False)),
-                        )
-                        return self._json(ares)
-                    except _aml.RequestConflictError as e:
-                        return self._json({"error": str(e)}, 409)
-                    except ValueError as e:
-                        return self._json({"error": str(e)}, 400)
-                if u.path == "/fork":
-                    fid = str(body.get("id") or "")
-                    if not self._sid_ok(fid):
-                        return self._json({"error": "invalid id: 需要 cv_ 前缀的快照 id"}, 400)
-                    msg = str(body.get("message") or "").strip()[:200] or None
-                    try:
-                        fres = _cv().fork_snapshot(vault, fid, msg)
-                    except _cv().SnapshotNotFound as e:
-                        return self._json({"error": str(e)}, 404)
-                    idx.rebuild()
-                    cache.clear()
-                    return self._json(fres)
-                if u.path == "/antigravity/sync":
-                    only_ag = str(body["only_agent"]).strip() or None if "only_agent" in body else "zcode"
-                    try:
-                        res = _cv().sync_antigravity_archived(
-                            vault,
-                            project=str(body.get("project") or "").strip() or None,
-                            apply=bool(body.get("apply")),
-                            dedup=bool(body.get("dedup", True)),
-                            only_agent=only_ag,
-                        )
-                    except _cv().BadMigrateTarget as e:
-                        return self._json({"error": str(e)}, 400)
-                    return self._json(self._agy_sync_json(res))
-                if u.path == "/antigravity/batch":
-                    try:
-                        lim = int(body.get("limit") or 0)
-                    except (TypeError, ValueError):
-                        return self._json({"error": "invalid limit: 需要整数"}, 400)
-                    ag = str(body.get("agent") if "agent" in body else "zcode").strip()
-                    try:
-                        res = _cv().sync_to_antigravity_batch(
-                            vault,
-                            agent=ag,
-                            project=str(body.get("project") or "").strip() or None,
-                            include_archived=bool(body.get("archived")),
-                            limit=lim,
-                            apply=bool(body.get("apply")),
-                        )
-                    except _cv().BadMigrateTarget as e:
-                        return self._json({"error": str(e)}, 400)
-                    return self._json(res)
-                if u.path == "/probe":
-                    baseline_p = vault / "probe_baseline.json"
-                    baseline = json.loads(baseline_p.read_text(encoding="utf-8")) if baseline_p.exists() else {}
-                    alerts = _cv().probe_once(vault, _cv().load_profiles(), _cv().resolve_key(_KeyStub()), baseline,
-                                        verbose=False)
-                    _cv().atomic_write_text(baseline_p, json.dumps(baseline, ensure_ascii=False, indent=1))
-                    cache.clear()
-                    return self._json({"alerts": alerts})
-                if u.path == "/semantic/config":
-                    import cv_semantic as _sem
-                    if body.get("ollama"):
-                        res = _sem.configure_ollama(
-                            vault,
-                            host=str(body.get("host") or "http://127.0.0.1:11434"),
-                            embed_model=body.get("embeddings_model") or body.get("embed_model"),
-                            llm_model=body.get("llm_model"),
-                            enable_llm=bool(body.get("enable_llm", True)),
-                        )
-                        return self._json(res)
-                    _sem.save_ai_config(vault, body)
-                    return self._json(_sem.semantic_status(vault, probe=False))
-                if u.path == "/semantic/refine":
-                    import cv_semantic as _sem
-                    try:
-                        lim = max(1, min(int(body.get("limit") or 10), 100))
-                    except (TypeError, ValueError):
-                        return self._json({"error": "invalid limit: 需要整数"}, 400)
-                    sid = str(body.get("snapshot_id") or "").strip() or None
-                    if sid and not self._sid_ok(sid):
-                        return self._json({"error": "invalid snapshot_id"}, 400)
-                    return self._json(_sem.refine_memories_with_llm(
-                        vault, limit=lim, snapshot_id=sid, force=bool(body.get("force")),
-                    ))
-                if u.path == "/semantic/titles":
-                    import cv_semantic as _sem
-                    try:
-                        lim = max(1, min(int(body.get("limit") or 30), 200))
-                    except (TypeError, ValueError):
-                        return self._json({"error": "invalid limit: 需要整数"}, 400)
-                    return self._json(_sem.generate_session_titles(
-                        vault, limit=lim, force=bool(body.get("force")),
-                        use_llm=bool(body.get("use_llm", True)),
-                    ))
-                if u.path == "/ops/mcp/install":
-                    try:
-                        return self._json(_cv().mcp_install_api(vault, str(body.get("client") or "all")))
-                    except ValueError as e:
-                        return self._json({"error": str(e)}, 400)
-                if u.path == "/ops/backup":
-                    try:
-                        keep_n = int(body.get("keep") or 10)
-                    except (TypeError, ValueError):
-                        return self._json({"error": "invalid keep"}, 400)
-                    try:
-                        return self._json(_cv().backup_vault_api(vault, keep=keep_n))
-                    except SystemExit as e:
-                        return self._json({"error": str(e)}, 400)
-                if u.path == "/ops/prune":
-                    apply_flag = bool(body.get("apply"))
-                    res = _cv().prune_snapshots_api(vault, apply=apply_flag)
-                    if apply_flag:
-                        idx.rebuild(force=True)
-                        cache.clear()
-                    return self._json(res)
-                if u.path == "/ops/plan_token":
-                    p = vault / "plan_token.json"
-                    if body.get("clear"):
-                        if p.exists():
-                            p.unlink()
-                        cv_ledger._REMOTE_Q.update(at=0.0, data=None)
-                        cache.clear()
-                        return self._json({"ok": True, "plan_token_set": False, "message": "已清除智谱 Coding Plan Token"})
-                    tok = str(body.get("token") or "").strip()
-                    if not tok:
-                        return self._json({"error": "token 不能为空 (如需清除请传 clear=true)"}, 400)
-                    _cv().atomic_write_text(p, json.dumps({"token": tok, "set_at": _cv().now_iso()}, ensure_ascii=False))
-                    cv_ledger._REMOTE_Q.update(at=0.0, data=None)
-                    cache.clear()
-                    probe = cv_ledger.remote_quota_cached(vault, ttl=0.0) if body.get("verify", True) else None
-                    return self._json({"ok": True, "plan_token_set": True,
-                                       "plan_token_hint": (tok[:4] + "…" + tok[-4:]) if len(tok) >= 10 else "***",
-                                       "probe": probe})
-                if u.path == "/ops/ledger_sync":
-                    import io as _io
-                    import contextlib as _cl
-                    from types import SimpleNamespace as _NS
-                    buf = _io.StringIO()
-                    with _cl.redirect_stdout(buf):
-                        cv_ledger.cmd_ledger_sync(_NS(vault=str(vault)))
-                    cache.clear()
-                    lines = [ln.strip() for ln in buf.getvalue().splitlines() if ln.strip()]
-                    return self._json({"ok": True, "message": lines[-1] if lines else "账本同步完成"})
-                if u.path == "/skills/migrate":
-                    import cv_skills as _sk
-                    sel = body.get("selected")
-                    if sel is not None and not isinstance(sel, list):
-                        return self._json({"error": "selected 必须为字符串数组"}, 400)
-                    ws_raw = str(body.get("workspace") or "").strip()
-                    try:
-                        res = _sk.migrate_skills(
-                            source=str(body.get("source") or "zcode"),
-                            target=str(body.get("target") or "antigravity"),
-                            selected=sel,
-                            include_plugins=bool(body.get("include_plugins")),
-                            agy_mode=str(body.get("agy_mode") or "skills"),
-                            plugin_name=str(body.get("plugin_name") or ""),
-                            conflict=str(body.get("conflict") or "skip"),
-                            normalize=bool(body.get("normalize", True)),
-                            workspace_dir=Path(ws_raw) if ws_raw else None,
-                            apply=bool(body.get("apply")),
-                            vault=vault,
-                        )
-                        return self._json(res)
-                    except ValueError as e:
-                        return self._json({"error": str(e)}, 400)
+                fn = POST_ROUTES.get(u.path)
+                if fn is not None:
+                    return fn(self, ctx, body)
                 self._json({"error": "unknown route"}, 404)
             except _CLIENT_DISCONNECT:
                 pass
             except Exception as e:
                 self._json({"error": str(e)}, 500)
 
-    # 首选端口可能落进 Windows 动态保留区段 (Hyper-V/WinNAT 重启后漂移, 绑定报 WinError 10013) —
-    # 托盘曾把任何绑定失败都当成"已有实例"直接退出, 11-06 起整整停摆。现在: 首选端口失败时先探活,
-    # 真有 Context Vault 实例在跑才按单实例语义抛出; 否则依次退到备用端口, 实际地址写 serve.json
+    return H
+
+
+def build_vault_server(vault: Path, port: int, token: str | None = None):
+    """构建热索引 HTTP 服务 (不阻塞); cmd_serve 与 Pro 托盘共用, 避免实现漂移。"""
+    from http.server import ThreadingHTTPServer
+
+    class _VaultHTTPServer(ThreadingHTTPServer):
+        allow_reuse_address = os.name != "nt"
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from mcp_server import ledger_summary
+    import cv_ledger
+
+    idx = VaultIndex(vault, block_text)
+    ctx = _ServerCtx(vault, idx, token, cv_ledger, ledger_summary)
+    handler = _make_handler(ctx)
+
+    fallback = getattr(_cv(), "SERVE_FALLBACK_PORTS", SERVE_FALLBACK_PORTS)
     srv, last_err = None, None
-    for cand in ([port] if port == 0 else [port, *SERVE_FALLBACK_PORTS, 0]):
+    for cand in ([port] if port == 0 else [port, *fallback, 0]):
         try:
-            srv = _VaultHTTPServer(("127.0.0.1", cand), H)
+            srv = _VaultHTTPServer(("127.0.0.1", cand), handler)
             break
         except OSError as e:
             if cand == port and _cv_service_alive(port):
-                raise  # 另一个 Context Vault 实例已占用: 交调用方处理 (托盘单实例退出)
+                ctx.close()
+                raise
             last_err = e
     if srv is None:
+        ctx.close()
         raise last_err
     actual = srv.server_address[1]
     if port and actual != port:
         print(f"  ⚠ 端口 {port} 不可用 ({last_err}) — 改用 {actual}, 实际地址见 vault/serve.json",
               file=sys.stderr)
-    try:  # 服务发现: MCP 热路径/托盘按此找到实际地址 (显式 CV_VAULT_SVC 仍优先)
+    try:
         _cv().atomic_write_text(vault / "serve.json", json.dumps(
             {"url": f"http://127.0.0.1:{actual}", "port": actual, "pid": os.getpid(),
              "started": _cv().now_iso()}))
@@ -1066,42 +1206,38 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
         pass
     orig_close = srv.server_close
 
-    def _close_with_aml():
+    def _close_with_resources():
         try:
-            if aml_router_holder[0] is not None:
-                aml_router_holder[0].close_all()
+            ctx.close()
         finally:
             orig_close()
 
     def _warm_async():
-        """常驻服务/托盘启动后后台预热首屏高频缓存与实时额度, 打开浏览器时直接热态秒回。"""
+        """常驻服务/托盘启动后后台预热首屏高频缓存、实时额度与 Skill 指纹缓存。"""
         def _run():
+            for job in (
+                ctx.get_ledger_cached,
+                ctx.get_stats_cached,
+                lambda: ctx.get_usage_base_cached("5h", None),
+                lambda: cv_ledger.remote_quota_cached(vault, swr=True),
+                lambda: cv_ledger.agv_quota_cached(swr=True),
+            ):
+                try:
+                    job()
+                except Exception:
+                    pass
             try:
-                _get_ledger_cached()
-            except Exception:
-                pass
-            try:
-                _get_usage_base_cached("5h", None)
-            except Exception:
-                pass
-            try:
-                cv_ledger.remote_quota_cached(vault, swr=True)
-            except Exception:
-                pass
-            try:
-                cv_ledger.agv_quota_cached(swr=True)
+                import cv_skills as _sk
+                _sk.list_skills_api(source="zcode", target="antigravity")
             except Exception:
                 pass
 
         threading.Thread(target=_run, daemon=True).start()
 
-    srv.server_close = _close_with_aml
+    srv.server_close = _close_with_resources
     srv.warm_async = _warm_async
-    srv.clear_cache = cache.clear
+    srv.clear_cache = ctx.cache.clear
     return srv, idx
-
-
-SERVE_FALLBACK_PORTS = [18791, 28791]
 
 
 def _cv_service_alive(port: int) -> bool:
@@ -1112,7 +1248,7 @@ def _cv_service_alive(port: int) -> bool:
         with urllib.request.urlopen(req, timeout=2) as r:
             return json.loads(r.read().decode("utf-8")).get("service") == "context-vault"
     except urllib.error.HTTPError as e:
-        return e.code == 401  # 鉴权档实例拒绝无凭据探活: 也说明是我们的服务
+        return e.code == 401
     except Exception:
         return False
 
@@ -1120,7 +1256,7 @@ def _cv_service_alive(port: int) -> bool:
 def cmd_serve(args):
     token = args.token or os.environ.get("CV_SERVE_TOKEN")
     srv, idx = build_vault_server(_cv().vault_dir(args), args.port, token=token)
-    port = srv.server_address[1]  # 首选端口被保留时会退到备用端口: 打印实际地址
+    port = srv.server_address[1]
     base_url = f"http://127.0.0.1:{port}/"
     print(f"vault 热索引就绪: {len(idx.meta)} 快照, {idx.term_count} 词项 (引擎 v2, SQLite 倒排)")
     print(f"Context Vault 服务已启动: {base_url} (Ctrl+C 退出)")
@@ -1133,8 +1269,6 @@ def cmd_serve(args):
     if hasattr(srv, "warm_async"):
         srv.warm_async()
     if getattr(args, "open", False):
-        import threading
-        import time
         import webbrowser
         open_url = f"{base_url}?token={urllib.parse.quote(str(token))}" if token else base_url
 
@@ -1153,4 +1287,3 @@ def cmd_serve(args):
     finally:
         srv.server_close()
         idx._close()
-

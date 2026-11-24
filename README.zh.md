@@ -48,7 +48,7 @@
 
 ## 🚀 快速开始
 
-> **Windows 绿色托盘版（免装 Python，14 MB 单文件双击即用）**：直接下载 [ContextVault.exe (v0.10.0)](https://github.com/nghqqa/context-vault/releases/download/v0.10.0/ContextVault.exe)（校验见 [Release 页](https://github.com/nghqqa/context-vault/releases/tag/v0.10.0)），内置 Web 控制台（`127.0.0.1:8791`）、**免 Python 原生 MCP 服务（`--mcp`）**、定时同步全端会话与每日自动备份。
+> **Windows 绿色托盘版（免装 Python，14 MB 单文件双击即用）**：直接下载 [ContextVault.exe (v0.10.1)](https://github.com/nghqqa/context-vault/releases/download/v0.10.1/ContextVault.exe)（校验见 [Release 页](https://github.com/nghqqa/context-vault/releases/tag/v0.10.1)），内置 Web 控制台（`127.0.0.1:8791`）、**免 Python 原生 MCP 服务（`--mcp`）**、定时同步全端会话与每日自动备份。
 
 ```bash
 pip install -e .                   # 可选：注册全局命令 cv / cv-mcp / cv-aml (零第三方依赖)
@@ -118,7 +118,7 @@ vault/
 - 195MB Codex rollout → **1.5 秒**导出 → 12MB 快照；39 个压缩边界、2.24 亿 token 用量、838 对工具调用全部保真。
 - **双向迁移真机验证全部通过**：Codex→Claude 在 2.1.181 里 resume 续写；Claude→Codex 在 0.153.4 里恢复 **373,160 tokens 全量上下文**。
 - 逆向并规避 codex 两代格式陷阱（`ordinal` 数字/字符串互不兼容、resume 走 SQLite thread-store、"rollout is empty" 误导性报错）。
-- 测试 **240 项用例**，含冷热双路径等价、SWR 非阻塞缓存、跨工具 Skill 迁移、POST 413 限流与 gzip 压测——常驻索引与文件扫描回退必须结果一致；CI 另有控制台 JS 执行/单元回归与真实浏览器多视口布局探针（380–2560px × 全分区溢出检测）。
+- 测试 **241 项用例**，含冷热双路径等价、SWR 非阻塞缓存、跨工具 Skill 迁移与自失效缓存、`/stats` 与数据库迁移缓存、POST 413 限流与 gzip 压测——常驻索引与文件扫描回退必须结果一致；CI 另有控制台 JS 执行/单元回归与真实浏览器多视口布局探针（380–2560px × 全分区溢出检测）。
 
 ## 设计原则
 

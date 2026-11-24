@@ -449,6 +449,37 @@ class TestProjectImprovements(unittest.TestCase):
             self.assertEqual(code, 200)
             self.assertIn("content", mg)
             self.assertIn("hello from codex", mg["content"])
+
+            # 6) /stats 两次连续命中缓存 (owned_stats 只计算 1 次), 写入清缓存后再重算
+            from unittest import mock
+            orig_owned = cv.owned_stats
+            calls = [0]
+
+            def counted_owned(v):
+                calls[0] += 1
+                return orig_owned(v)
+
+            with mock.patch.object(cv, "owned_stats", side_effect=counted_owned):
+                code1, s1 = _j("GET", "/stats")
+                code2, s2 = _j("GET", "/stats")
+                self.assertEqual((code1, code2), (200, 200))
+                self.assertEqual(s1, s2)
+                self.assertLessEqual(calls[0], 1)
+
+            # 7) cv_core.db() 对已建表库命中 _MIGRATED_DBS 缓存; 无表空库不误标已迁移
+            import cv_core
+            cv_core.reset_db_cache(vault)
+            c1 = cv_core.db(vault)
+            c1.close()
+            import os as _os
+            vdb_key = _os.path.normcase(_os.path.abspath(str(vault / "vault.db")))
+            self.assertTrue(any(k[0] == vdb_key for k in cv_core._MIGRATED_DBS))
+            empty_v = self.tmp / "empty_db_cache_test"
+            empty_v.mkdir()
+            c_empty = cv_core.db(empty_v)
+            c_empty.close()
+            ev_key = _os.path.normcase(_os.path.abspath(str(empty_v / "vault.db")))
+            self.assertFalse(any(k[0] == ev_key for k in cv_core._MIGRATED_DBS))
         finally:
             srv.shutdown()
             srv.server_close()

@@ -12,9 +12,7 @@ import uuid
 from pathlib import Path
 
 
-def _cv():
-    import cv
-    return cv
+from cv_core import cv_mod as _cv, estimate_text_tokens  # noqa: E402
 
 
 # ------------------------------------------------- diff: 迁移前预览
@@ -444,12 +442,7 @@ def do_import_zcode(vault: Path, env: dict, sid: str, apply: bool,
             "new_sid": sess_id, "applied": True}
 
 
-def estimate_text_tokens(text: str) -> int:
-    """文本 token 粗估 (预算装配用, 诚实标注为估算): CJK ≈ 1 字/token, ASCII ≈ 4 字符/token。"""
-    if not text:
-        return 0
-    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
-    return cjk + (len(text) - cjk) // 4 + 1
+# estimate_text_tokens 已收敛至 cv_core (顶部导入并向后兼容重导出)
 
 
 _BRIEF_LINE_CAP = 220   # 槽位单行截断 (v0 同款视觉)

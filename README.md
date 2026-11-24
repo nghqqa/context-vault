@@ -48,7 +48,7 @@ Your AI coding sessions are your most valuable work asset — yet they're locked
 
 ## 🚀 Quick Start
 
-> **Windows ready-to-run tray app (no Python required, 14 MB single binary)**: Download [ContextVault.exe (v0.10.0)](https://github.com/nghqqa/context-vault/releases/download/v0.10.0/ContextVault.exe) ([Release notes & SHA256](https://github.com/nghqqa/context-vault/releases/tag/v0.10.0)) and double-click to launch the resident Web Console (`127.0.0.1:8791`), **built-in zero-Python MCP server (`--mcp`)**, periodic sync, and daily backups.
+> **Windows ready-to-run tray app (no Python required, 14 MB single binary)**: Download [ContextVault.exe (v0.10.1)](https://github.com/nghqqa/context-vault/releases/download/v0.10.1/ContextVault.exe) ([Release notes & SHA256](https://github.com/nghqqa/context-vault/releases/tag/v0.10.1)) and double-click to launch the resident Web Console (`127.0.0.1:8791`), **built-in zero-Python MCP server (`--mcp`)**, periodic sync, and daily backups.
 
 ```bash
 pip install -e .                   # optional: installs global `cv`, `cv-mcp`, `cv-aml` commands (zero deps)
@@ -118,7 +118,7 @@ Two rules that don't bend: **snapshots are immutable** (any derived data lives i
 - 195 MB Codex rollout → 12 MB snapshot in **1.5 s**; 39 compaction boundaries, 224M tokens of usage, 838 tool-call pairs intact.
 - **Bidirectional migration, both directions real-machine verified**: Codex→Claude resumes and continues accurately in Claude 2.1.181; Claude→Codex restores **373,160 tokens of full context** in Codex 0.153.4.
 - Reverse-engineered and dodged the two-generation Codex format trap (numeric vs string `ordinal`, resume reading the SQLite thread-store, misleading "rollout is empty").
-- Test suite: **240 tests** including hot/cold equivalence, SWR non-blocking caching, cross-agent skill migration, 413 payload guards, and gzip compression — the resident index and the file-scan fallback must return identical results. CI also runs JS syntax/runtime/unit checks and a real-browser layout probe (380–2560px × all views, zero overflow).
+- Test suite: **241 tests** including hot/cold equivalence, SWR non-blocking caching, cross-agent skill migration with self-invalidating caches, `/stats` & DB migration caching, 413 payload guards, and gzip compression — the resident index and the file-scan fallback must return identical results. CI also runs JS syntax/runtime/unit checks and a real-browser layout probe (380–2560px × all views, zero overflow).
 
 ## Design principles
 

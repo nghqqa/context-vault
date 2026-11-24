@@ -11,6 +11,14 @@ import sys
 from pathlib import Path
 
 _FROZEN_CACHE: dict[str, str] = {}
+_CONSOLE_JS_PARTS = (
+    "console_core.js",
+    "console_overview.js",
+    "console_snapshots.js",
+    "console_migrate.js",
+    "console_skills.js",
+    "console_ops.js",
+)
 
 
 def ui_dir() -> Path:
@@ -26,10 +34,14 @@ def _is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
+def _read_console_js(d: Path) -> str:
+    return "\n".join((d / name).read_text(encoding="utf-8") for name in _CONSOLE_JS_PARTS)
+
+
 def load_console_js() -> str:
     if _is_frozen() and "js" in _FROZEN_CACHE:
         return _FROZEN_CACHE["js"]
-    js = (ui_dir() / "console.js").read_text(encoding="utf-8")
+    js = _read_console_js(ui_dir())
     if _is_frozen():
         _FROZEN_CACHE["js"] = js
     return js
@@ -41,7 +53,7 @@ def load_console_html() -> str:
     d = ui_dir()
     shell = (d / "console.html").read_text(encoding="utf-8")
     css = (d / "console.css").read_text(encoding="utf-8")
-    js = (d / "console.js").read_text(encoding="utf-8")
+    js = _read_console_js(d)
     out = shell.replace("/*__CONSOLE_CSS__*/", css).replace("/*__CONSOLE_JS__*/", js)
     if _is_frozen():
         _FROZEN_CACHE["console"] = out

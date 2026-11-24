@@ -48,6 +48,17 @@ from pathlib import Path
 _TOOLS_DIR = str(Path(__file__).resolve().parent)
 if _TOOLS_DIR not in sys.path:
     sys.path.insert(0, _TOOLS_DIR)
+from cv_core import (  # noqa: F401,E402 — re-exported as public engine API
+    BadMigrateTarget,
+    SCHEMA,
+    SnapshotNotFound,
+    atomic_write_text,
+    db,
+    estimate_text_tokens,
+    fmt_usd,
+    rotate_log_if_needed,
+    vault_dir,
+)
 from cv_ui import load_console_html as _load_console_html, load_dashboard_html as _load_dashboard_html
 from cv_index import (  # noqa: F401 — re-exported as public engine API
     VaultIndex,
@@ -67,7 +78,7 @@ from cv_index import (  # noqa: F401 — re-exported as public engine API
 
 FORMAT_VERSION = "0.1"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # noconsole 进程 spawn 控制台程序不弹窗   # context-snapshot 格式版本
-VERSION = "0.10.0"  # 跨 Agent Skill 批量迁移 / Antigravity 双落盘模式 / 设置与运维工作台 / 极速并发首屏
+VERSION = "0.10.1"  # 极速 Skill 分层扫描 / /stats 与 DB 缓存 / 表驱动服务与模块化前端
 TOOL_RESULT_LIMIT = 256 * 1024  # spec §8.2 裁决: 单块截断阈值 256KB
 HOME = Path.home()
 HEADROOM_DIR = HOME / ".headroom"
@@ -76,80 +87,8 @@ CLAUDE_PROJECTS = HOME / ".claude" / "projects"
 
 # ---------------------------------------------------------------- vault 基础
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS snapshots(
-  id TEXT PRIMARY KEY, created_at TEXT, agent TEXT, source_format TEXT,
-  provider TEXT, model TEXT, session_ref TEXT, originator TEXT,
-  completeness TEXT, tokens_in INTEGER, tokens_out INTEGER, reasoning_tokens INTEGER,
-  cache_read INTEGER, cache_write INTEGER, total_tokens INTEGER, cost_usd REAL,
-  usage_events INTEGER, blocks_total INTEGER, blocks_dropped INTEGER, path TEXT,
-  parent_snapshot TEXT, fork_of TEXT, migrated_from TEXT, migration_baseline TEXT,
-  cwd TEXT, parent_session_ref TEXT, summary_title TEXT);
-CREATE TABLE IF NOT EXISTS ledger_events(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, occurred_at TEXT, kind TEXT,
-  model TEXT, provider TEXT, client TEXT, tokens_saved INTEGER, cost_usd REAL,
-  snapshot_id TEXT, raw TEXT);
-CREATE TABLE IF NOT EXISTS probe_events(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, profile TEXT, endpoint TEXT,
-  status TEXT, http_code INTEGER, latency_ms INTEGER, models TEXT, missing_models TEXT);
-CREATE INDEX IF NOT EXISTS idx_ledger_ts ON ledger_events(occurred_at);
-CREATE INDEX IF NOT EXISTS idx_snapshots_parent ON snapshots(parent_snapshot);
-CREATE INDEX IF NOT EXISTS idx_snapshots_agent_ref ON snapshots(agent, session_ref);
-CREATE INDEX IF NOT EXISTS idx_probe_status_id ON probe_events(status, id);
-CREATE INDEX IF NOT EXISTS idx_probe_ts ON probe_events(ts);
-CREATE TABLE IF NOT EXISTS vault_meta(key TEXT PRIMARY KEY, value TEXT);
-"""
+# vault 基础原语 (SCHEMA / rotate_log_if_needed / vault_dir / db / atomic_write_text) 已收敛至 cv_core
 
-
-def rotate_log_if_needed(path: Path, max_bytes: int = 5 * 1024 * 1024) -> None:
-    """单文件体积超阈值时滚动为 .1 (防常驻日志无限膨胀)。"""
-    try:
-        if path.is_file() and path.stat().st_size >= max_bytes:
-            bak = path.with_name(path.name + ".1")
-            if bak.exists():
-                bak.unlink()
-            path.replace(bak)
-    except OSError:
-        pass
-
-
-def vault_dir(args) -> Path:
-    raw = str(getattr(args, "vault", None) or "vault")
-    p = Path(raw).expanduser()
-    if raw == "vault" and not (p / "vault.db").exists() and getattr(args, "cmd", None) != "init":
-        repo_vault = Path(__file__).resolve().parent.parent / "vault"
-        if (repo_vault / "vault.db").exists():
-            return repo_vault
-    return p
-
-
-def db(vault: Path) -> sqlite3.Connection:
-    # WAL + busy_timeout: 托盘常驻多线程 (serve/哨兵/守望/sync) 与 CLI 并发写不再 database is locked
-    conn = sqlite3.connect(vault / "vault.db", timeout=10)
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-    except sqlite3.OperationalError:
-        pass  # 其他连接持锁时切不上就下次再切, 不阻塞本次
-    # 索引层派生数据 (快照文件本身不变), 老库逐列迁移:
-    #   parent_snapshot — sync 增量演进的上一版, owned_stats 据此只数每条演进链的叶子
-    #   fork_of         — cv fork 的源节点 (原只活在 JSON 里, 树查询/统计要读全文件)
-    #   migrated_from / migration_baseline — --apply 迁移副本的源快照与首版复制来的用量基线
-    for col in ("parent_snapshot", "fork_of", "migrated_from", "migration_baseline",
-                "cwd", "parent_session_ref", "summary_title"):
-        try:
-            conn.execute(f"ALTER TABLE snapshots ADD COLUMN {col} TEXT")
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass  # 列已存在 = 老库迁移完成; 表尚未建由调用方 executescript(SCHEMA)
-    return conn
-
-
-def atomic_write_text(path: Path, text: str):
-    """同目录临时文件 + os.replace 原子落盘; 进程中途被杀不留截断文件 (快照/水位/基线共用)。"""
-    tmp = path.with_name(path.name + f".tmp-{os.getpid()}")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
 
 
 def cmd_init(args):
@@ -628,13 +567,8 @@ def cmd_export(args):
     return sid
 
 
-class SnapshotNotFound(LookupError):
-    """快照不存在 — 领域层可捕获错误。此前抛 SystemExit, 它不是 Exception 子类,
-    HTTP 层的 except Exception 接不住, 控制台 /migrate 会直接断连而非返回 404 JSON。"""
+# SnapshotNotFound / BadMigrateTarget 已收敛至 cv_core
 
-
-class BadMigrateTarget(ValueError):
-    """迁移目标不合法 (HTTP 层映射 400; CLI 由 argparse choices 前置拦截)。"""
 
 
 def load_snapshot(args_or_vault, sid: str) -> dict:
@@ -1197,8 +1131,7 @@ def owned_stats(vault: Path) -> dict:
             "source": "vault-owned (from agent session usage records)"}
 
 
-def fmt_usd(x):
-    return f"${x:,.2f}" if isinstance(x, (int, float)) else "-"
+# fmt_usd 已收敛至 cv_core (顶部 re-export)
 
 
 def cv_ledger_sync_cmd(args):

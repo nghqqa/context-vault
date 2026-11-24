@@ -28,7 +28,7 @@ import urllib.parse
 from pathlib import Path
 
 SERVER_NAME = "context-vault"
-SERVER_VERSION = "0.10.0"
+SERVER_VERSION = "0.10.1"
 PROTO = "2025-06-18"
 SEARCH_CONTEXT_CHARS = 400  # vault_context 每个命中块返回的摘录长度
 MAX_TEXT_LEN = 2000
@@ -36,15 +36,13 @@ MAX_TEXT_LEN = 2000
 
 # ---------------- vault 读取 ----------------
 
-def vault_dir(args) -> Path:
-    raw = str(getattr(args, "vault", None) or "vault")
-    p = Path(raw).expanduser()
-    default_cwd = str(Path.cwd() / "vault")
-    if raw in ("vault", default_cwd) and not (p / "vault.db").exists():
-        repo_vault = Path(__file__).resolve().parent.parent / "vault"
-        if (repo_vault / "vault.db").exists():
-            return repo_vault
-    return p
+from cv_core import (  # noqa: E402
+    estimate_text_tokens as _estimate_tokens,
+    parse_budget_tokens as _parse_budget_tokens,
+    truncate_to_tokens as _truncate_to_tokens,
+    vault_dir,
+)
+from cv_index import VaultIndex, block_text  # noqa: F401,E402
 
 
 def load_all_snapshots(vault: Path) -> list:
@@ -115,66 +113,14 @@ def t_recent(args_vault, limit: int) -> str:
     return "\n".join(lines)
 
 
-def block_text(b: dict) -> str:
-    """检索文本 — 委托 cv.block_text (规范实现, 与热索引同源; 2026-11-02 审查 #7)。"""
-    import cv as _cv
-    return _cv.block_text(b)
-
-
 def _readonly_index(args_vault):
     """只读直查 search_index.db (常驻服务未启动时的毫秒级冷路径):
     装载失败/无索引文件返回 None (调用方回退全量扫描)。绝不重建/落盘/删文件。"""
     try:
-        import cv as _cv
-        idx = _cv.VaultIndex(args_vault, readonly=True)
+        idx = VaultIndex(args_vault, block_text, readonly=True)
         return None if getattr(idx, "_broken", False) else idx
     except Exception:
         return None
-
-
-def _estimate_tokens(text: str) -> int:
-    """轻量 token 估算 (与 cv.estimate_text_tokens 完全同口径: CJK ≈ 1 字/tok, ASCII ≈ 4 字/tok)。"""
-    if not text:
-        return 0
-    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
-    return cjk + (len(text) - cjk) // 4 + 1
-
-
-def _parse_budget_tokens(val) -> int | None:
-    """严格解析可选 budget_tokens 参数: 拒绝 bool 和非整数字符串。"""
-    if val is None:
-        return None
-    if isinstance(val, bool):
-        raise ValueError("budget_tokens 必须为整数, 不能是布尔值")
-    if isinstance(val, int):
-        return val
-    if isinstance(val, str) and val.strip():
-        try:
-            return int(val.strip())
-        except ValueError as e:
-            raise ValueError(f"无效的 budget_tokens: {val!r}") from e
-    raise ValueError(f"无效的 budget_tokens: {val!r}")
-
-
-def _truncate_to_tokens(text: str, max_tokens: int) -> str:
-    """二分截断单条文本, 确保估算 token 数不超过 max_tokens。"""
-    if max_tokens <= 0 or not text:
-        return ""
-    if _estimate_tokens(text) <= max_tokens:
-        return text
-    if max_tokens <= 1:
-        return "…"
-    lo, hi = 0, len(text)
-    best = 0
-    while lo <= hi:
-        mid = (lo + hi) // 2
-        cand = text[:mid] + "…"
-        if _estimate_tokens(cand) <= max_tokens:
-            best = mid
-            lo = mid + 1
-        else:
-            hi = mid - 1
-    return (text[:best] + "…") if best > 0 else "…"
 
 
 def _trim_by_budget(header: str, items: list[str], footer: str,
