@@ -352,18 +352,30 @@ def _node_zstd_decompress(raw: bytes, frames: list[tuple[int, int]]) -> bytes:
     return proc.stdout
 
 
-def _node_zstd_compress(data: bytes) -> bytes:
+def _node_zstd_compress_frames(parts: list[bytes]) -> bytes:
+    """在单次 Node 子进程中依次压缩多个非空字节段并拼接为连续 Zstd 帧 (写会话双帧减半子进程开销)。"""
+    chunks = [bytes(p) for p in parts if p]
+    if not chunks:
+        return b""
     node = shutil.which("node")
     if not node:
         raise RuntimeError("node binary not found for zstd compression")
+    stdin_payload = b"".join(struct.pack("<I", len(c)) + c for c in chunks)
     script = (
         "const fs=require('node:fs'),z=require('node:zlib');"
         "const inp=fs.readFileSync(0);"
-        "process.stdout.write(z.zstdCompressSync(inp,{params:{[z.constants.ZSTD_c_checksumFlag]:1}}));"
+        "const opts={params:{[z.constants.ZSTD_c_checksumFlag]:1}};"
+        "const out=[];let off=0;"
+        "while(off+4<=inp.length){"
+        "const ln=inp.readUInt32LE(off);off+=4;"
+        "out.push(z.zstdCompressSync(inp.subarray(off,off+ln),opts));"
+        "off+=ln;"
+        "}"
+        "process.stdout.write(Buffer.concat(out));"
     )
     proc = subprocess.run(
         [node, "-e", script],
-        input=data,
+        input=stdin_payload,
         capture_output=True,
         timeout=30,
         creationflags=_no_window_flags(),
@@ -372,6 +384,10 @@ def _node_zstd_compress(data: bytes) -> bytes:
         err = proc.stderr.decode("utf-8", errors="replace")[:200]
         raise RuntimeError(f"node zstd compress failed: {err}")
     return proc.stdout
+
+
+def _node_zstd_compress(data: bytes) -> bytes:
+    return _node_zstd_compress_frames([data])
 
 
 def decompress_zstd_frames(raw: bytes, max_frames: int | None = None, backend: str | None = None) -> bytes:
@@ -1087,9 +1103,15 @@ def write_dsh_session(
         + ("\n" if events else "")
     )
     if compression == "zstd":
-        hdr_frame = compress_zstd_frame(hdr_text.encode("utf-8"), backend=backend)
-        ev_frame = compress_zstd_frame(ev_text.encode("utf-8"), backend=backend) if ev_text else b""
-        payload = hdr_frame + ev_frame
+        eff_bk = backend or zstd_backend()
+        hdr_bytes = hdr_text.encode("utf-8")
+        ev_bytes = ev_text.encode("utf-8") if ev_text else b""
+        if eff_bk == "node" and ev_bytes:
+            payload = _node_zstd_compress_frames([hdr_bytes, ev_bytes])
+        else:
+            hdr_frame = compress_zstd_frame(hdr_bytes, backend=eff_bk)
+            ev_frame = compress_zstd_frame(ev_bytes, backend=eff_bk) if ev_bytes else b""
+            payload = hdr_frame + ev_frame
         tmp = dest.parent / f".{dest.name}.tmp-{os.getpid()}-{threading.get_ident()}"
         try:
             tmp.write_bytes(payload)

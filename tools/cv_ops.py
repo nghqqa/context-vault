@@ -1,6 +1,7 @@
 """运维与可视化子系统 — 上游哨兵 (probe)、缓存预热 (warm)、切换守望 (watch) 与静态面板 (dashboard)。"""
 from __future__ import annotations
 
+import html
 import json
 import os
 import subprocess
@@ -8,6 +9,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import webbrowser
 from pathlib import Path
 
 from cv_ui import load_dashboard_html as _load_dashboard_html
@@ -253,7 +255,7 @@ def cmd_dashboard(args):
         top = own["by_agent"][0] if own["by_agent"] else None
         if top:
             cards.append(f'<div class="card alt"><div class="v">{top["snapshots"]}</div>'
-                         f'<div class="k">{top["agent"]} 会话 · '
+                         f'<div class="k">{html.escape(str(top["agent"]))} 会话 · '
                          f'{(top["tokens_in"] or 0)/(10**6):,.0f}M tok</div></div>')
     if row:  # headroom 增强 (装了才有)
         total_saved = ((row["cost_usd"] or 0) + (raw.get("cache_savings_usd") or 0)) if row else 0
@@ -267,7 +269,7 @@ def cmd_dashboard(args):
     mx = max((r["c"] or 0) for r in rows) if rows else 1
     for r in rows:
         w = int(100 * (r["c"] or 0) / mx) if mx else 0
-        bymodel.append(f'<div class="bar"><div class="name">{r["model"]}</div>'
+        bymodel.append(f'<div class="bar"><div class="name">{html.escape(str(r["model"] or ""))}</div>'
                        f'<div class="track"><div class="fill" style="width:{w}%"></div></div>'
                        f'<div class="val">{usd(r["c"] or 0)} · {(r["t"] or 0):,} tok</div></div>')
     rows = conn.execute("SELECT substr(occurred_at,1,7) m, SUM(cost_usd) c FROM ledger_events "
@@ -275,30 +277,31 @@ def cmd_dashboard(args):
     mx = max((r["c"] or 0) for r in rows) if rows else 1
     for r in rows:
         h = int(100 * (r["c"] or 0) / mx) if mx else 0
+        m_txt = html.escape(str((r["m"] or "")[2:]))
         months.append(f'<div class="mcol"><div class="stick" style="height:{max(h,3)}%" title="{usd(r["c"] or 0)}"></div>'
-                      f'<div class="lb">{r["m"][2:]}</div></div>')
+                      f'<div class="lb">{m_txt}</div></div>')
     for r in conn.execute("SELECT * FROM probe_events ORDER BY id DESC LIMIT 15"):
         cls = {"ok": "ok", "warm": "warm"}.get(r["status"], "err")
-        detail = (r["missing_models"] or "") or (r["models"] or "")[:60]
-        probews.append(f'<tr><td><span class="dot {cls}"></span></td><td>{r["ts"][:19]}</td>'
-                       f'<td>{r["profile"]}</td><td>{r["status"]}</td><td>{detail}</td></tr>')
+        detail = html.escape(str((r["missing_models"] or "") or (r["models"] or "")[:60]))
+        probews.append(f'<tr><td><span class="dot {cls}"></span></td><td>{html.escape(str(r["ts"] or "")[:19])}</td>'
+                       f'<td>{html.escape(str(r["profile"] or ""))}</td><td>{html.escape(str(r["status"] or ""))}</td><td>{detail}</td></tr>')
     for r in conn.execute("SELECT * FROM snapshots ORDER BY created_at DESC LIMIT 20"):
-        snaps.append(f'<tr><td>{r["id"]}</td><td>{r["agent"]}</td><td>{r["blocks_total"]}</td>'
+        snaps.append(f'<tr><td>{html.escape(str(r["id"] or ""))}</td><td>{html.escape(str(r["agent"] or ""))}</td><td>{r["blocks_total"]}</td>'
                      f'<td>{r["tokens_in"]:,}</td><td>{r["cache_read"]:,}</td>'
-                     f'<td>{r["completeness"]}</td><td>{str(r["created_at"])[:19]}</td></tr>')
-    html = (DASH_TMPL.replace("__GENERATED__", _cv().now_iso())
-            .replace("__CARDS__", "".join(cards))
-            .replace("__BYMODEL__", "".join(bymodel) or '<div class="sub">明细为空</div>')
-            .replace("__MONTHS__", str(len(months)))
-            .replace("__TIMELINE__", "".join(months))
-            .replace("__PROBE__", "".join(probews))
-            .replace("__NSNAP__", str(len(snaps)))
-            .replace("__SNAPS__", "".join(snaps)))
+                     f'<td>{html.escape(str(r["completeness"] or ""))}</td><td>{html.escape(str(r["created_at"])[:19])}</td></tr>')
+    doc_html = (DASH_TMPL.replace("__GENERATED__", _cv().now_iso())
+                .replace("__CARDS__", "".join(cards))
+                .replace("__BYMODEL__", "".join(bymodel) or '<div class="sub">明细为空</div>')
+                .replace("__MONTHS__", str(len(months)))
+                .replace("__TIMELINE__", "".join(months))
+                .replace("__PROBE__", "".join(probews))
+                .replace("__NSNAP__", str(len(snaps)))
+                .replace("__SNAPS__", "".join(snaps)))
     out = Path(args.out) if args.out else vault / "dashboard.html"
-    out.write_text(html, encoding="utf-8")
+    out.write_text(doc_html, encoding="utf-8")
     print(f"面板已生成: {out.resolve()}")
     if args.open:
-        subprocess.run(["cmd", "/c", "start", "", str(out.resolve())], shell=False, creationflags=_cv().NO_WINDOW)
+        webbrowser.open(out.resolve().as_uri())
 
 
 # ------------------------------------------------- watch: 切换携带会话 (M2)
@@ -326,12 +329,13 @@ def active_sessions(hours: float = 8) -> list:
 
 
 def toast(title: str, msg: str):
-    esc = msg.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    t_esc = html.escape(str(title), quote=True).replace("'", "''")
+    m_esc = html.escape(str(msg), quote=True).replace("'", "''")
     ps = ("[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, "
           "ContentType=WindowsRuntime] | Out-Null; "
           "$x=New-Object Windows.Data.Xml.Dom.XmlDocument; "
           "$x.LoadXml('<toast><visual><binding template=\"ToastText02\">"
-          f"<text id=\"1\">{title}</text><text id=\"2\">{esc}</text>"
+          f"<text id=\"1\">{t_esc}</text><text id=\"2\">{m_esc}</text>"
           "</binding></visual></toast>'); "
           "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Context Vault')"
           ".Show([Windows.UI.Notifications.ToastNotification]::new($x))")

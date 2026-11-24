@@ -307,6 +307,17 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
                 <button class="btn danger" id="sk-apply-btn" onclick="skRunMigrate(true)">执行迁移写入目标</button>
               </div>
               <div id="sk-result" style="margin-top:12px" aria-live="polite"></div>
+              <details class="sk-manage-box" id="sk-manage-box" ontoggle="onSkillManageToggle(this.open)">
+                <summary>目标端已安装 Skill 管理 &amp; 备份回滚</summary>
+                <div class="sk-manage-body">
+                  <div class="sk-manage-tabs" role="tablist" aria-label="Skill 管理视图">
+                    <button type="button" role="tab" id="sk-mg-tab-tgt" class="on" aria-selected="true" onclick="setSkillManageTab('target')">目标已安装 (<span id="sk-tgt-cnt">0</span>)</button>
+                    <button type="button" role="tab" id="sk-mg-tab-bak" aria-selected="false" onclick="setSkillManageTab('backups')">历史备份 (<span id="sk-bak-cnt">0</span>)</button>
+                  </div>
+                  <div id="sk-tgt-list" class="sk-mg-list"></div>
+                  <div id="sk-bak-list" class="sk-mg-list" hidden></div>
+                </div>
+              </details>
             </div>
           </div>
         </div>
@@ -395,6 +406,20 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
     <button class="btn" value="cancel" autofocus>取消</button>
     <button class="btn danger" id="confirm-ok" value="ok">确认写入</button>
   </form>
+</dialog>
+<dialog class="drawer wide" id="sk-drawer" aria-labelledby="sk-dw-title" closedby="any">
+  <div class="dw-head">
+    <div style="min-width:0">
+      <h3 id="sk-dw-title">Skill 预览与差异对比</h3>
+      <p class="dw-sub" id="sk-dw-sub"></p>
+    </div>
+    <div class="dw-head-acts">
+      <button class="dw-close" id="sk-dw-close" aria-label="关闭 Skill 预览" autofocus onclick="closeSkillDrawer()">
+        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3.5 3.5l9 9m0-9-9 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+  </div>
+  <div id="sk-dw-body"></div>
 </dialog>
 <script>
 /*__CONSOLE_JS__*/

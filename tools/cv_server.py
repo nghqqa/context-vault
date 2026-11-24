@@ -2,11 +2,9 @@
 from __future__ import annotations
 
 from collections import Counter
-import contextlib
 import datetime as dt
 import gzip
 import hmac
-import io
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -16,7 +14,7 @@ import sqlite3
 import sys
 import threading
 import time
-from types import SimpleNamespace
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -116,6 +114,7 @@ class _ServerCtx:
         self.cv_ledger = cv_ledger_mod
         self.ledger_summary = ledger_summary_fn
         self._aml_router = None
+        self._write_lock = threading.Lock()
         self.http_logger = _make_http_logger(vault / "serve_http.log")
 
     def compute_zcode_usage(self) -> dict:
@@ -385,6 +384,35 @@ def _get_skills_list(h, ctx: _ServerCtx, q: dict):
         ))
     except ValueError as e:
         h._json({"error": str(e)}, 400)
+
+
+def _get_skills_inspect(h, ctx: _ServerCtx, q: dict):
+    import cv_skills as _sk
+    try:
+        ws = Path(q["workspace"]) if q.get("workspace") else None
+        h._json(_sk.inspect_skill_api(
+            source=q.get("source") or "zcode",
+            skill_id=q.get("id") or q.get("slug") or "",
+            target=q.get("target") or "",
+            agy_mode=q.get("agy_mode") or "skills",
+            plugin_name=q.get("plugin_name") or "",
+            include_plugins=(q.get("include_plugins") == "1"),
+            normalize=(q.get("normalize", "1") != "0"),
+            workspace_dir=ws,
+            vault=ctx.vault,
+            connected_only=(q.get("connected_only") == "1"),
+        ))
+    except ValueError as e:
+        h._json({"error": str(e)}, 400)
+
+
+def _get_skills_backups(h, ctx: _ServerCtx, q: dict):
+    import cv_skills as _sk
+    try:
+        lim = _parse_int_arg(q.get("limit") or 20, "limit")
+    except ValueError:
+        return h._json({"error": "invalid limit"}, 400)
+    h._json({"backups": _sk.list_skill_backups_api(ctx.vault, limit=lim)})
 
 
 def _get_ops_mcp(h, ctx: _ServerCtx, q: dict):
@@ -668,6 +696,8 @@ GET_ROUTES = {
     "/memory": _get_memory,
     "/semantic/status": _get_semantic_status,
     "/skills/list": _get_skills_list,
+    "/skills/inspect": _get_skills_inspect,
+    "/skills/backups": _get_skills_backups,
     "/ops/mcp": _get_ops_mcp,
     "/ops/status": _get_ops_status,
     "/probe_events": _get_probe_events,
@@ -744,28 +774,31 @@ def _post_migrate_project(h, ctx: _ServerCtx, body: dict):
 
 
 def _post_sync(h, ctx: _ServerCtx, body: dict):
-    res = _cv().sync_vault(ctx.vault, debounce=bool(body.get("debounce")), quiet=True)
-    ctx.idx.rebuild()
-    ctx.cache.clear()
-    if body.get("extract_memory", True):
-        try:
-            mres = _cv().extract_memories_incremental(ctx.vault)
-            res["memories_added"] = mres["added"]
-            res["memories_total"] = mres["total"]
-        except Exception:
-            res["memories_added"] = 0
+    with ctx._write_lock:
+        res = _cv().sync_vault(ctx.vault, debounce=bool(body.get("debounce")), quiet=True)
+        ctx.idx.rebuild()
+        ctx.cache.clear()
+        if body.get("extract_memory", True):
+            try:
+                mres = _cv().extract_memories_incremental(ctx.vault)
+                res["memories_added"] = mres["added"]
+                res["memories_total"] = mres["total"]
+            except Exception:
+                res["memories_added"] = 0
     h._json(res)
 
 
 def _post_memory_extract(h, ctx: _ServerCtx, body: dict):
-    mres = _cv().extract_memories_incremental(ctx.vault, force=bool(body.get("force")))
-    ctx.cache.clear()
+    with ctx._write_lock:
+        mres = _cv().extract_memories_incremental(ctx.vault, force=bool(body.get("force")))
+        ctx.cache.clear()
     h._json(mres)
 
 
 def _post_memory_dedup(h, ctx: _ServerCtx, body: dict):
-    dres = _cv().memory_dedup(ctx.vault)
-    ctx.cache.clear()
+    with ctx._write_lock:
+        dres = _cv().memory_dedup(ctx.vault)
+        ctx.cache.clear()
     h._json(dres)
 
 
@@ -926,14 +959,16 @@ def _post_semantic_titles(h, ctx: _ServerCtx, body: dict):
 
 def _dispatch_ops_mcp_action(h, ctx: _ServerCtx, body: dict, api_fn, default_client: str | None = None):
     try:
-        if "clients" in body:
-            clients = body.get("clients")
-            if not isinstance(clients, list):
-                raise ValueError("clients 必须为数组")
-            h._json(api_fn(ctx.vault, client=None, clients=clients))
-        else:
-            cid = str(body.get("client") or default_client or "").strip()
-            h._json(api_fn(ctx.vault, client=cid))
+        with ctx._write_lock:
+            if "clients" in body:
+                clients = body.get("clients")
+                if not isinstance(clients, list):
+                    raise ValueError("clients 必须为数组")
+                res = api_fn(ctx.vault, client=None, clients=clients)
+            else:
+                cid = str(body.get("client") or default_client or "").strip()
+                res = api_fn(ctx.vault, client=cid)
+        h._json(res)
     except ValueError as e:
         h._json({"error": str(e)}, 400)
 
@@ -952,17 +987,20 @@ def _post_ops_backup(h, ctx: _ServerCtx, body: dict):
     except ValueError:
         return h._json({"error": "invalid keep"}, 400)
     try:
-        h._json(_cv().backup_vault_api(ctx.vault, keep=keep_n))
-    except SystemExit as e:
+        with ctx._write_lock:
+            res = _cv().backup_vault_api(ctx.vault, keep=keep_n)
+        h._json(res)
+    except (SystemExit, ValueError, FileNotFoundError) as e:
         h._json({"error": str(e)}, 400)
 
 
 def _post_ops_prune(h, ctx: _ServerCtx, body: dict):
     apply_flag = bool(body.get("apply"))
-    res = _cv().prune_snapshots_api(ctx.vault, apply=apply_flag)
-    if apply_flag:
-        ctx.idx.rebuild(force=True)
-        ctx.cache.clear()
+    with ctx._write_lock:
+        res = _cv().prune_snapshots_api(ctx.vault, apply=apply_flag)
+        if apply_flag:
+            ctx.idx.rebuild(force=True)
+            ctx.cache.clear()
     h._json(res)
 
 
@@ -987,12 +1025,14 @@ def _post_ops_plan_token(h, ctx: _ServerCtx, body: dict):
 
 
 def _post_ops_ledger_sync(h, ctx: _ServerCtx, body: dict):
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        ctx.cv_ledger.cmd_ledger_sync(SimpleNamespace(vault=str(ctx.vault)))
-    ctx.cache.clear()
-    lines = [ln.strip() for ln in buf.getvalue().splitlines() if ln.strip()]
-    h._json({"ok": True, "message": lines[-1] if lines else "账本同步完成"})
+    try:
+        with ctx._write_lock:
+            res = ctx.cv_ledger.sync_usage_events(ctx.vault)
+            ctx.cache.clear()
+        h._json({"ok": True, "added": res["added"], "skipped": res["skipped"],
+                 "files_scanned": res["files_scanned"], "message": res["message"]})
+    except (FileNotFoundError, ValueError) as e:
+        h._json({"error": str(e)}, 400)
 
 
 def _post_skills_migrate(h, ctx: _ServerCtx, body: dict):
@@ -1002,20 +1042,55 @@ def _post_skills_migrate(h, ctx: _ServerCtx, body: dict):
         return h._json({"error": "selected 必须为字符串数组"}, 400)
     ws_raw = str(body.get("workspace") or "").strip()
     try:
-        res = _sk.migrate_skills(
-            source=str(body.get("source") or "zcode"),
-            target=str(body.get("target") or "antigravity"),
-            selected=sel,
-            include_plugins=bool(body.get("include_plugins")),
-            agy_mode=str(body.get("agy_mode") or "skills"),
-            plugin_name=str(body.get("plugin_name") or ""),
-            conflict=str(body.get("conflict") or "skip"),
-            normalize=bool(body.get("normalize", True)),
-            workspace_dir=Path(ws_raw) if ws_raw else None,
-            apply=bool(body.get("apply")),
-            vault=ctx.vault,
-            connected_only=bool(body.get("connected_only")),
-        )
+        with ctx._write_lock:
+            res = _sk.migrate_skills(
+                source=str(body.get("source") or "zcode"),
+                target=str(body.get("target") or "antigravity"),
+                selected=sel,
+                include_plugins=bool(body.get("include_plugins")),
+                agy_mode=str(body.get("agy_mode") or "skills"),
+                plugin_name=str(body.get("plugin_name") or ""),
+                conflict=str(body.get("conflict") or "skip"),
+                normalize=bool(body.get("normalize", True)),
+                workspace_dir=Path(ws_raw) if ws_raw else None,
+                apply=bool(body.get("apply")),
+                vault=ctx.vault,
+                connected_only=bool(body.get("connected_only")),
+            )
+        h._json(res)
+    except ValueError as e:
+        h._json({"error": str(e)}, 400)
+
+
+def _post_skills_remove(h, ctx: _ServerCtx, body: dict):
+    import cv_skills as _sk
+    slugs = body.get("slugs")
+    if not isinstance(slugs, list):
+        return h._json({"error": "slugs 必须为字符串数组"}, 400)
+    ws_raw = str(body.get("workspace") or "").strip()
+    try:
+        with ctx._write_lock:
+            res = _sk.remove_skills_api(
+                target=str(body.get("target") or ""),
+                slugs=slugs,
+                agy_mode=str(body.get("agy_mode") or "skills"),
+                plugin_name=str(body.get("plugin_name") or ""),
+                workspace_dir=Path(ws_raw) if ws_raw else None,
+                vault=ctx.vault,
+                apply=bool(body.get("apply")),
+                connected_only=bool(body.get("connected_only")),
+            )
+        h._json(res)
+    except ValueError as e:
+        h._json({"error": str(e)}, 400)
+
+
+def _post_skills_rollback(h, ctx: _ServerCtx, body: dict):
+    import cv_skills as _sk
+    bid = str(body.get("backup_id") or "").strip()
+    try:
+        with ctx._write_lock:
+            res = _sk.rollback_skill_backup_api(ctx.vault, bid, apply=bool(body.get("apply")))
         h._json(res)
     except ValueError as e:
         h._json({"error": str(e)}, 400)
@@ -1046,6 +1121,8 @@ POST_ROUTES = {
     "/ops/plan_token": _post_ops_plan_token,
     "/ops/ledger_sync": _post_ops_ledger_sync,
     "/skills/migrate": _post_skills_migrate,
+    "/skills/remove": _post_skills_remove,
+    "/skills/rollback": _post_skills_rollback,
 }
 
 
@@ -1088,6 +1165,11 @@ def _make_handler(ctx: _ServerCtx):
                 self.send_header("Set-Cookie", nc)
                 self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Type", ctype)
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Referrer-Policy", "no-referrer")
+            if getattr(self, "close_connection", False):
+                self.send_header("Connection", "close")
             if use_gzip:
                 self.send_header("Content-Encoding", "gzip")
                 self.send_header("Vary", "Accept-Encoding")
@@ -1104,20 +1186,31 @@ def _make_handler(ctx: _ServerCtx):
 
         def _guard(self, post: bool) -> bool:
             """本地访问防护: Host/Origin 必须回环 + POST 强制 application/json + 可选 token 校验。"""
+            def _reject(msg: str, code: int) -> bool:
+                if post:
+                    self.close_connection = True
+                self._json({"error": msg}, code)
+                return False
+
             host = (self.headers.get("Host") or "").strip().lower()
-            hn = host.rsplit(":", 1)[0].strip("[]") if host.count(":") == 1 else host.strip("[]")
+            try:
+                hn = (urllib.parse.urlsplit("//" + host).hostname or "").lower() if host else ""
+            except ValueError:
+                hn = ""
             if hn not in ("127.0.0.1", "localhost", "::1"):
-                self._json({"error": f"forbidden: host '{host}' 不在本地白名单"}, 403)
-                return False
+                return _reject(f"forbidden: host '{host}' 不在本地白名单", 403)
             org = self.headers.get("Origin")
-            if org and (urlparse(org).hostname or "").lower() not in ("127.0.0.1", "localhost", "::1"):
-                self._json({"error": f"forbidden: origin '{org}' 非本地"}, 403)
-                return False
+            if org:
+                try:
+                    org_hn = (urlparse(org).hostname or "").lower()
+                except ValueError:
+                    org_hn = ""
+                if org_hn not in ("127.0.0.1", "localhost", "::1"):
+                    return _reject(f"forbidden: origin '{org}' 非本地", 403)
             if post:
                 ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
                 if ctype != "application/json":
-                    self._json({"error": "forbidden: POST 需要 Content-Type: application/json"}, 403)
-                    return False
+                    return _reject("forbidden: POST 需要 Content-Type: application/json", 403)
             tok = ctx.token
             if tok:
                 header = self.headers.get("X-Vault-Token")
@@ -1128,8 +1221,7 @@ def _make_handler(ctx: _ServerCtx):
                         break
                 qtok = "" if post else parse_qs(urlparse(self.path).query).get("token", [""])[0]
                 if not any(cand and hmac.compare_digest(str(cand), str(tok)) for cand in (header, qtok, cookie)):
-                    self._json({"error": "unauthorized: 需要 token (?token= 首访, 或 X-Vault-Token 头)"}, 401)
-                    return False
+                    return _reject("unauthorized: 需要 token (?token= 首访, 或 X-Vault-Token 头)", 401)
                 if "vault_token=" not in (self.headers.get("Cookie") or "") or (cookie and cookie != tok):
                     self._new_cookie = f"vault_token={tok}; Path=/; HttpOnly; SameSite=Strict"
             return True
@@ -1150,21 +1242,28 @@ def _make_handler(ctx: _ServerCtx):
             except _CLIENT_DISCONNECT:
                 pass
             except Exception as e:
+                try:
+                    ctx.http_logger.error("GET %s 500:\n%s", self.path, traceback.format_exc())
+                except Exception:
+                    pass
                 self._json({"error": str(e)}, 500)
 
         def do_POST(self):
             u = urlparse(self.path)
+            if not self._guard(True):
+                return
             try:
                 n = int(self.headers.get("Content-Length", 0) or 0)
             except ValueError:
+                self.close_connection = True
                 return self._json({"error": "invalid Content-Length"}, 400)
             if n < 0:
+                self.close_connection = True
                 return self._json({"error": "invalid Content-Length"}, 400)
             if n > MAX_POST_BYTES:
+                self.close_connection = True
                 return self._json({"error": f"payload too large: 上限 {MAX_POST_BYTES // 1048576} MB"}, 413)
             raw = self.rfile.read(n) if n > 0 else b""
-            if not self._guard(True):
-                return
             try:
                 try:
                     body = json.loads(raw.decode("utf-8")) if raw else {}
@@ -1179,6 +1278,10 @@ def _make_handler(ctx: _ServerCtx):
             except _CLIENT_DISCONNECT:
                 pass
             except Exception as e:
+                try:
+                    ctx.http_logger.error("POST %s 500:\n%s", self.path, traceback.format_exc())
+                except Exception:
+                    pass
                 self._json({"error": str(e)}, 500)
 
     return H

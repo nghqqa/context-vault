@@ -1,7 +1,10 @@
 /* ================= Skill 技能跨工具迁移 (与「设置与运维」已接入 MCP 后端强一致) ================= */
 let migMode="session",skSource="zcode",skTarget="antigravity",skAgyMode="skills";
-let skData=null,skSelected=new Set(),skPluginEdited=false;
+let skData=null,skSelected=new Set(),skPluginEdited=false,skBackups=null,skManageOpen=false,skManageTab="target";
 const skSeq=seqGuard();
+function isSkillSameOrigin(){
+  return !!(skSource&&skTarget&&skTarget===skSource&&!(skTarget==="antigravity"&&skAgyMode==="plugin"));
+}
 const SK_TARGET_META={
   antigravity:{title:"Antigravity",desc:"全局目录或独立插件包"},
   claude:{title:"Claude Code",desc:"~/.claude/skills/"},
@@ -68,6 +71,7 @@ async function loadSkills(opts){
     renderSkillTargets();
     renderSkillList();
     updateSkillBudget();
+    renderSkillManage();
   }catch(e){
     if(listEl)listEl.style.opacity="";
     if(e&&e.stale)return;
@@ -102,15 +106,21 @@ function renderSkillTargets(){
   wrap.innerHTML=visible.map(id=>{
     const m=SK_TARGET_META[id]||{title:id,desc:""};
     const on=(id===skTarget);
+    const same=(id===skSource&&!(id==="antigravity"&&skAgyMode==="plugin"));
     return '<label class="tgt-card'+(on?" on":"")+'"><input type="radio" name="sk-tgt" value="'+esc(id)+'"'+(on?" checked":"")+
       ' onchange="onSkillTargetChange(\''+esc(id)+'\')">'+
-      '<span><span class="tt">'+esc(m.title)+'</span><br><span class="td">'+esc(m.desc)+'</span></span></label>';
+      '<span><span class="tt">'+esc(m.title)+(same?' <span class="pill muted">同源</span>':"")+'</span><br><span class="td">'+esc(m.desc)+'</span></span></label>';
   }).join("");
   const ab=$("#sk-agy-opts");
   if(ab)ab.style.display=(skTarget==="antigravity")?"":"none";
 }
 function setSkillSource(ag){
   skSource=ag;skSelected.clear();skPluginEdited=false;
+  const conns=(skData&&skData.connected_agents)||[];
+  if(skTarget===ag&&!(ag==="antigravity"&&skAgyMode==="plugin")){
+    const alt=conns.find(a=>a!==ag);
+    if(alt)skTarget=alt;
+  }
   $("#sk-result")&&($("#sk-result").innerHTML="");
   loadSkills();
 }
@@ -176,11 +186,14 @@ function renderSkillList(){
     const sm=stMeta[s.target_status]||["",s.target_status||""];
     const wTip=(s.warnings&&s.warnings.length)?(' <span class="pill warn" title="'+esc(s.warnings.join("；"))+'">⚠ '+s.warnings.length+'</span>'):"";
     const gTag=s.scope==="plugin"?(' <span class="chip">'+esc(s.group||"plugin")+'</span>'):"";
-    return '<label class="sk-row"><input type="checkbox"'+ck+' onchange="toggleSkillItem(\''+esc(s.id)+'\',this.checked)">'+
+      return '<label class="sk-row"><input type="checkbox"'+ck+' onchange="toggleSkillItem(\''+esc(s.id)+'\',this.checked)">'+
       '<div class="sk-row-b"><div class="sk-row-top">'+
       '<span class="sk-slug">'+esc(s.slug)+'</span>'+
       '<span class="pill '+sm[0]+'">'+sm[1]+'</span>'+gTag+wTip+
-      '<span class="sk-tok">~'+num(s.prompt_tokens)+' tok · '+num(s.files)+' 文件</span></div>'+
+      '<span class="sk-tok">~'+num(s.prompt_tokens)+' tok · '+num(s.files)+' 文件</span>'+
+      '<button type="button" class="btn sm sk-inspect-btn'+(s.target_status==="conflict"?" warn":"")+
+      '" onclick="event.preventDefault();event.stopPropagation();inspectSkill(\''+esc(s.id)+'\')">'+
+      (s.target_status==="conflict"?"对比差异":"预览")+'</button></div>'+
       '<div class="sk-desc">'+esc(s.description||"")+'</div></div></label>';
   }).join("");
   updateSkillBudget();
@@ -189,7 +202,8 @@ function updateSkillBudget(){
   const all=(skData&&skData.skills)||[];
   const conns=(skData&&skData.connected_agents)||[];
   const srcs=(skData&&skData.sources)||[];
-  const noCan=!conns.length||!srcs.length||!all.length;
+  const sameOrigin=isSkillSameOrigin();
+  const noCan=!conns.length||!srcs.length||!all.length||sameOrigin;
   ["#sk-dry-btn","#sk-apply-btn"].forEach(s=>{const b=$(s);if(b)b.disabled=noCan;});
   const picked=all.filter(s=>skSelected.has(s.id));
   const tok=picked.reduce((a,s)=>a+(s.prompt_tokens||0),0);
@@ -207,13 +221,14 @@ function updateSkillBudget(){
     return;
   }
   const heavy=(picked.length>30||tok>4000);
-  box.className="sk-budget"+(heavy?" warn":"");
+  box.className="sk-budget"+((heavy||sameOrigin)?" warn":"");
   const modeTxt=(skTarget==="antigravity")
     ?(skAgyMode==="plugin"?"Antigravity 独立插件包（可一键开关）":"Antigravity 全局目录")
     :(SK_TARGET_META[skTarget]?SK_TARGET_META[skTarget].title:skTarget);
   box.innerHTML=
     '<div><b>目标：</b><span class="mono">'+esc(modeTxt)+'</span> → <span class="mono" style="word-break:break-all">'+esc((skData&&skData.dest_root)||"—")+'</span></div>'+
     '<div><b>已选：</b>'+num(picked.length)+' 个 Skill · 预估常驻 System Prompt <b>~'+num(tok)+' tokens</b></div>'+
+    (sameOrigin?'<div style="margin-top:4px">⚠ 当前目标与源端目录相同，无法原地覆盖（请切换其他目标，或选 Antigravity 打包为独立插件）。</div>':"")+
     (heavy?'<div style="margin-top:4px">⚠ 本次勾选项较多，可能增加每轮系统提示词开销；建议按需挑选常用 Skill，或切换为 Antigravity 独立插件模式便于随时整体关闭。</div>':"");
 }
 async function skRunMigrate(apply){
@@ -262,12 +277,178 @@ async function skRunMigrate(apply){
       (r.budget_warning?'<div class="hint" style="color:var(--warn);margin-top:4px">⚠ '+esc(r.budget_warning)+'</div>':"")+
       (rowsHtml?'<div class="sk-res-tbl">'+rowsHtml+'</div>':"")+'</div>';
     toast(r.applied?("已迁移 "+num(c.migrated)+" 个 Skill"):"预演完成：计划写入 "+num(c.planned_copy)+" 个 Skill");
-    if(r.applied)await loadSkills();
+    if(r.applied){
+      if(r.backup_id)skBackups=null;
+      await loadSkills({refresh:true});
+      if(skManageOpen)await loadSkillBackups();
+    }
   }catch(e){
     $("#sk-result").innerHTML='<div class="result-card err"><div class="rt">'+ERRIC+'Skill 迁移失败</div><div class="hint">'+esc(e.message)+'</div></div>';
     toast("Skill 迁移失败："+e.message,1);
   }
   btns.forEach(b=>b&&(b.disabled=false));
   updateSkillBudget();
+}
+function openSkillDrawer(){
+  const d=$("#sk-drawer");
+  if(d&&!d.open)d.showModal();
+}
+function closeSkillDrawer(){
+  const d=$("#sk-drawer");
+  if(d&&d.open)d.close();
+}
+function _renderDiffHtml(d){
+  if(!d.target_exists)return '<div class="hint">目标目录尚无同名 Skill，本次迁入为全新复制。</div>';
+  if(d.target_status==="identical")return '<div class="hint">✅ 目标目录内容与待迁入版本完全一致，无需变更。</div>';
+  const chips=[];
+  (d.files_added||[]).forEach(f=>chips.push('<span class="pill ok">+ '+esc(f)+'</span>'));
+  (d.files_changed||[]).forEach(f=>chips.push('<span class="pill warn">~ '+esc(f)+'</span>'));
+  (d.files_removed||[]).forEach(f=>chips.push('<span class="pill err">- '+esc(f)+'</span>'));
+  const lines=(d.diff_lines||[]).map(ln=>{
+    let cls="meta";
+    if(ln.startsWith("+++")||ln.startsWith("---"))cls="meta";
+    else if(ln.startsWith("@@"))cls="hunk";
+    else if(ln.startsWith("+"))cls="add";
+    else if(ln.startsWith("-"))cls="del";
+    return '<div class="sk-diff-ln '+cls+'">'+esc(ln)+'</div>';
+  }).join("");
+  return (chips.length?'<div class="dw-chips">'+chips.join("")+'</div>':"")+
+    (lines?'<div class="sk-diff-pre" style="margin-top:8px">'+lines+
+      (d.diff_truncated?'<div class="sk-diff-ln meta">…（Diff 已截断至 400 行）</div>':"")+'</div>'
+      :'<div class="hint">SKILL.md 文本一致，差异来自附属文件增删或改动。</div>');
+}
+async function inspectSkill(skillId){
+  openSkillDrawer();
+  $("#sk-dw-title").textContent="正在读取 Skill 详情…";
+  $("#sk-dw-sub").textContent=String(skillId||"");
+  $("#sk-dw-body").innerHTML='<div class="skel" style="width:65%"></div><div class="skel" style="width:85%"></div>';
+  const inc=!!($("#sk-inc-plug")&&$("#sk-inc-plug").checked);
+  const norm=!!($("#sk-norm")&&$("#sk-norm").checked);
+  const pname=(($("#sk-plugin-name")&&$("#sk-plugin-name").value)||"").trim();
+  const qs=[
+    "source="+encodeURIComponent(skSource||"zcode"),
+    "id="+encodeURIComponent(skillId||""),
+    "include_plugins="+(inc?1:0),
+    "normalize="+(norm?1:0),
+    "connected_only=1",
+  ];
+  if(skTarget){
+    qs.push("target="+encodeURIComponent(skTarget));
+    qs.push("agy_mode="+encodeURIComponent(skAgyMode));
+    if(skTarget==="antigravity"&&skAgyMode==="plugin"&&pname)qs.push("plugin_name="+encodeURIComponent(pname));
+  }
+  try{
+    const d=await api("/skills/inspect?"+qs.join("&"));
+    const sk=d.skill||{};
+    $("#sk-dw-title").textContent=(sk.slug||"Skill")+" · 预览与差异";
+    $("#sk-dw-sub").textContent=(sk.path||"")+(d.dest_path?("  ->  "+d.dest_path):"");
+    const rwHtml=(d.rewrites&&d.rewrites.length)?('<div class="hint" style="margin-top:6px">Frontmatter 规范化：'+esc(d.rewrites.join(" · "))+'</div>'):"";
+    const warnHtml=(sk.warnings&&sk.warnings.length)?('<div class="hint" style="color:var(--warn);margin-top:4px">⚠ '+esc(sk.warnings.join("；"))+'</div>'):"";
+    const filesHtml=(d.source_files||[]).map(f=>'<span class="chip">'+esc(f.rel)+' ('+num(f.size)+'B)</span>').join(" ");
+    $("#sk-dw-body").innerHTML=
+      '<div class="dw-chips">'+
+      '<span class="pill">'+esc((sk.source||"")+" / "+(sk.scope||""))+'</span>'+
+      '<span class="pill">~'+num(sk.prompt_tokens||0)+' tok</span>'+
+      '<span class="pill">'+num(sk.files||0)+' 文件 · '+esc(String(sk.size_kb||0))+' KB</span>'+
+      (d.target?'<span class="pill '+(d.target_status==="conflict"?"warn":(d.target_status==="new"?"ok":""))+'">'+esc(d.target_status||"")+'</span>':"")+
+      '</div>'+rwHtml+warnHtml+
+      (d.target?('<h3 class="sec">与目标端差异（'+esc(d.target)+'）</h3>'+_renderDiffHtml(d)):"")+
+      '<h3 class="sec" style="display:flex;align-items:center;justify-content:space-between"><span>迁入版 SKILL.md 预览</span>'+
+      '<button type="button" class="btn sm" data-v="'+esc(d.planned_skill_md||"")+'" onclick="copyData(this,\'已复制 SKILL.md\')">复制全文</button></h3>'+
+      '<pre class="sk-md-pre">'+esc(d.planned_skill_md||"")+'</pre>'+
+      (filesHtml?('<h3 class="sec">目录文件清单</h3><div class="dw-chips">'+filesHtml+'</div>'):"");
+  }catch(e){
+    $("#sk-dw-body").innerHTML=errEmpty("Skill 详情读取失败："+e.message,"");
+  }
+}
+function onSkillManageToggle(open){
+  skManageOpen=!!open;
+  renderSkillManage();
+  if(skManageOpen&&skBackups===null)loadSkillBackups();
+}
+function setSkillManageTab(tab){
+  skManageTab=(tab==="backups")?"backups":"target";
+  const bt=$("#sk-mg-tab-tgt"),bb=$("#sk-mg-tab-bak");
+  const lt=$("#sk-tgt-list"),lb=$("#sk-bak-list");
+  if(bt){bt.classList.toggle("on",skManageTab==="target");bt.setAttribute("aria-selected",skManageTab==="target"?"true":"false");}
+  if(bb){bb.classList.toggle("on",skManageTab==="backups");bb.setAttribute("aria-selected",skManageTab==="backups"?"true":"false");}
+  if(lt)lt.hidden=(skManageTab!=="target");
+  if(lb)lb.hidden=(skManageTab!=="backups");
+  if(skManageTab==="backups"&&skBackups===null)loadSkillBackups();
+}
+function renderSkillManage(){
+  const tList=(skData&&skData.target_skills)||[];
+  const tc=$("#sk-tgt-cnt");if(tc)tc.textContent=num(tList.length);
+  const tgtEl=$("#sk-tgt-list");
+  if(tgtEl){
+    tgtEl.innerHTML=tList.length?tList.map(it=>
+      '<div class="sk-mg-row"><div class="sk-mg-main">'+
+      '<div class="sk-mg-title">'+esc(it.slug)+' <span class="hint mono">'+num(it.files||0)+' 文件 · '+esc(String(it.size_kb||0))+' KB</span></div>'+
+      '<div class="sk-mg-sub">'+esc(it.description||"")+'</div></div>'+
+      '<button type="button" class="btn sm danger" onclick="removeSkillTarget(\''+esc(it.slug)+'\')">安全移除</button></div>'
+    ).join(""):'<div class="hint" style="padding:10px 12px">当前目标目录暂无已安装的 Skill。</div>';
+  }
+  const bks=skBackups||[];
+  const bc=$("#sk-bak-cnt");if(bc)bc.textContent=num(bks.length);
+  const bakEl=$("#sk-bak-list");
+  if(bakEl){
+    if(skBackups===null){
+      bakEl.innerHTML='<div class="hint" style="padding:10px 12px">正在加载 Skill 历史备份…</div>';
+    }else if(!bks.length){
+      bakEl.innerHTML='<div class="hint" style="padding:10px 12px">暂无备份记录（执行覆盖或安全移除时会自动备份至 vault/backups/）。</div>';
+    }else{
+      bakEl.innerHTML=bks.map(b=>{
+        const kindTxt=b.kind==="remove"?"移除前备份":(b.kind==="overwrite"?"覆盖前备份":"早期目录备份");
+        const act=b.restorable
+          ?'<button type="button" class="btn sm" onclick="rollbackSkillBackup(\''+esc(b.id)+'\')">恢复备份</button>'
+          :'<span class="pill muted">仅目录</span>';
+        return '<div class="sk-mg-row"><div class="sk-mg-main">'+
+          '<div class="sk-mg-title">'+esc(b.id)+' <span class="pill">'+esc(kindTxt)+'</span></div>'+
+          '<div class="sk-mg-sub">'+esc((b.target||"-")+" · "+num(b.count||0)+" 项 · "+String(b.created_at||"").slice(0,19))+'</div></div>'+
+          act+'</div>';
+      }).join("");
+    }
+  }
+}
+async function loadSkillBackups(){
+  try{
+    const d=await api("/skills/backups");
+    skBackups=(d&&d.backups)||[];
+  }catch(e){
+    skBackups=[];
+  }
+  renderSkillManage();
+}
+async function removeSkillTarget(slug){
+  const modeDesc=(skTarget==="antigravity"&&skAgyMode==="plugin")
+    ?("Antigravity 插件 ("+(($("#sk-plugin-name")&&$("#sk-plugin-name").value)||("migrated-from-"+skSource))+")")
+    :((skData&&skData.dest_root)||skTarget);
+  if(!await askConfirm("确认从 "+modeDesc+" 安全移除「"+slug+"」？\n\n移除前会自动完整备份到 vault/backups/，可在下方「历史备份」随时还原。","确认安全移除 Skill","备份并移除"))return;
+  const pname=(($("#sk-plugin-name")&&$("#sk-plugin-name").value)||"").trim();
+  try{
+    const r=await api("/skills/remove",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        target:skTarget,slugs:[slug],agy_mode:skAgyMode,plugin_name:pname,
+        apply:true,connected_only:true,
+      })});
+    toast("已移除 "+slug+(r.backup_id?("（备份 "+r.backup_id+"）"):""));
+    skBackups=null;
+    await loadSkills({refresh:true});
+    if(skManageOpen)await loadSkillBackups();
+  }catch(e){
+    toast("移除失败："+e.message,1);
+  }
+}
+async function rollbackSkillBackup(backupId){
+  if(!await askConfirm("确认从备份 "+backupId+" 恢复对应的 Skill 到原目标目录？","确认恢复 Skill 备份","确认恢复"))return;
+  try{
+    const r=await api("/skills/rollback",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({backup_id:backupId,apply:true})});
+    toast("已恢复 "+num(r.restored||0)+" 个 Skill（"+backupId+"）");
+    await loadSkills({refresh:true});
+    await loadSkillBackups();
+  }catch(e){
+    toast("恢复失败："+e.message,1);
+  }
 }
 

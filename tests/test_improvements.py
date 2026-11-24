@@ -10,6 +10,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -652,6 +653,117 @@ class TestProjectImprovements(unittest.TestCase):
                 srv.shutdown()
                 srv.server_close()
                 idx._close()
+
+    def test_http_guard_ipv6_security_headers_and_post_reject_close(self):
+        vault = self.tmp / "vault_sec"
+        (vault / "snapshots").mkdir(parents=True)
+        conn = cv.db(vault)
+        conn.executescript(cv.SCHEMA)
+        conn.commit()
+        conn.close()
+
+        srv, idx = cv.build_vault_server(vault, 0, token="sec-tok")
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            # 1) IPv6 [::1] Host 允许通过，响应包含 3 项安全头
+            c1 = HTTPConnection("127.0.0.1", port, timeout=5)
+            c1.putrequest("GET", "/healthz", skip_host=True)
+            c1.putheader("Host", f"[::1]:{port}")
+            c1.putheader("X-Vault-Token", "sec-tok")
+            c1.endheaders()
+            r1 = c1.getresponse()
+            r1.read()
+            self.assertEqual(r1.status, 200)
+            self.assertEqual(r1.getheader("X-Content-Type-Options"), "nosniff")
+            self.assertEqual(r1.getheader("X-Frame-Options"), "DENY")
+            self.assertEqual(r1.getheader("Referrer-Policy"), "no-referrer")
+            c1.close()
+
+            # 2) 未携带有效 token 的 POST 必须在读 body 前拒绝并带 Connection: close
+            c2 = HTTPConnection("127.0.0.1", port, timeout=5)
+            c2.request("POST", "/sync", body=b'{"debounce":true}',
+                       headers={"Content-Type": "application/json", "Host": f"127.0.0.1:{port}"})
+            r2 = c2.getresponse()
+            r2.read()
+            self.assertEqual(r2.status, 401)
+            self.assertEqual((r2.getheader("Connection") or "").lower(), "close")
+            c2.close()
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            idx._close()
+
+    def test_backup_vault_api_quiet_archives_configs_and_keeps_limit(self):
+        import io
+        import time
+        import zipfile
+        vault = self.tmp / "vault_bk"
+        (vault / "snapshots").mkdir(parents=True)
+        conn = cv.db(vault)
+        conn.executescript(cv.SCHEMA)
+        conn.commit()
+        conn.close()
+        for fname, txt in (
+            ("accounts.json", '{"accounts":[]}\n'),
+            ("migrations.jsonl", '{"dest":"x"}\n'),
+            ("pricing.json", '{"custom":{}}\n'),
+        ):
+            (vault / fname).write_text(txt, encoding="utf-8")
+
+        buf = io.StringIO()
+        with mock.patch("sys.stdout", buf):
+            for idx in range(3):
+                if idx:
+                    time.sleep(0.01)
+                res = cv.backup_vault_api(vault, keep=2)
+                self.assertTrue(res["ok"])
+        self.assertEqual(buf.getvalue(), "")
+        zips = sorted((vault / "backups").glob("cv-backup-*.zip"))
+        self.assertEqual(len(zips), 2)
+        with zipfile.ZipFile(zips[-1], "r") as zf:
+            names = set(zf.namelist())
+        self.assertIn("vault.db", names)
+        self.assertIn("accounts.json", names)
+        self.assertIn("migrations.jsonl", names)
+        self.assertIn("pricing.json", names)
+
+    def test_dashboard_and_toast_html_escaping_and_reexports(self):
+        from types import SimpleNamespace
+        import cv_ledger
+        import cv_ledger_collect
+        import cv_mcp
+        import cv_ops
+        import cv_sync
+
+        self.assertIs(cv.mcp_install_api, cv_mcp.mcp_install_api)
+        self.assertIs(cv.sync_vault, cv_sync.sync_vault)
+        self.assertIs(cv_ledger.sync_usage_events, cv_ledger_collect.sync_usage_events)
+
+        vault = self.tmp / "vault_xss"
+        (vault / "snapshots").mkdir(parents=True)
+        conn = cv.db(vault)
+        conn.executescript(cv.SCHEMA)
+        conn.execute(
+            "INSERT INTO probe_events(ts,profile,endpoint,status,http_code,latency_ms,models,missing_models)"
+            " VALUES('2026-11-24T00:00:00Z','<script>alert(1)</script>','http://x','err',500,10,'[]','<img src=x>')"
+        )
+        conn.commit()
+        conn.close()
+        out_html = self.tmp / "dash.html"
+        with mock.patch("cv_ops.webbrowser.open") as m_open, mock.patch("sys.stdout"):
+            cv_ops.cmd_dashboard(SimpleNamespace(vault=str(vault), out=str(out_html), open=True))
+        m_open.assert_called_once()
+        self.assertTrue(m_open.call_args[0][0].startswith("file:///"))
+        html_txt = out_html.read_text(encoding="utf-8")
+        self.assertNotIn("<script>alert(1)</script>", html_txt)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html_txt)
+
+        with mock.patch("cv_ops.subprocess.run") as m_run:
+            cv_ops.toast("T'&<x>", "M'&<y>")
+        ps_cmd = m_run.call_args[0][0][-1]
+        self.assertIn("T&#x27;&amp;&lt;x&gt;", ps_cmd)
+        self.assertIn("M&#x27;&amp;&lt;y&gt;", ps_cmd)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python: ["3.10", "3.12"]
+        include:
+          - os: ubuntu-latest
+            python: "3.9"
+          - os: macos-latest
+            python: "3.12"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -36,4 +41,9 @@ jobs:
           if [ "$RUNNER_OS" = "Linux" ]; then python -m playwright install --with-deps chromium; else python -m playwright install chromium; fi
           python tools/check_console_overflow.py
       - name: stdlib-only check (引擎零第三方依赖)
-        run: python -c "import sys; sys.path.insert(0, 'tools'); import cv, cv_ledger, mcp_server; print('engine imports OK, zero third-party deps')"
+        run: python -c "import sys; sys.path.insert(0, 'tools'); import cv, cv_core, cv_index, cv_memory, cv_ledger, cv_ledger_collect, cv_mcp, cv_sync, cv_semantic, cv_skills, cv_migrate, cv_ops, cv_antigravity, cv_dsh, cv_server, cv_ui, mcp_server, aml_adapter, antigravity_batch, cv_dense; print('engine imports OK, zero third-party deps')"
+      - name: package smoke test (pyproject 完整性与 UI 资源加载校验)
+        run: |
+          pip install --no-build-isolation --no-deps .
+          cv --version
+          python -c "import cv_ui; html = cv_ui.load_console_html(); assert len(html) > 1000, 'console html empty'; print('package smoke OK')"

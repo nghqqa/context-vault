@@ -614,3 +614,46 @@ def test_real_local_dsh_readonly_smoke():
     assert evs and sum(e["tokens_in"] for e in evs) > 0
     after_stat = (sample.stat().st_mtime_ns, sample.stat().st_size)
     assert after_stat == before_stat
+
+
+def test_write_dsh_session_node_dual_frame_roundtrip(tmp_path):
+    import shutil
+    if not shutil.which("node"):
+        pytest.skip("node not found")
+    try:
+        cv_dsh._node_zstd_compress_frames([b"probe\n"])
+    except RuntimeError:
+        pytest.skip("node binary lacks native node:zlib zstdCompressSync")
+    hdr, evs = _v4_sample()
+    dest = tmp_path / "sess.v4.jsonl.zstd"
+    cv_dsh.write_dsh_session(dest, hdr, evs, compression="zstd", backend="node")
+    raw = dest.read_bytes()
+    frames, torn = cv_dsh.scan_zstd_frames(raw)
+    assert torn is None and len(frames) == 2
+    assert all((raw[s + 4] & 0x04) == 0x04 for s, _ in frames)
+    decompressed = cv_dsh.decompress_zstd_frames(raw, backend="node").decode("utf-8")
+    assert len([ln for ln in decompressed.splitlines() if ln.strip()]) == 1 + len(evs)
+    rows = list(cv_dsh.iter_dsh_jsonl(dest))
+    assert rows[0]["type"] == "session"
+    assert rows[0]["id"] == hdr["id"]
+    assert len(rows) == 1 + len(evs)
+
+
+def test_doctor_and_mcp_clients_multiselect(isolated, capsys):
+    home, vault = isolated
+    (home / ".cursor").mkdir(parents=True, exist_ok=True)
+    (home / ".dsh").mkdir(parents=True, exist_ok=True)
+
+    cv.cmd_mcp(SimpleNamespace(vault=str(vault), mcp_cmd="install", clients="cursor,dsh", all=False, client="all"))
+    st_on = {c["id"]: c["installed"] for c in cv.mcp_status_api(vault, probe_cli=False)["clients"]}
+    assert st_on["cursor"] and st_on["dsh"]
+
+    cv.cmd_doctor(SimpleNamespace(vault=str(vault)))
+    doc_out = capsys.readouterr().out
+    assert "DSH Zstd 编解码" in doc_out
+    assert "MCP 接入摘要" in doc_out
+    assert "dsh=已接入" in doc_out
+
+    cv.cmd_mcp(SimpleNamespace(vault=str(vault), mcp_cmd="uninstall", clients="cursor,dsh", all=False, client=None))
+    st_off = {c["id"]: c["installed"] for c in cv.mcp_status_api(vault, probe_cli=False)["clients"]}
+    assert not st_off["cursor"] and not st_off["dsh"]

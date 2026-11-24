@@ -14,7 +14,9 @@ _FROZEN_CACHE: dict[str, str] = {}
 _CONSOLE_JS_PARTS = (
     "console_core.js",
     "console_overview.js",
+    "console_memory.js",
     "console_snapshots.js",
+    "console_reader.js",
     "console_migrate.js",
     "console_skills.js",
     "console_ops.js",

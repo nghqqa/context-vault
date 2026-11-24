@@ -1391,549 +1391,37 @@ CREATE TABLE IF NOT EXISTS sync_sources(
 
 SNAPSHOT_MIN_INTERVAL = int(os.environ.get("CV_SNAPSHOT_INTERVAL_MIN", "30")) * 60
 SNAPSHOT_IDLE_SEC = 600
-
-
-def _debounced(prev_synced_at, src_mtime: float) -> bool:
-    """托盘周期同步的版本限频: 源 10 分钟内仍有更新 (活跃) 且距上次入库不足 30 分钟 → 本轮不出
-    版本, 水位不推, 下轮再判; 源空闲后立即捕获最终态。托盘 2 分钟一轮, 长会话每条消息全量复制
-    一版曾致 4 天 +1603 版本 / 2.98GB。CV_SNAPSHOT_INTERVAL_MIN=0 关闭。"""
-    if not prev_synced_at or SNAPSHOT_MIN_INTERVAL <= 0:
-        return False
-    now = time.time()
-    if now - src_mtime >= SNAPSHOT_IDLE_SEC:
-        return False
-    try:
-        last = dt.datetime.fromisoformat(prev_synced_at).timestamp()
-    except (TypeError, ValueError):
-        return False
-    return now - last < SNAPSHOT_MIN_INTERVAL
-
-
-def _norm_path(p) -> str:
-    return os.path.normcase(os.path.abspath(str(p)))
-
-
-def load_migrations(vault: Path) -> dict:
-    """vault/migrations.jsonl: do_import --apply 登记的迁移副本 {规范化 dest → {source, baseline}}。"""
-    out = {}
-    p = vault / "migrations.jsonl"
-    if p.exists():
-        for line in p.read_text(encoding="utf-8").splitlines():
-            try:
-                e = json.loads(line)
-                out[e["dest"]] = e
-            except (ValueError, KeyError, TypeError):
-                continue
-    return out
-
-
-def scan_sources(extra_roots: list | None = None) -> list:
-    """扫描本机全部会话源 (只读)。返回 [Path, ...]。"""
-    import cv_dsh
-    roots = [("codex", CODEX_SESSIONS.glob("*/*/*/rollout-*.jsonl")),
-             ("claude-projects", (HOME / ".claude" / "projects").glob("*/*.jsonl")),
-             ("claude-transcripts", (HOME / ".claude" / "transcripts").glob("*.jsonl")),
-             ("dsh", cv_dsh.discover_dsh_session_files())]
-    for r in (extra_roots or []):
-        p = Path(r).expanduser()
-        roots.append((f"extra:{p.name}", p.rglob("*.jsonl")))
-        roots.append((f"extra-dsh:{p.name}", cv_dsh.discover_dsh_session_files(p)))
-    files = []
-    seen = set()
-    for _, it in roots:
-        for f in it:
-            try:
-                if f.is_file() and f.stat().st_size > 0:
-                    k = _norm_path(f)
-                    if k not in seen:
-                        seen.add(k)
-                        files.append(f)
-            except OSError:
-                continue
-    return files
-
-
-def sync_one(conn, vault: Path, path: Path, migrations=None, debounce=False) -> str:
-    """单文件入库: 新增/更新(带 lineage)/跳过。返回状态。
-    debounce: 托盘周期同步传 True — 活跃会话限频出版本 (见 _debounced); 手动 cv sync 立即捕获。"""
-    st = path.stat()
-    key = _norm_path(path)  # Windows 大小写失配曾让 export/sync 各写一行水位, 同文件双键 (二轮 ledger-1)
-    row = conn.execute("SELECT mtime, size, snapshot_id, synced_at FROM sync_sources WHERE path=?",
-                       (key,)).fetchone()
-    if row and abs(row["mtime"] - st.st_mtime) < 1 and row["size"] == st.st_size:
-        return "skip"
-    if debounce and row and row["snapshot_id"] and _debounced(row["synced_at"], st.st_mtime):
-        return "skip"
-    fmt = detect_format(first_jsonl(path), path)
-    exporters = {"codex-rollout": export_codex, "claude-transcript": export_claude,
-                 "claude-projects": export_claude_code, "dsh-jsonl": export_dsh}
-    exported = exporters[fmt](path, False)
-    envelope = build_envelope(exported)
-    if exported["stats"]["blocks_total"] == 0:
-        return "empty"  # 辅助文件/空会话不入库
-    m = (migrations or {}).get(_norm_path(path))
-    if m:  # --apply 迁移副本: 标注来源与首版用量基线 (lineage 不进内容哈希, 链上每版都带)
-        envelope["lineage"]["migrated_from"] = m.get("source")
-        if m.get("baseline"):
-            envelope["lineage"]["migration_baseline"] = m["baseline"]
-    sid = snapshot_id(envelope)
-    if row and row["snapshot_id"]:
-        if row["snapshot_id"] == sid:
-            # 内容寻址未变 (仅 mtime 抖动/追加导出器忽略的辅助行): 链不推进, 只推水位 —
-            # 先挂 parent 再算 sid 会得到 parent==id 自环, 叶子过滤把会话从账本清零
-            out = vault / "snapshots" / f"{sid}.json"
-            if not out.exists():  # 快照文件丢了 (如手删): 重新落盘, 无链可挂
-                atomic_write_text(out, json.dumps(envelope, ensure_ascii=False, indent=1))
-                register_snapshot(conn, envelope, sid, out)
-            conn.execute("INSERT OR REPLACE INTO sync_sources(path,mtime,size,snapshot_id,synced_at)"
-                         " VALUES(?,?,?,?,?)", (key, st.st_mtime, st.st_size, sid, now_iso()))
-            return "skip"
-        envelope["lineage"]["parent_snapshot"] = row["snapshot_id"]  # 同源演进 → 会话树
-    out = vault / "snapshots" / f"{sid}.json"
-    registered = conn.execute("SELECT 1 FROM snapshots WHERE id=?", (sid,)).fetchone()
-    if not out.exists():
-        atomic_write_text(out, json.dumps(envelope, ensure_ascii=False, indent=1))
-    if not registered:
-        # H1 同款守卫: 内容寻址 sid 已在库 (历史版本) 时不得用 parent=None 的 envelope
-        # 重注册 — 会抹掉链上 parent (托盘升级换键首轮曾把全库演进链抹断)
-        register_snapshot(conn, envelope, sid, out)
-    conn.execute("INSERT OR REPLACE INTO sync_sources(path,mtime,size,snapshot_id,synced_at)"
-                 " VALUES(?,?,?,?,?)", (key, st.st_mtime, st.st_size, sid, now_iso()))
-    return "update" if row else "new"
-
-
 ZCODE_DB = HOME / ".zcode" / "cli" / "db" / "db.sqlite"
 ZCODE_TASKS_DB = HOME / ".zcode" / "v2" / "tasks-index.sqlite"
 # model_usage 逐请求记录 (带 session_id); OpenAI 语义: input 已含 cache 读 (实证 0 行 cache_read>input)
 ZCODE_USAGE_SQL = ("SELECT COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),"
                    " COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cache_read_input_tokens),0),"
                    " COALESCE(SUM(cache_creation_input_tokens),0) FROM model_usage WHERE session_id=?")
-
-
-def _zcode_usage_stats(u) -> dict:
-    """ZCODE_USAGE_SQL 一行 → stats 字段 (total = 输入 + 输出; 输入已含缓存)。"""
-    return {"tokens_in": u[1], "tokens_out": u[2], "reasoning_tokens": u[3], "cache_read": u[4],
-            "cache_write": u[5], "total_tokens": u[1] + u[2], "usage_events": u[0]}
-
-
-def export_zcode_session(db_conn, srow) -> dict:
-    """Zcode 主转录库 (~/.zcode/cli/db/db.sqlite) 的单会话导出。
-    结构实测: message.data{role,modelId} 按 sequence; part.data{type}: text/reasoning/tool
-    (tool 自带 state.input/output 无需配对); synthetic part 过滤; signature 丢弃 (spec §3.2)。"""
-    blocks, stats = [], zero_stats()
-    sid = srow["id"]
-    capture = {"agent": "zcode", "source_format": "zcode-sqlite",
-               "provider": None, "model": None, "session_ref": sid,
-               "completeness": "full"}
-    if srow["directory"]:
-        capture["cwd"] = srow["directory"]
-    if srow["title"]:
-        capture["originator"] = str(srow["title"])[:80]
-    first_ts = None
-    for m in db_conn.execute("SELECT id, data, time_created FROM message WHERE session_id=?"
-                             " ORDER BY sequence", (sid,)):
-        try:
-            md = json.loads(m["data"])
-        except ValueError:
-            continue
-        role = md.get("role")
-        if role not in ("user", "assistant"):
-            continue
-        if not capture.get("model") and md.get("modelId"):
-            capture["model"] = md.get("modelId")
-        ts = dt.datetime.fromtimestamp(m["time_created"] / 1000,
-                                       dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z") \
-            if m["time_created"] else ""
-        first_ts = first_ts or ts
-        for p in db_conn.execute("SELECT data FROM part WHERE message_id=? ORDER BY sequence",
-                                 (m["id"],)):
-            try:
-                pd = json.loads(p["data"])
-            except ValueError:
-                continue
-            pt = pd.get("type")
-            if pt == "text" and not pd.get("synthetic"):
-                blocks.append({"type": "text", "role": role,
-                               "content": pd.get("text", "") or "", "ts": ts})
-            elif pt == "reasoning":
-                summary = pd.get("text", "") or ""
-                if summary:
-                    blocks.append({"type": "thinking", "summary": summary, "ts": ts})
-            elif pt == "tool":
-                state = pd.get("state") or {}
-                call_id = pd.get("callID")
-                name = pd.get("tool")
-                inp = state.get("input")
-                blocks.append({"type": "tool_call", "call_id": call_id, "name": name,
-                               "namespace": None, "arguments": inp, "ts": ts})
-                out = state.get("output")
-                if out is not None or state.get("status") == "error":
-                    # status=error 的工具调用 output 常为空, 错误信息在 state.error
-                    content, _ = clip(str(out if out is not None else state.get("error") or ""))
-                    blocks.append({"type": "tool_result", "call_id": call_id,
-                                   "content": content,
-                                   "is_error": state.get("status") == "error", "ts": ts})
-    stats["blocks_total"] = len(blocks)
-    try:  # 用量: 旧适配器从不读 model_usage, zcode 快照 stats 曾全 0 (账本低估 + 详情/预览显示 0)
-        u = db_conn.execute(ZCODE_USAGE_SQL, (sid,)).fetchone()
-    except sqlite3.Error:
-        u = None  # 老版 zcode 无 model_usage 表: 源无用量数据, 诚实留 0
-    if u and u[0]:
-        stats.update(_zcode_usage_stats(u))
-    return {"capture": capture, "conversation": blocks, "stats": stats}
-
-
-def backfill_zcode_usage(conn, force: bool = False) -> int:
-    """zcode 历史快照的用量回填 (索引层, 零磁盘代价)。旧适配器未读 model_usage, 历史版本
-    stats 全 0; 快照文件不可变不重写 — model_usage 逐请求带 session_id 与完成时间, 按每个版本
-    的 created_at 精确算出"截至当时"的累计用量写入索引列。每 vault 一次 (vault_meta 标记)。"""
-    conn.executescript(SCHEMA)
-    if not force and conn.execute("SELECT 1 FROM vault_meta WHERE key='zcode_usage_backfill_v1'").fetchone():
-        return 0
-    n = 0
-    if ZCODE_DB.exists():
-        zdb = sqlite3.connect(f"file:{ZCODE_DB}?mode=ro", uri=True)
-        try:
-            rows = conn.execute("SELECT id, session_ref, created_at FROM snapshots"
-                                " WHERE source_format='zcode-sqlite' AND COALESCE(usage_events,0)=0").fetchall()
-            for r in rows:
-                try:
-                    cutoff = int(dt.datetime.fromisoformat(r["created_at"]).timestamp() * 1000)
-                    u = zdb.execute(ZCODE_USAGE_SQL + " AND COALESCE(completed_at, started_at) <= ?",
-                                    (r["session_ref"], cutoff)).fetchone()
-                except (TypeError, ValueError, sqlite3.Error):
-                    continue
-                if u and u[0]:
-                    st = _zcode_usage_stats(u)
-                    conn.execute("UPDATE snapshots SET tokens_in=?, tokens_out=?, reasoning_tokens=?,"
-                                 " cache_read=?, cache_write=?, total_tokens=?, usage_events=? WHERE id=?",
-                                 (st["tokens_in"], st["tokens_out"], st["reasoning_tokens"], st["cache_read"],
-                                  st["cache_write"], st["total_tokens"], st["usage_events"], r["id"]))
-                    n += 1
-        except sqlite3.Error:
-            pass  # 无 model_usage 表: 源无数据, 照常打标记
-        finally:
-            zdb.close()
-    conn.execute("INSERT OR REPLACE INTO vault_meta(key, value) VALUES('zcode_usage_backfill_v1', ?)", (now_iso(),))
-    conn.commit()
-    return n
-
-
-def _sync_zcode_db(conn, vault: Path, debounce=False) -> tuple:
-    """zcode 主库增量同步: session.time_updated 水位, 键 zcode:<session_id>。"""
-    if not ZCODE_DB.exists():
-        return (0, 0, 0)
-    import sqlite3 as _s
-    db_conn = _s.connect(f"file:{ZCODE_DB}?mode=ro", uri=True)
-    db_conn.row_factory = _s.Row
-    n_new = n_upd = 0
-    for srow in db_conn.execute("SELECT * FROM session WHERE time_deleted IS NULL"
-                                " ORDER BY time_updated"):
-        key = f"zcode:{srow['id']}"
-        mtime = (srow["time_updated"] or 0) / 1000
-        prev = conn.execute("SELECT mtime, snapshot_id, synced_at FROM sync_sources WHERE path=?",
-                            (key,)).fetchone()
-        if prev and mtime <= prev["mtime"]:
-            continue  # 水位必须严格前进 (旧的 <1s 容差会吞掉秒内新消息的增量)
-        if debounce and prev and prev["snapshot_id"] and _debounced(prev["synced_at"], mtime):
-            continue  # 活跃会话限频: 30 分钟最多一版, 空闲后捕获最终态
-        try:
-            exported = export_zcode_session(db_conn, srow)
-        except Exception:
-            continue
-        if exported["stats"]["blocks_total"] == 0:
-            continue
-        envelope = build_envelope(exported)
-        sid = snapshot_id(envelope)
-        if prev and prev["snapshot_id"]:
-            if prev["snapshot_id"] == sid:
-                # 内容未变仅 time_updated 前进: 只推水位, 不挂 parent (自环会把会话从账本清零)
-                conn.execute("INSERT OR REPLACE INTO sync_sources(path,mtime,size,snapshot_id,synced_at)"
-                             " VALUES(?,?,?,?,?)", (key, mtime, 0, sid, now_iso()))
-                continue
-            envelope["lineage"]["parent_snapshot"] = prev["snapshot_id"]
-        out = vault / "snapshots" / f"{sid}.json"
-        if not out.exists():
-            atomic_write_text(out, json.dumps(envelope, ensure_ascii=False, indent=1))
-        register_snapshot(conn, envelope, sid, out)
-        conn.execute("INSERT OR REPLACE INTO sync_sources(path,mtime,size,snapshot_id,synced_at)"
-                     " VALUES(?,?,?,?,?)", (key, mtime, 0, sid, now_iso()))
-        n_upd += 1 if prev else 0
-        n_new += 0 if prev else 1
-    db_conn.close()
-    return (n_new, n_upd, 0)
-
-
 ANTIGRAVITY_CONV_DIR = HOME / ".gemini" / "antigravity" / "conversations"
 
-
-def _sync_antigravity_dbs(conn, vault: Path, debounce=False) -> tuple:
-    """Antigravity 本地会话回灌: ~/.gemini/antigravity/conversations/*.db → 快照。
-    优先走零依赖原生 SQLite+Protobuf 直读 (支持 WAL 实时检测、精准 cwd、不因空/二进制工具输出失败);
-    老格式原生读空时再兜底试 smigrate。自导入会话 (migrations.jsonl dest 命中) 跳过防回环。"""
-    if not ANTIGRAVITY_CONV_DIR.exists():
-        return (0, 0, 0)
-    exe = find_smigrate()
-    imported: set[str] = set()
-    for v in load_migrations(vault).values():
-        stem = Path(v.get("dest", "")).stem
-        if stem:
-            imported.add(stem.lower())
-    outbox = vault / "outbox"
-    outbox.mkdir(parents=True, exist_ok=True)
-    n_new = n_upd = 0
-    for dbp in sorted(ANTIGRAVITY_CONV_DIR.glob("*.db")):
-        cascade = dbp.stem.lower()
-        if cascade in imported:
-            continue
-        key = f"antigravity:{cascade}"
-        try:
-            st = dbp.stat()
-            wal = dbp.parent / (dbp.name + "-wal")
-            wst = wal.stat() if wal.exists() else None
-            eff_mtime = max(st.st_mtime, wst.st_mtime if wst else 0.0)
-            eff_size = st.st_size + (wst.st_size if wst else 0)
-        except OSError:
-            continue
-        prev = conn.execute("SELECT mtime, size, snapshot_id, synced_at FROM sync_sources WHERE path=?",
-                            (key,)).fetchone()
-        if prev and abs((prev["mtime"] or 0) - eff_mtime) < 1 and (prev["size"] or 0) == eff_size:
-            continue
-        if debounce and prev and prev["snapshot_id"] and _debounced(prev["synced_at"], eff_mtime):
-            continue
-        exported = None
-        try:
-            exported = export_antigravity_db(dbp, False)
-        except Exception:
-            exported = None
-        if (not exported or exported["stats"]["blocks_total"] == 0) and exe:
-            tmp = outbox / f"agy-src-{dbp.stem}.jsonl"
-            try:
-                r = subprocess.run([exe, "convert", str(dbp), "--format", "antigravity",
-                                    "--to", "claude", "--output", str(tmp)],
-                                   capture_output=True, text=True, timeout=120,
-                                   creationflags=NO_WINDOW)
-                if r.returncode == 0 and tmp.exists():
-                    exported = export_claude_code(tmp, False)
-            except Exception:
-                pass
-            finally:
-                tmp.unlink(missing_ok=True)
-        if not exported or exported["stats"]["blocks_total"] == 0:
-            # 记录空/不可解析水位, 避免每轮 2 分钟重复撞墙空耗 CPU
-            conn.execute("INSERT OR REPLACE INTO sync_sources(path,mtime,size,snapshot_id,synced_at)"
-                         " VALUES(?,?,?,?,?)",
-                         (key, eff_mtime, eff_size, prev["snapshot_id"] if prev else "", now_iso()))
-            continue
-        exported["capture"]["agent"] = "antigravity"
-        exported["capture"]["source_format"] = "antigravity-db"
-        envelope = build_envelope(exported)
-        if exported.get("created_at"):
-            envelope["created_at"] = exported["created_at"]
-        sid = snapshot_id(envelope)
-        if prev and prev["snapshot_id"]:
-            if prev["snapshot_id"] == sid:
-                conn.execute("INSERT OR REPLACE INTO sync_sources"
-                             "(path,mtime,size,snapshot_id,synced_at) VALUES(?,?,?,?,?)",
-                             (key, eff_mtime, eff_size, sid, now_iso()))
-                continue
-            envelope["lineage"]["parent_snapshot"] = prev["snapshot_id"]
-        out = vault / "snapshots" / f"{sid}.json"
-        if not out.exists():
-            atomic_write_text(out, json.dumps(envelope, ensure_ascii=False, indent=1))
-        register_snapshot(conn, envelope, sid, out)
-        conn.execute("INSERT OR REPLACE INTO sync_sources(path,mtime,size,snapshot_id,synced_at)"
-                     " VALUES(?,?,?,?,?)", (key, eff_mtime, eff_size, sid, now_iso()))
-        n_upd += 1 if prev and prev["snapshot_id"] else 0
-        n_new += 0 if (prev and prev["snapshot_id"]) else 1
-    return (n_new, n_upd, 0)
-
-
-def sync_vault(vault: Path, root: Path | None = None, debounce: bool = False, quiet: bool = False) -> dict:
-    """增量扫描本地多工具会话源并写入 vault（CLI 与 HTTP /sync 共用）。"""
-    (vault / "snapshots").mkdir(parents=True, exist_ok=True)
-    conn = db(vault)
-    warnings: list[str] = []
-    t0 = time.time()
-    try:
-        conn.executescript(SCHEMA + SYNC_TABLE)
-        n_lin = backfill_lineage(conn)       # 每 vault 一次: 历史演进链索引回填
-        n_zu = backfill_zcode_usage(conn)    # 每 vault 一次: zcode 历史快照用量回填
-        if not conn.execute("SELECT 1 FROM vault_meta WHERE key='sync_keys_norm_v1'").fetchone():
-            # 水位键规范化迁移: _norm_path 引入前 sync_sources 存在原始大小写键, 与新键失配曾让
-            # 升级首轮把全部源当新会话重导出 (链被 parent=None envelope 抹断, 2026-11-08 实发)
-            rows = conn.execute("SELECT path, mtime, size, snapshot_id, synced_at FROM sync_sources").fetchall()
-            seen = {}
-            for r in rows:
-                k = _norm_path(r["path"])
-                old = seen.get(k)
-                if old is None or (r["mtime"] or 0) > (old["mtime"] or 0):
-                    seen[k] = r
-            conn.execute("DELETE FROM sync_sources")
-            for r in seen.values():
-                conn.execute("INSERT OR REPLACE INTO sync_sources VALUES(?,?,?,?,?)",
-                             (_norm_path(r["path"]), r["mtime"], r["size"], r["snapshot_id"], r["synced_at"]))
-            conn.execute("INSERT OR REPLACE INTO vault_meta(key, value) VALUES('sync_keys_norm_v1', ?)", (now_iso(),))
-            conn.commit()
-        if (n_lin or n_zu) and not quiet:
-            print(f"  一次性修复: lineage 回填 {n_lin} 行 · zcode 用量回填 {n_zu} 行")
-        migrations = load_migrations(vault)
-        files = scan_sources(root)
-        n_new = n_upd = n_skip = n_empty = 0
-        for f in sorted(files):
-            try:
-                r = sync_one(conn, vault, f, migrations, debounce)
-            except (SystemExit, Exception) as e:
-                msg = f"跳过 {f.name}: {str(e)[:80]}"
-                warnings.append(msg)
-                if not quiet:
-                    print(f"  ! {msg}")
-                n_skip += 1
-                continue
-            if r == "new":
-                n_new += 1
-            elif r == "update":
-                n_upd += 1
-            elif r == "empty":
-                n_empty += 1
-            else:
-                n_skip += 1
-        try:
-            z_new, z_upd, _ = _sync_zcode_db(conn, vault, debounce)
-            n_new += z_new
-            n_upd += z_upd
-        except Exception as e:
-            msg = f"zcode 库同步跳过: {str(e)[:80]}"
-            warnings.append(msg)
-            if not quiet:
-                print(f"  ! {msg}")
-        try:
-            a_new, a_upd, _ = _sync_antigravity_dbs(conn, vault, debounce)
-            n_new += a_new
-            n_upd += a_upd
-        except Exception as e:
-            msg = f"antigravity 会话回灌跳过: {str(e)[:80]}"
-            warnings.append(msg)
-            if not quiet:
-                print(f"  ! {msg}")
-        conn.commit()
-        total = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
-    finally:
-        conn.close()
-    return {
-        "new": n_new,
-        "updated": n_upd,
-        "skipped": n_skip,
-        "empty": n_empty,
-        "total": total,
-        "elapsed": round(time.time() - t0, 2),
-        "lineage_backfill": n_lin,
-        "zcode_usage_backfill": n_zu,
-        "warnings": warnings,
-    }
-
-
-def cmd_sync(args):
-    res = sync_vault(
-        vault_dir(args),
-        root=args.root,
-        debounce=bool(getattr(args, "debounce", False)),
-        quiet=False,
-    )
-    print(f"sync 完成: 新增 {res['new']} · 更新 {res['updated']} · 跳过 {res['skipped']}(未变/异常)"
-          f" · 空会话 {res['empty']} | vault 总快照 {res['total']} | 耗时 {res['elapsed']:.1f}s")
+# ---- 已拆解至 tools/cv_sync.py (全量 re-export 保持向后兼容与测试 monkeypatch) ----
+from cv_sync import (  # noqa: F401,E402
+    _debounced,
+    _norm_path,
+    _sync_antigravity_dbs,
+    _sync_zcode_db,
+    _zcode_usage_stats,
+    backfill_zcode_usage,
+    cmd_sync,
+    export_zcode_session,
+    load_migrations,
+    scan_sources,
+    sync_one,
+    sync_vault,
+)
 
 
 def cmd_prune(args):
-    """中间版本 GC: 每会话每天保留最后一版 + 每会话最新版本 (叶子), 保留集按时间重链。
-    默认 dry-run 只报告; --apply 先做一次 vault 备份再执行。
-    恒保留: 叶子 (账本/详情口径)、fork 实体 (用户资产)、源已消失会话的整链 (vault 是唯一副本)。"""
-    from types import SimpleNamespace
+    """中间版本 GC CLI 包装。"""
     vault = vault_dir(args)
-    conn = db(vault)
-    conn.executescript(SCHEMA + SYNC_TABLE)  # sync_sources: 源存活判定要用
-    rows = conn.execute("SELECT id, agent, session_ref, created_at, path, parent_snapshot, fork_of"
-                        " FROM snapshots").fetchall()
-    parents = {r["parent_snapshot"] for r in rows if r["parent_snapshot"]}
-    # 源存活判定 (会话级): 文件类看 sync_sources 里登记的源路径; zcode 看 session 是否还在主库
-    zalive = None
-    if ZCODE_DB.exists():
-        z = sqlite3.connect(f"file:{ZCODE_DB}?mode=ro", uri=True)
-        zalive = {x[0] for x in z.execute("SELECT id FROM session WHERE time_deleted IS NULL")}
-        z.close()
-    srcmap = {r[0]: r[1] for r in conn.execute("SELECT snapshot_id, path FROM sync_sources")}
-    sess_rows = {}
-    for r in rows:
-        sess_rows.setdefault((r["agent"], r["session_ref"]), []).append(r)
-    sess_alive = {}
-    for key, lst in sess_rows.items():
-        alive = False
-        for r in lst:
-            if key[0] == "zcode":
-                alive = zalive is not None and r["session_ref"] in zalive
-            else:
-                sp = srcmap.get(r["id"])
-                alive = bool(sp) and Path(sp).exists()
-            if alive:
-                break
-        sess_alive[key] = alive
-    dead_sessions = {k[1] for k, alive in sess_alive.items() if not alive}
-    keep = set()
-    for r in rows:
-        if r["id"] not in parents:
-            keep.add(r["id"])                                    # 叶子恒留 (账本口径)
-        if r["fork_of"] or r["session_ref"] in dead_sessions:
-            keep.add(r["id"])                                    # fork / 唯一副本: 整链保留
-    day_last = {}
-    for r in rows:
-        k = (r["agent"], r["session_ref"], (r["created_at"] or "")[:10])
-        if k not in day_last or (r["created_at"] or "") > (day_last[k]["created_at"] or ""):
-            day_last[k] = r
-    for r in day_last.values():
-        keep.add(r["id"])                                        # 每会话每天最后一版 (按天记录)
-    drop = [r for r in rows if r["id"] not in keep]
-    reclaim = sum((os.path.getsize(r["path"]) if r["path"] and os.path.exists(r["path"]) else 0)
-                  for r in drop)
-    print(f"保留 {len(rows) - len(drop)} / {len(rows)} 版 (叶子 {sum(1 for r in rows if r['id'] in keep and r['id'] not in parents)} · "
-          f"每日记录 {len(day_last)} · fork/孤本整链 {sum(1 for r in rows if r['fork_of'] or r['session_ref'] in dead_sessions)}) · "
-          f"回收 {len(drop)} 版 / {reclaim/1e6:.0f} MB")
-    if not drop:
-        return
-    if not args.apply:
-        print("dry-run — 加 --apply 执行 (执行前自动做一次 vault 备份)")
-        return
-    bargs = SimpleNamespace(vault=str(vault), out=None, keep=10)
-    cmd_backup(bargs)                                            # 删前完整备份 (快照+账本 zip)
-    # 保留集按会话重链: 每链一个叶子 (账本 sessions 口径不因 prune 膨胀); 索引层操作, 文件不动
-    kept = {}
-    for r in rows:
-        if r["id"] in keep:
-            kept.setdefault((r["agent"], r["session_ref"]), []).append(r)
-    for lst in kept.values():
-        lst.sort(key=lambda r: (r["created_at"] or "", r["id"]))
-        prev = None
-        for r in lst:
-            if r["parent_snapshot"] != prev:
-                conn.execute("UPDATE snapshots SET parent_snapshot=? WHERE id=?", (prev, r["id"]))
-            prev = r["id"]
-    removed = 0
-    for r in drop:
-        try:
-            os.unlink(r["path"])  # 内容寻址文件; 索引层由下一次 rebuild 全量重建自然剔除
-        except OSError:
-            continue  # Windows 共享冲突 (并发读者持句柄): 盘库同进退 — 留行下次 prune 再试, 不产生孤儿
-        conn.execute("DELETE FROM snapshots WHERE id=?", (r["id"],))
-        removed += 1
-    conn.execute("INSERT INTO probe_events(ts,profile,endpoint,status,http_code,latency_ms,models,missing_models)"
-                 " VALUES(?,?,?,?,?,?,?,?)",
-                 (now_iso(), "vault", "gc", "prune", None, None,
-                  json.dumps({"dropped": removed, "reclaimed_mb": round(reclaim / 1e6, 1),
-                              "kept": len(rows) - len(drop),
-                              "backup": "vault/backups 最新一份"}, ensure_ascii=False), None))
-    conn.commit()
-    print(f"已回收 {removed} 版 / {reclaim/1e6:.0f} MB"
-          + (f" ({len(drop) - removed} 版因文件被占用跳过, 下次 prune 再试)" if removed != len(drop) else "")
-          + " (GC 事件已写入审计时间线)")
+    res = prune_snapshots_api(vault, apply=bool(getattr(args, "apply", False)))
+    for ln in res["logs"]:
+        print(ln)
 
 
 def storm_relink(conn) -> int:
@@ -2331,551 +1819,196 @@ def cmd_audit(args):
             print(f"    … 其余 {len(day['events']) - 8} 条 (cv audit --days 更多)")
 
 
-# ------------------------------------------------- mcp install: 一键接入客户端
-
-def _mcp_cmd_parts(vault: Path) -> tuple:
-    if getattr(sys, "frozen", False):
-        return str(Path(sys.executable).resolve()), ["--mcp", "--vault", str(vault.resolve())]
-    server = (Path(__file__).resolve().parent / "mcp_server.py")
-    py = "python"
-    return py, [str(server), "--vault", str(vault.resolve())]
-
-
-def _has_local_bin_cmd(home: Path, names: tuple[str, ...]) -> str | None:
-    local_bin = home / ".local" / "bin"
-    if not local_bin.is_dir():
-        return None
-    exts = ("", ".exe", ".cmd", ".ps1", ".bat") if sys.platform.startswith("win") else ("",)
-    for name in names:
-        for ext in exts:
-            cand = local_bin / f"{name}{ext}"
-            if cand.is_file():
-                return str(cand)
-    return None
-
-
-def _is_real_home_dir() -> bool:
-    try:
-        return Path(HOME).resolve() == Path.home().resolve()
-    except OSError:
-        return str(HOME) == str(Path.home())
-
-
-def _detect_mcp_client_app(client_id: str) -> bool:
-    """探测客户端主程序/CLI 是否真实存在于本机, 避免将卸载残留配置目录误判为已安装应用。"""
-    home = Path(HOME)
-    real_home = _is_real_home_dir()
-
-    def _has_cli(names: tuple[str, ...]) -> bool:
-        if _has_local_bin_cmd(home, names):
-            return True
-        return bool(real_home and any(shutil.which(n) for n in names))
-
-    pf_dirs = [Path(os.environ[k]) for k in ("ProgramFiles", "ProgramFiles(x86)") if real_home and os.environ.get(k)]
-
-    if client_id == "claude":
-        return _has_cli(("claude",))
-    if client_id == "codex":
-        if _has_cli(("codex",)):
-            return True
-        for ext_dir in (home / ".vscode" / "extensions", home / ".vscode-insiders" / "extensions"):
-            if ext_dir.is_dir() and any(ext_dir.glob("openai.chatgpt-*")):
-                return True
-        return False
-    if client_id == "cursor":
-        if _has_cli(("cursor",)):
-            return True
-        cands = [
-            home / "AppData" / "Local" / "Programs" / "cursor" / "Cursor.exe",
-            home / "Applications" / "Cursor.app",
-        ]
-        if real_home:
-            cands.extend(d / "cursor" / "Cursor.exe" for d in pf_dirs)
-            cands.extend((Path("/Applications/Cursor.app"), Path("/usr/share/cursor"), Path("/opt/cursor")))
-        return any(p.exists() for p in cands)
-    if client_id == "antigravity":
-        if _has_cli(("antigravity", "agy")):
-            return True
-        cands = [
-            home / "AppData" / "Local" / "Programs" / "Antigravity" / "Antigravity.exe",
-            home / "Applications" / "Antigravity.app",
-        ]
-        if real_home:
-            cands.extend(d / "Antigravity" / "Antigravity.exe" for d in pf_dirs)
-            cands.extend((Path("/Applications/Antigravity.app"), Path("/usr/share/antigravity"), Path("/opt/antigravity")))
-        return any(p.exists() for p in cands)
-    if client_id == "dsh":
-        if _has_cli(("dsh",)):
-            return True
-        cands = [
-            home / "AppData" / "Local" / "Programs" / "DeepSeek Harness" / "DeepSeek Harness.exe",
-            home / "Applications" / "DeepSeek Harness.app",
-        ]
-        if real_home:
-            cands.extend(d / "DeepSeek Harness" / "DeepSeek Harness.exe" for d in pf_dirs)
-            cands.extend((Path("/Applications/DeepSeek Harness.app"), Path("/usr/share/deepseek-harness"),
-                          Path("/opt/deepseek-harness")))
-        return any(p.exists() for p in cands)
-    return False
-
-
-def _claude_exe() -> str | None:
-    local_cmd = _has_local_bin_cmd(Path(HOME), ("claude",))
-    if local_cmd:
-        return local_cmd
-    if _is_real_home_dir():
-        return shutil.which("claude")  # npm .cmd shim 需 which 解析全路径
-    return None
-
-
-def _install_mcp_claude(vault: Path) -> str:
-    exe = _claude_exe()
-    if not exe:
-        return "未找到 claude CLI (跳过)"
-    r = subprocess.run([exe, "mcp", "list"], capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
-    if "context-vault" in (r.stdout or ""):
-        return "已安装 (跳过)"
-    py, args = _mcp_cmd_parts(vault)
-    r = subprocess.run([exe, "mcp", "add", "context-vault", "-s", "user", "--", py] + args,
-                       capture_output=True, text=True, encoding="utf-8", errors="replace",
-                       creationflags=NO_WINDOW)
-    return "已写入 ~/.claude.json (user scope)" if r.returncode == 0 else f"失败: {(r.stderr or r.stdout)[:120]}"
-
-
-def _install_mcp_codex(vault: Path) -> str:
-    cfg = HOME / ".codex" / "config.toml"
-    if not cfg.parent.exists():
-        if _detect_mcp_client_app("codex"):
-            cfg.parent.mkdir(parents=True, exist_ok=True)
-        else:
-            return "未找到 ~/.codex (codex 未安装)"
-    text = cfg.read_text(encoding="utf-8", errors="replace") if cfg.exists() else ""
-    if "context-vault" in text:
-        return "已安装 (跳过)"
-    had_cfg = cfg.exists()
-    if had_cfg:
-        cfg.with_suffix(".toml.bak-cv").write_text(text, encoding="utf-8")  # 备份
-    py, args = _mcp_cmd_parts(vault)
-    sep = "" if not text else (("\n" if not text.endswith("\n") else "") + ("\n" if text.strip() else ""))
-    toml = (f"{sep}[mcp_servers.context-vault]\n"
-            f'command = {json.dumps(str(py), ensure_ascii=False)}\n'
-            "args = [" + ", ".join(json.dumps(str(a), ensure_ascii=False) for a in args) + "]\n")
-    atomic_write_text(cfg, text + toml)
-    return "已追加到 ~/.codex/config.toml (备份 .bak-cv)" if had_cfg else "已写入 ~/.codex/config.toml"
-
-
-def _install_mcp_cursor(vault: Path) -> str:
-    cfg = HOME / ".cursor" / "mcp.json"
-    if not cfg.parent.exists():
-        if _detect_mcp_client_app("cursor"):
-            cfg.parent.mkdir(parents=True, exist_ok=True)
-        else:
-            return "未找到 ~/.cursor (cursor 未安装)"
-    raw = cfg.read_text(encoding="utf-8", errors="replace").strip() if cfg.exists() else ""
-    data = json.loads(raw) if raw else {}
-    if raw:
-        cfg.with_suffix(".json.bak-cv").write_text(json.dumps(data, indent=2), encoding="utf-8")
-    servers = data.setdefault("mcpServers", {})
-    if "context-vault" in servers:
-        return "已安装 (跳过)"
-    py, args = _mcp_cmd_parts(vault)
-    servers["context-vault"] = {"command": py, "args": args}
-    atomic_write_text(cfg, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-    return "已写入 ~/.cursor/mcp.json"
-
-
-def _install_mcp_antigravity(vault: Path) -> str:
-    gemini_dir = HOME / ".gemini"
-    if not gemini_dir.exists():
-        if _detect_mcp_client_app("antigravity"):
-            gemini_dir.mkdir(parents=True, exist_ok=True)
-        else:
-            return "未找到 ~/.gemini (antigravity 未安装)"
-    cfg = gemini_dir / "config" / "mcp_config.json"
-    cfg.parent.mkdir(parents=True, exist_ok=True)
-    data = {}
-    raw = cfg.read_text(encoding="utf-8").strip() if cfg.exists() else ""
-    if raw:
-        data = json.loads(raw)
-        cfg.with_suffix(".json.bak-cv").write_text(json.dumps(data, indent=2), encoding="utf-8")
-    servers = data.setdefault("mcpServers", {})
-    if "context-vault" in servers:
-        return "已安装 (跳过)"
-    py, args = _mcp_cmd_parts(vault)
-    servers["context-vault"] = {"command": py, "args": args}
-    atomic_write_text(cfg, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-    return "已写入 ~/.gemini/config/mcp_config.json"
-
-
-def _uninstall_mcp_json_file(cfg: Path) -> bool:
-    """安全移除 JSON `mcpServers['context-vault']` 并保留其余配置与 `.json.bak-cv` 备份。"""
-    if not cfg.is_file():
-        return False
-    raw = cfg.read_text(encoding="utf-8", errors="replace")
-    if "context-vault" not in raw or not raw.strip():
-        return False
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return False
-    servers = data.get("mcpServers") if isinstance(data, dict) else None
-    if not isinstance(servers, dict) or "context-vault" not in servers:
-        return False
-    cfg.with_suffix(".json.bak-cv").write_text(raw, encoding="utf-8")
-    servers.pop("context-vault", None)
-    atomic_write_text(cfg, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-    return True
-
-
-def _uninstall_mcp_claude(vault: Path) -> str:
-    cli_removed = False
-    exe = _claude_exe()
-    if exe:
-        try:
-            r = subprocess.run([exe, "mcp", "remove", "context-vault", "-s", "user"],
-                               capture_output=True, text=True, encoding="utf-8", errors="replace",
-                               timeout=10, creationflags=NO_WINDOW)
-            cli_removed = (r.returncode == 0)
-        except Exception:
-            pass
-    if _uninstall_mcp_json_file(HOME / ".claude.json"):
-        return "已从 ~/.claude.json 移除 context-vault (备份 .json.bak-cv)"
-    if cli_removed:
-        return "已通过 claude CLI 移除 context-vault"
-    return "未安装 (无需移除)"
-
-
-def _parse_toml_table_header(line: str) -> list[str] | None:
-    """若为 TOML 表头 (`[...]` 或 `[[...]]`) 返回点分段落名, 否则返回 None。"""
-    s = line.strip()
-    if not s.startswith("["):
-        return None
-    if s.startswith("[["):
-        end = s.find("]]")
-        if end < 0:
-            return None
-        rest = s[end + 2:].strip()
-        if rest and not rest.startswith("#"):
-            return None
-        inner = s[2:end]
-    else:
-        in_dq = False
-        in_sq = False
-        esc = False
-        end = -1
-        for i, ch in enumerate(s[1:], 1):
-            if esc:
-                esc = False
-                continue
-            if in_dq:
-                if ch == "\\":
-                    esc = True
-                elif ch == '"':
-                    in_dq = False
-            elif in_sq:
-                if ch == "'":
-                    in_sq = False
-            else:
-                if ch == '"':
-                    in_dq = True
-                elif ch == "'":
-                    in_sq = True
-                elif ch == "]":
-                    end = i
-                    break
-        if end < 0:
-            return None
-        rest = s[end + 1:].strip()
-        if rest and not rest.startswith("#"):
-            return None
-        inner = s[1:end]
-    parts: list[str] = []
-    buf: list[str] = []
-    in_dq = False
-    in_sq = False
-    esc = False
-    for ch in inner:
-        if esc:
-            buf.append(ch)
-            esc = False
-            continue
-        if in_dq:
-            if ch == "\\":
-                esc = True
-            elif ch == '"':
-                in_dq = False
-            else:
-                buf.append(ch)
-        elif in_sq:
-            if ch == "'":
-                in_sq = False
-            else:
-                buf.append(ch)
-        else:
-            if ch == '"':
-                in_dq = True
-            elif ch == "'":
-                in_sq = True
-            elif ch == ".":
-                parts.append("".join(buf).strip())
-                buf.clear()
-            else:
-                buf.append(ch)
-    parts.append("".join(buf).strip())
-    return parts
-
-
-def _uninstall_mcp_codex(vault: Path) -> str:
-    cfg = HOME / ".codex" / "config.toml"
-    if not cfg.is_file():
-        return "未安装 (无需移除)"
-    raw = cfg.read_text(encoding="utf-8", errors="replace")
-    if "context-vault" not in raw:
-        return "未安装 (无需移除)"
-    norm = raw.replace("\r\n", "\n").replace("\r", "\n")
-    out: list[str] = []
-    skipping = False
-    removed = False
-    for ln in norm.splitlines():
-        parts = _parse_toml_table_header(ln)
-        if parts is not None:
-            if len(parts) >= 2 and parts[0] == "mcp_servers" and parts[1] == "context-vault":
-                skipping = True
-                removed = True
-                continue
-            skipping = False
-        if skipping:
-            continue
-        out.append(ln)
-    if not removed:
-        return "未安装 (无需移除)"
-    cfg.with_suffix(".toml.bak-cv").write_text(raw, encoding="utf-8")
-    body = re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip("\n")
-    atomic_write_text(cfg, (body + "\n") if body else "")
-    return "已从 ~/.codex/config.toml 移除 context-vault (备份 .toml.bak-cv)"
-
-
-def _uninstall_mcp_cursor(vault: Path) -> str:
-    if _uninstall_mcp_json_file(HOME / ".cursor" / "mcp.json"):
-        return "已从 ~/.cursor/mcp.json 移除 context-vault (备份 .json.bak-cv)"
-    return "未安装 (无需移除)"
-
-
-def _uninstall_mcp_antigravity(vault: Path) -> str:
-    removed = []
-    for cfg, lbl in (
-        (HOME / ".gemini" / "config" / "mcp_config.json", "~/.gemini/config/mcp_config.json"),
-        (HOME / ".gemini" / "antigravity" / "mcp_config.json", "~/.gemini/antigravity/mcp_config.json"),
-    ):
-        if _uninstall_mcp_json_file(cfg):
-            removed.append(lbl)
-    if removed:
-        return f"已从 {'、'.join(removed)} 移除 context-vault (备份 .json.bak-cv)"
-    return "未安装 (无需移除)"
-
-
-def mcp_status_api(vault: Path, probe_cli: bool = True) -> dict:
-    """结构化检测各客户端 MCP 接入状态 (区分真实主程序与卸载残留目录, probe_cli=False 时仅快速读配置)。"""
-    py, args_ = _mcp_cmd_parts(vault)
-
-    def _has_cv(p: Path) -> bool:
-        try:
-            return p.is_file() and "context-vault" in p.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return False
-
-    claude_cfg = HOME / ".claude.json"
-    claude_app = _detect_mcp_client_app("claude")
-    claude_exe = _claude_exe()
-    claude_on = _has_cv(claude_cfg)
-    if not claude_on and probe_cli and claude_app and claude_exe:
-        try:
-            out = subprocess.run([claude_exe, "mcp", "list"], capture_output=True, text=True,
-                                 encoding="utf-8", errors="replace", timeout=5,
-                                 creationflags=NO_WINDOW).stdout or ""
-            claude_on = "context-vault" in out
-        except Exception:
-            pass
-    codex_dir = HOME / ".codex"
-    codex_cfg = codex_dir / "config.toml"
-    codex_app = _detect_mcp_client_app("codex")
-    cursor_dir = HOME / ".cursor"
-    cursor_cfg = cursor_dir / "mcp.json"
-    cursor_app = _detect_mcp_client_app("cursor")
-    gemini_dir = HOME / ".gemini"
-    agy_cfg1 = gemini_dir / "config" / "mcp_config.json"
-    agy_cfg2 = gemini_dir / "antigravity" / "mcp_config.json"
-    agy_app = _detect_mcp_client_app("antigravity")
-
-    def _entry(cid: str, name: str, detected: bool, app_detected: bool, installed: bool, cfg: Path) -> dict:
-        return {
-            "id": cid, "name": name,
-            "detected": bool(detected),
-            "app_detected": bool(app_detected),
-            "residual": bool(detected and not app_detected),
-            "installed": bool(installed),
-            "config": str(cfg),
-        }
-
-    clients = [
-        _entry("claude", "Claude Code", claude_app or claude_cfg.exists(), claude_app, claude_on, claude_cfg),
-        _entry("codex", "Codex", codex_dir.exists() or codex_app, codex_app, _has_cv(codex_cfg), codex_cfg),
-        _entry("cursor", "Cursor", cursor_dir.exists() or cursor_app, cursor_app, _has_cv(cursor_cfg), cursor_cfg),
-        _entry("antigravity", "Antigravity", gemini_dir.exists() or agy_app, agy_app,
-               _has_cv(agy_cfg1) or _has_cv(agy_cfg2),
-               agy_cfg2 if _has_cv(agy_cfg2) else agy_cfg1),
-    ]
-    import cv_dsh
-    clients.append(cv_dsh.dsh_mcp_status())
-    return {
-        "server_cmd": f"{py} {' '.join(args_)}",
-        "clients": clients,
-        "installed_count": sum(1 for c in clients if c["installed"]),
-        "detected_count": sum(1 for c in clients if c["detected"]),
-        "app_detected_count": sum(1 for c in clients if c.get("app_detected")),
-    }
-
-
-def _resolve_mcp_targets(valid_ids: dict, client: str | None = None,
-                         clients: list[str] | None = None, *, empty_msg: str) -> tuple:
-    """解析单目标 / 多选列表 (去重保序并校验 ID); 返回 (targets, is_all_mode)。"""
-    if clients is not None:
-        if not isinstance(clients, list):
-            raise ValueError("clients 必须为数组")
-        seen: list[str] = []
-        for raw in clients:
-            cid = str(raw or "").strip()
-            if not cid:
-                continue
-            if cid not in valid_ids:
-                raise ValueError(f"未知客户端: {cid}")
-            if cid not in seen:
-                seen.append(cid)
-        if not seen:
-            raise ValueError(empty_msg)
-        return seen, False
-    cid = (client or "all").strip()
-    if cid == "all":
-        return list(valid_ids), True
-    if cid not in valid_ids:
-        raise ValueError(f"未知客户端: {cid}")
-    return [cid], False
-
-
-def mcp_install_api(vault: Path, client: str | None = "all", clients: list[str] | None = None) -> dict:
-    """结构化执行 MCP 写入 (支持多选列表; client='all' 自动跳过卸载残留目录) 并返回最新状态。"""
-    import cv_dsh
-    installers = {"claude": _install_mcp_claude, "codex": _install_mcp_codex,
-                  "cursor": _install_mcp_cursor, "antigravity": _install_mcp_antigravity,
-                  "dsh": cv_dsh.install_mcp_dsh}
-    targets, is_all = _resolve_mcp_targets(installers, client, clients, empty_msg="请至少选择一个要接入的客户端")
-    pre_status = {c["id"]: c for c in mcp_status_api(vault)["clients"]} if is_all else {}
-    results = []
-    for c in targets:
-        if is_all:
-            st = pre_status.get(c, {})
-            if st.get("residual"):
-                results.append({"client": c, "message": "未检测到主程序，仅存在残留配置目录 (已跳过; 如确需接入请显式指定)"})
-                continue
-            if not st.get("app_detected"):
-                results.append({"client": c, "message": f"未检测到 {st.get('name', c)} (跳过)"})
-                continue
-        try:
-            msg = installers[c](vault)
-        except Exception as e:
-            msg = f"失败: {e}"
-        results.append({"client": c, "message": msg})
-    return {"results": results, "status": mcp_status_api(vault)}
-
-
-def mcp_uninstall_api(vault: Path, client: str | None = None, clients: list[str] | None = None) -> dict:
-    """结构化移除指定客户端配置中的 context-vault 条目并返回最新状态。"""
-    import cv_dsh
-    uninstallers = {"claude": _uninstall_mcp_claude, "codex": _uninstall_mcp_codex,
-                    "cursor": _uninstall_mcp_cursor, "antigravity": _uninstall_mcp_antigravity,
-                    "dsh": cv_dsh.uninstall_mcp_dsh}
-    if clients is None and not (client and str(client).strip()):
-        raise ValueError("请指定要移除的客户端")
-    targets, _ = _resolve_mcp_targets(uninstallers, client, clients, empty_msg="请至少选择一个要移除的客户端")
-    results = []
-    for c in targets:
-        try:
-            msg = uninstallers[c](vault)
-        except Exception as e:
-            msg = f"失败: {e}"
-        results.append({"client": c, "message": msg})
-    return {"results": results, "status": mcp_status_api(vault)}
+# ---- 已拆解至 tools/cv_mcp.py (全量 re-export 保持向后兼容) ----
+from cv_mcp import (  # noqa: F401,E402
+    _claude_exe,
+    _detect_mcp_client_app,
+    _has_local_bin_cmd,
+    _install_mcp_antigravity,
+    _install_mcp_claude,
+    _install_mcp_codex,
+    _install_mcp_cursor,
+    _is_real_home_dir,
+    _mcp_cmd_parts,
+    _parse_toml_table_header,
+    _resolve_mcp_targets,
+    _uninstall_mcp_antigravity,
+    _uninstall_mcp_claude,
+    _uninstall_mcp_codex,
+    _uninstall_mcp_cursor,
+    _uninstall_mcp_json_file,
+    cmd_mcp,
+    mcp_install_api,
+    mcp_status_api,
+    mcp_uninstall_api,
+)
 
 
 def prune_snapshots_api(vault: Path, apply: bool = False) -> dict:
-    """结构化版本裁剪接口 (复用 cmd_prune 逻辑, 供控制台设置页调用)。"""
-    import io as _io
-    import contextlib as _cl
-    from types import SimpleNamespace as _NS
-    buf = _io.StringIO()
-    with _cl.redirect_stdout(buf):
-        cmd_prune(_NS(vault=str(vault), apply=bool(apply)))
-    out = buf.getvalue().strip()
-    m = re.search(r"保留\s+(\d+)\s*/\s*(\d+)\s*版.*?回收\s+(\d+)\s*版\s*/\s*([\d.]+)\s*MB", out)
-    return {
-        "applied": bool(apply),
-        "kept": int(m.group(1)) if m else 0,
-        "total": int(m.group(2)) if m else 0,
-        "drop_count": int(m.group(3)) if m else 0,
-        "reclaim_mb": float(m.group(4)) if m else 0.0,
-        "message": out,
-    }
+    """中间版本 GC 纯数据接口: 每会话每天保留最后一版 + 每会话最新版本 (叶子), 保留集按时间重链。
+    默认 dry-run 只报告; apply=True 先做一次 vault 备份再执行。
+    恒保留: 叶子 (账本/详情口径)、fork 实体 (用户资产)、源已消失会话的整链 (vault 是唯一副本)。"""
+    conn = db(vault)
+    logs: list[str] = []
+    try:
+        conn.executescript(SCHEMA + SYNC_TABLE)  # sync_sources: 源存活判定要用
+        rows = conn.execute("SELECT id, agent, session_ref, created_at, path, parent_snapshot, fork_of"
+                            " FROM snapshots").fetchall()
+        parents = {r["parent_snapshot"] for r in rows if r["parent_snapshot"]}
+        zalive = None
+        if ZCODE_DB.exists():
+            z = sqlite3.connect(f"file:{ZCODE_DB}?mode=ro", uri=True)
+            try:
+                zalive = {x[0] for x in z.execute("SELECT id FROM session WHERE time_deleted IS NULL")}
+            finally:
+                z.close()
+        srcmap = {r[0]: r[1] for r in conn.execute("SELECT snapshot_id, path FROM sync_sources")}
+        sess_rows = {}
+        for r in rows:
+            sess_rows.setdefault((r["agent"], r["session_ref"]), []).append(r)
+        sess_alive = {}
+        for key, lst in sess_rows.items():
+            alive = False
+            for r in lst:
+                if key[0] == "zcode":
+                    alive = zalive is not None and r["session_ref"] in zalive
+                else:
+                    sp = srcmap.get(r["id"])
+                    alive = bool(sp) and Path(sp).exists()
+                if alive:
+                    break
+            sess_alive[key] = alive
+        dead_sessions = {k[1] for k, alive in sess_alive.items() if not alive}
+        keep = set()
+        for r in rows:
+            if r["id"] not in parents:
+                keep.add(r["id"])                                    # 叶子恒留 (账本口径)
+            if r["fork_of"] or r["session_ref"] in dead_sessions:
+                keep.add(r["id"])                                    # fork / 唯一副本: 整链保留
+        day_last = {}
+        for r in rows:
+            k = (r["agent"], r["session_ref"], (r["created_at"] or "")[:10])
+            if k not in day_last or (r["created_at"] or "") > (day_last[k]["created_at"] or ""):
+                day_last[k] = r
+        for r in day_last.values():
+            keep.add(r["id"])                                        # 每会话每天最后一版 (按天记录)
+        drop = [r for r in rows if r["id"] not in keep]
+        reclaim = sum((os.path.getsize(r["path"]) if r["path"] and os.path.exists(r["path"]) else 0)
+                      for r in drop)
+        kept_cnt = len(rows) - len(drop)
+        summary = (f"保留 {kept_cnt} / {len(rows)} 版 (叶子 {sum(1 for r in rows if r['id'] in keep and r['id'] not in parents)} · "
+                   f"每日记录 {len(day_last)} · fork/孤本整链 {sum(1 for r in rows if r['fork_of'] or r['session_ref'] in dead_sessions)}) · "
+                   f"回收 {len(drop)} 版 / {reclaim/1e6:.0f} MB")
+        logs.append(summary)
+        removed = 0
+        if not drop:
+            return {
+                "applied": False, "kept": kept_cnt, "total": len(rows),
+                "drop_count": 0, "reclaim_mb": 0.0, "removed": 0,
+                "message": summary, "logs": logs,
+            }
+        if not apply:
+            logs.append("dry-run — 加 --apply 执行 (执行前自动做一次 vault 备份)")
+            return {
+                "applied": False, "kept": kept_cnt, "total": len(rows),
+                "drop_count": len(drop), "reclaim_mb": round(reclaim / 1e6, 1), "removed": 0,
+                "message": "\n".join(logs), "logs": logs,
+            }
+        bres = backup_vault_api(vault, keep=10)                      # 删前完整备份 (快照+账本 zip)
+        logs.extend(bres.get("logs", []))
+        kept = {}
+        for r in rows:
+            if r["id"] in keep:
+                kept.setdefault((r["agent"], r["session_ref"]), []).append(r)
+        for lst in kept.values():
+            lst.sort(key=lambda r: (r["created_at"] or "", r["id"]))
+            prev = None
+            for r in lst:
+                if r["parent_snapshot"] != prev:
+                    conn.execute("UPDATE snapshots SET parent_snapshot=? WHERE id=?", (prev, r["id"]))
+                prev = r["id"]
+        for r in drop:
+            try:
+                os.unlink(r["path"])
+            except OSError:
+                continue
+            conn.execute("DELETE FROM snapshots WHERE id=?", (r["id"],))
+            removed += 1
+        conn.execute("INSERT INTO probe_events(ts,profile,endpoint,status,http_code,latency_ms,models,missing_models)"
+                     " VALUES(?,?,?,?,?,?,?,?)",
+                     (now_iso(), "vault", "gc", "prune", None, None,
+                      json.dumps({"dropped": removed, "reclaimed_mb": round(reclaim / 1e6, 1),
+                                  "kept": kept_cnt,
+                                  "backup": "vault/backups 最新一份"}, ensure_ascii=False), None))
+        conn.commit()
+        done_msg = (f"已回收 {removed} 版 / {reclaim/1e6:.0f} MB"
+                    + (f" ({len(drop) - removed} 版因文件被占用跳过, 下次 prune 再试)" if removed != len(drop) else "")
+                    + " (GC 事件已写入审计时间线)")
+        logs.append(done_msg)
+        return {
+            "applied": True, "kept": kept_cnt, "total": len(rows),
+            "drop_count": len(drop), "reclaim_mb": round(reclaim / 1e6, 1), "removed": removed,
+            "message": "\n".join(logs), "logs": logs,
+        }
+    finally:
+        conn.close()
 
 
-def backup_vault_api(vault: Path, keep: int = 10) -> dict:
-    """结构化一致性备份接口 (复用 cmd_backup)。"""
-    import io as _io
-    import contextlib as _cl
-    from types import SimpleNamespace as _NS
-    buf = _io.StringIO()
-    with _cl.redirect_stdout(buf):
-        cmd_backup(_NS(vault=str(vault), out=None, keep=max(1, min(int(keep or 10), 50))))
-    out = buf.getvalue().strip()
-    backups = sorted((vault / "backups").glob("cv-backup-*.zip")) if (vault / "backups").is_dir() else []
-    latest = backups[-1] if backups else None
+def backup_vault_api(vault: Path, keep: int = 10, out_dir: Path | None = None) -> dict:
+    """结构化一致性备份接口: sqlite 在线快照 + snapshots + 配置文件打包 + 轮换保留 (不写 stdout)。"""
+    import zipfile
+    if not (vault / "vault.db").exists():
+        raise ValueError(f"vault 未初始化: {vault} (先 cv init / cv export)")
+    keep_n = max(1, min(int(keep or 10), 50))
+    dest_dir = Path(out_dir).expanduser() if out_dir is not None else (vault / "backups")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S") + ("-f%03d" % (dt.datetime.now().microsecond // 1000))
+    out = dest_dir / f"cv-backup-{ts}.zip"
+    tmp_db = dest_dir / f".backup-tmp-{os.getpid()}-{threading.get_ident()}.db"
+    n_snap = 0
+    try:
+        src = db(vault)
+        try:
+            dst = sqlite3.connect(tmp_db)
+            try:
+                src.backup(dst)  # 在线一致快照, 不锁常驻服务 (托盘 serve/sync 可同时跑)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+            z.write(tmp_db, "vault.db")
+            snaps_dir = vault / "snapshots"
+            if snaps_dir.is_dir():
+                for f in sorted(snaps_dir.glob("cv_*.json")):
+                    z.write(f, f"snapshots/{f.name}")
+                    n_snap += 1
+            for name in ("probe_baseline.json", "relay_watermark.json",
+                         "migrations.jsonl", "accounts.json", "semantic.json",
+                         "pricing.json", "prices.json"):
+                p = vault / name
+                if p.exists():
+                    z.write(p, name)
+    finally:
+        tmp_db.unlink(missing_ok=True)
+    backups = sorted(dest_dir.glob("cv-backup-*.zip"))
+    for old in backups[:-keep_n] if len(backups) > keep_n else []:
+        old.unlink(missing_ok=True)
+    backups = sorted(dest_dir.glob("cv-backup-*.zip"))
+    size_mb = out.stat().st_size / 1048576
+    msg = f"备份完成: {out} ({n_snap} 快照, {size_mb:.1f} MB, 留存 {len(backups)}/{keep_n} 份)"
+    logs = [msg, "  恢复: 解压到空目录, 以 --vault 指向它 (vault.db + snapshots/ 完整可用)"]
     return {
         "ok": True,
-        "name": latest.name if latest else "",
-        "path": str(latest) if latest else "",
-        "size_mb": round(latest.stat().st_size / 1048576, 2) if latest and latest.exists() else 0.0,
+        "name": out.name,
+        "path": str(out),
+        "size_mb": round(size_mb, 2),
+        "snapshots_count": n_snap,
         "backups_count": len(backups),
-        "message": out.splitlines()[0] if out else "备份完成",
+        "keep": keep_n,
+        "message": msg,
+        "logs": logs,
     }
-
-
-def cmd_mcp(args):
-    vault = vault_dir(args)
-    if args.mcp_cmd == "install":
-        target = "all" if getattr(args, "all", False) else args.client
-        res = mcp_install_api(vault, client=target)
-        for item in res["results"]:
-            print(f"[{item['client']}] {item['message']}")
-    elif args.mcp_cmd == "uninstall":
-        target = "all" if getattr(args, "all", False) else args.client
-        res = mcp_uninstall_api(vault, client=target)
-        for item in res["results"]:
-            print(f"[{item['client']}] {item['message']}")
-    elif args.mcp_cmd == "status":
-        st = mcp_status_api(vault)
-        print(f"server: {st['server_cmd']}")
-        for c in st["clients"]:
-            if c["installed"] and c.get("residual"):
-                tag = "✓ 已接入 (未检测到主程序)"
-            elif c["installed"]:
-                tag = "✓ 已配置"
-            elif c.get("residual"):
-                tag = "· 仅残留配置目录"
-            elif c["detected"]:
-                tag = "✗ 未接入 (已检测到主程序)"
-            else:
-                tag = "✗ 未检测到"
-            print(f"[{c['id']:<11}] {tag}  ({c['config']})")
 
 
 # ---- 已拆解至 tools/cv_antigravity.py (全量 re-export 保持向后兼容) ----
@@ -2937,41 +2070,15 @@ from cv_server import (  # noqa: F401,E402
 # ------------------------------------------------- backup: vault 备份 (一致性 + 轮换)
 
 def cmd_backup(args):
-    """vault 一致性备份: vault.db 走 sqlite 在线 backup API (WAL 下直接拷文件可能撕裂),
-    snapshots/ 原样打包 (不可变), 基线/水位随包; 按时间戳轮换保留 N 份。"""
-    import zipfile
+    """vault 一致性备份 CLI 包装。"""
     vault = vault_dir(args)
-    if not (vault / "vault.db").exists():
-        raise SystemExit(f"vault 未初始化: {vault} (先 cv init / cv export)")
-    out_dir = Path(args.out).expanduser() if args.out else vault / "backups"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S") + ("-f%03d" % (dt.datetime.now().microsecond // 1000))
-    out = out_dir / f"cv-backup-{ts}.zip"
-    tmp_db = out_dir / f".backup-tmp-{os.getpid()}.db"
-    n_snap = 0
+    out_dir = Path(args.out).expanduser() if getattr(args, "out", None) else None
     try:
-        src = db(vault)
-        dst = sqlite3.connect(tmp_db)
-        src.backup(dst)  # 在线一致快照, 不锁常驻服务 (托盘 serve/sync 可同时跑)
-        dst.close()
-        src.close()
-        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-            z.write(tmp_db, "vault.db")
-            for f in sorted((vault / "snapshots").glob("cv_*.json")):
-                z.write(f, f"snapshots/{f.name}")
-                n_snap += 1
-            for name in ("probe_baseline.json", "relay_watermark.json"):
-                p = vault / name
-                if p.exists():
-                    z.write(p, name)
-    finally:
-        tmp_db.unlink(missing_ok=True)
-    backups = sorted(out_dir.glob("cv-backup-*.zip"))
-    for old in backups[:-int(args.keep)] if int(args.keep) > 0 and len(backups) > int(args.keep) else []:
-        old.unlink()
-    size_mb = out.stat().st_size / 1048576
-    print(f"备份完成: {out} ({n_snap} 快照, {size_mb:.1f} MB, 留存 {min(len(backups), int(args.keep))}/{args.keep} 份)")
-    print("  恢复: 解压到空目录, 以 --vault 指向它 (vault.db + snapshots/ 完整可用)")
+        res = backup_vault_api(vault, keep=int(getattr(args, "keep", 10) or 10), out_dir=out_dir)
+    except ValueError as e:
+        raise SystemExit(str(e))
+    for ln in res["logs"]:
+        print(ln)
 
 
 # ------------------------------------------------- doctor: 环境体检
@@ -3025,11 +2132,22 @@ def cmd_doctor(args):
         any_src |= good
         print(f"  {'✓' if good else '·'} {name:<15} {detail}")
 
-    print("\n[3/3] 可选增强组件 (缺失不影响核心功能)")
+    print("\n[3/3] 可选增强组件与 MCP 状态")
     smig = find_smigrate()
     print(f"  {'✓' if smig else '·'} session-migrate  {smig or '未安装 (uv tool install session-migrate 解锁 18 格式桥接)'}")
+    zbk = cv_dsh.zstd_backend()
+    print(f"  {'✓' if zbk else '·'} DSH Zstd 编解码  {zbk or '未就绪 (安装 zstandard / Node>=22.18 / zstd CLI 以支持 .v4.jsonl.zstd)'}")
     hr_ok = (HEADROOM_DIR / "proxy_savings.json").exists() or (HEADROOM_DIR / "savings_events.jsonl").exists()
     print(f"  {'✓' if hr_ok else '·'} headroom 账本    {HEADROOM_DIR if hr_ok else '未接入 (可选通路层省钱统计)'}")
+    try:
+        mst = mcp_status_api(vault, probe_cli=False)
+        parts = []
+        for c in mst.get("clients", []):
+            tag = "已接入" if c.get("installed") else ("仅残留" if c.get("residual") else ("未接入" if c.get("app_detected") else "未安装"))
+            parts.append(f"{c['id']}={tag}")
+        print(f"  {'✓' if mst.get('installed_count') else '·'} MCP 接入摘要     {' · '.join(parts)}")
+    except Exception:
+        pass
 
     core_ok = db_ok or any_src
     print("\n结论: " + ("核心环境就绪" if core_ok else "尚未初始化 vault (运行 python tools/cv.py init 或 sync)"))
@@ -3068,12 +2186,23 @@ def cmd_setup(args):
     mres = extract_memories_incremental(vault)
     print(f"  记忆提取完成: 新增 {mres.get('added', 0)} · 活跃 {mres.get('active', 0)} / 总计 {mres.get('total', 0)}")
 
-    if getattr(args, "mcp", False):
+    mcp_clients_raw = getattr(args, "mcp_clients", None)
+    if mcp_clients_raw:
+        clist = [x.strip() for x in str(mcp_clients_raw).split(",") if x.strip()]
+        print(f"[附加] 按需接入指定 MCP 客户端 ({', '.join(clist)})...")
+        try:
+            res = mcp_install_api(vault, client=None, clients=clist)
+            for item in res["results"]:
+                print(f"  [{item['client']}] {item['message']}")
+        except Exception as e:
+            print(f"  MCP 接入提示: {e}")
+    elif getattr(args, "mcp", False):
         print("[附加] 自动接入全部检测到的 MCP 客户端...")
         ns = argparse.Namespace(
             vault=str(vault),
             mcp_cmd="install",
             client="all",
+            clients=None,
             all=True,
             dry_run=False,
         )
@@ -3084,8 +2213,8 @@ def cmd_setup(args):
 
     print("\n初始化完成！下一步推荐:")
     print("  1. 启动 Web 控制台 + 热索引 + AML API:  cv serve  (或 python tools/cv.py serve)")
-    if not getattr(args, "mcp", False):
-        print("  2. 一键接入全部 MCP 客户端:             cv mcp install --all")
+    if not getattr(args, "mcp", False) and not mcp_clients_raw:
+        print("  2. 按需/全量接入 MCP 客户端:           cv mcp install --clients claude,codex,dsh  (或 --all)")
 
 
 # ------------------------------------------------- main
@@ -3273,10 +2402,12 @@ def main(argv=None):
     msub = mc.add_subparsers(dest="mcp_cmd", required=True)
     mi = msub.add_parser("install")
     mi.add_argument("--client", choices=["claude", "codex", "cursor", "antigravity", "dsh"], default="claude")
+    mi.add_argument("--clients", help="多选逗号分隔客户端 (如 claude,codex,dsh)")
     mi.add_argument("--all", action="store_true", help="接入全部已检测到主程序的客户端 (跳过仅残留目录)")
     mi.set_defaults(func=cmd_mcp)
     mu = msub.add_parser("uninstall")
     mu.add_argument("--client", choices=["claude", "codex", "cursor", "antigravity", "dsh"], default="cursor")
+    mu.add_argument("--clients", help="多选逗号分隔要移除的客户端 (如 cursor,dsh)")
     mu.add_argument("--all", action="store_true", help="从全部客户端配置中移除 context-vault")
     mu.set_defaults(func=cmd_mcp)
     msub.add_parser("status").set_defaults(func=cmd_mcp)
@@ -3374,7 +2505,8 @@ def main(argv=None):
 
     sub.add_parser("doctor").set_defaults(func=cmd_doctor)
     stp = sub.add_parser("setup", help="一步式初始化向导: 建库 → 同步会话 → 账本 → 记忆 → (可选) MCP")
-    stp.add_argument("--mcp", action="store_true", help="同时自动接入全部本地 MCP 客户端")
+    stp.add_argument("--mcp", action="store_true", help="同时自动接入全部已检测到主程序的 MCP 客户端")
+    stp.add_argument("--mcp-clients", help="按需接入逗号分隔的 MCP 客户端 (如 claude,codex,dsh)")
     stp.add_argument("--no-ledger", action="store_true", help="跳过多端 token 账本同步")
     stp.set_defaults(func=cmd_setup)
     sub.add_parser("repair", help="一次性数据修复: lineage 索引回填 + zcode 历史用量回填 (幂等)"
@@ -3448,6 +2580,38 @@ def main(argv=None):
     sk_mg.add_argument("--apply", action="store_true", help="真实写入目标目录 (默认 dry-run)")
     sk_mg.add_argument("--json", action="store_true", help="输出 JSON")
     sk_mg.set_defaults(func=cmd_skills)
+
+    sk_in = sksub.add_parser("inspect", help="预览 Skill 内容并与目标已有版本对比 Diff")
+    sk_in.add_argument("--source", default="zcode", choices=["zcode", "claude", "codex", "antigravity", "cursor", "dsh", "all"])
+    sk_in.add_argument("--id", dest="skill_id", required=True, help="Skill id 或 slug")
+    sk_in.add_argument("--target", default="", choices=["", "antigravity", "claude", "codex", "cursor", "zcode", "dsh", "workspace"])
+    sk_in.add_argument("--agy-mode", default="skills", choices=["skills", "plugin"])
+    sk_in.add_argument("--plugin-name", default="")
+    sk_in.add_argument("--include-plugins", action="store_true")
+    sk_in.add_argument("--no-normalize", action="store_true")
+    sk_in.add_argument("--workspace")
+    sk_in.add_argument("--json", action="store_true")
+    sk_in.set_defaults(func=cmd_skills)
+
+    sk_rm = sksub.add_parser("remove", help="安全移除目标端已安装的 Skill (写入前自动完整备份)")
+    sk_rm.add_argument("--target", required=True, choices=["antigravity", "claude", "codex", "cursor", "zcode", "dsh", "workspace"])
+    sk_rm.add_argument("--slugs", required=True, help="逗号分隔的 Skill 目录名")
+    sk_rm.add_argument("--agy-mode", default="skills", choices=["skills", "plugin"])
+    sk_rm.add_argument("--plugin-name", default="")
+    sk_rm.add_argument("--workspace")
+    sk_rm.add_argument("--apply", action="store_true", help="执行真实移除 (默认 dry-run)")
+    sk_rm.add_argument("--json", action="store_true")
+    sk_rm.set_defaults(func=cmd_skills)
+
+    sk_bk = sksub.add_parser("backups", help="列出历史 Skill 覆盖/移除备份")
+    sk_bk.add_argument("--json", action="store_true")
+    sk_bk.set_defaults(func=cmd_skills)
+
+    sk_rb = sksub.add_parser("rollback", help="从指定备份 ID 恢复 Skill")
+    sk_rb.add_argument("backup_id")
+    sk_rb.add_argument("--apply", action="store_true", help="执行真实恢复 (默认 dry-run)")
+    sk_rb.add_argument("--json", action="store_true")
+    sk_rb.set_defaults(func=cmd_skills)
 
 
     args = ap.parse_args(argv)

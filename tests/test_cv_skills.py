@@ -239,6 +239,140 @@ class TestCvSkills(unittest.TestCase):
             srv.server_close()
             idx._close()
 
+    def test_inspect_diff_remove_and_rollback(self):
+        # 1) 迁入前预览与 list_skills_api target_skills
+        pre = cv_skills.inspect_skill_api("zcode", "academic-figure-prompt", target="antigravity")
+        self.assertFalse(pre["target_exists"])
+        self.assertEqual(pre["target_status"], "new")
+        self.assertIn("name: academic-figure-prompt", pre["planned_skill_md"])
+
+        cv_skills.migrate_skills(
+            source="zcode", target="antigravity", selected=["academic-figure-prompt"], apply=True, vault=self.vault
+        )
+        lst = cv_skills.list_skills_api(source="zcode", target="antigravity", refresh=True)
+        self.assertEqual([x["slug"] for x in lst["target_skills"]], ["academic-figure-prompt"])
+
+        # 2) 制造目标端差异: 改 SKILL.md、删附属脚本、多一个仅目标文件 -> 校验 diff 与文件清单
+        dst_dir = self.home / ".gemini" / "config" / "skills" / "academic-figure-prompt"
+        (dst_dir / "SKILL.md").write_text("---\nname: academic-figure-prompt\n---\nOLD_TARGET\n", encoding="utf-8")
+        (dst_dir / "scripts" / "gen.py").unlink()
+        (dst_dir / "only-target.txt").write_text("extra\n", encoding="utf-8")
+
+        ins = cv_skills.inspect_skill_api("zcode", "academic-figure-prompt", target="antigravity")
+        self.assertTrue(ins["target_exists"])
+        self.assertEqual(ins["target_status"], "conflict")
+        self.assertIn("scripts/gen.py", ins["files_added"])
+        self.assertIn("only-target.txt", ins["files_removed"])
+        self.assertIn("SKILL.md", ins["files_changed"])
+        self.assertTrue(any("OLD_TARGET" in ln for ln in ins["diff_lines"]))
+
+        # 3) 覆盖迁入自动备份, 再一键回滚恢复覆盖前的目标版
+        ov = cv_skills.migrate_skills(
+            source="zcode", target="antigravity", selected=["academic-figure-prompt"],
+            conflict="overwrite", apply=True, vault=self.vault,
+        )
+        self.assertTrue(ov["backup_id"])
+        self.assertIn("# Body", (dst_dir / "SKILL.md").read_text(encoding="utf-8"))
+        bks = cv_skills.list_skill_backups_api(self.vault)
+        self.assertTrue(any(b["id"] == ov["backup_id"] and b["restorable"] for b in bks))
+
+        rb_ov = cv_skills.rollback_skill_backup_api(self.vault, ov["backup_id"], apply=True)
+        self.assertEqual(rb_ov["restored"], 1)
+        self.assertIn("OLD_TARGET", (dst_dir / "SKILL.md").read_text(encoding="utf-8"))
+        self.assertTrue((dst_dir / "only-target.txt").is_file())
+
+        # 4) 路径穿越拦截 + dry-run/apply 安全移除 + plugin.json 计数更新 + 从移除备份恢复
+        for bad_slug in ("../escape", "a/b", "."):
+            with self.assertRaises(ValueError):
+                cv_skills.remove_skills_api(target="antigravity", slugs=[bad_slug], vault=self.vault)
+
+        cv_skills.migrate_skills(
+            source="zcode", target="antigravity", agy_mode="plugin", plugin_name="rm-pack",
+            apply=True, vault=self.vault,
+        )
+        plug_json = self.home / ".gemini" / "config" / "plugins" / "rm-pack" / "plugin.json"
+        self.assertIn("2 skills migrated", json.loads(plug_json.read_text(encoding="utf-8"))["description"])
+
+        dry_rm = cv_skills.remove_skills_api(
+            target="antigravity", agy_mode="plugin", plugin_name="rm-pack",
+            slugs=["academic-figure-prompt"], vault=self.vault, apply=False,
+        )
+        self.assertFalse(dry_rm["applied"])
+        self.assertEqual(dry_rm["items"][0]["action"], "planned_remove")
+
+        rm = cv_skills.remove_skills_api(
+            target="antigravity", agy_mode="plugin", plugin_name="rm-pack",
+            slugs=["academic-figure-prompt"], vault=self.vault, apply=True,
+        )
+        self.assertEqual(rm["removed"], 1)
+        self.assertTrue(rm["backup_id"])
+        plug_sk = self.home / ".gemini" / "config" / "plugins" / "rm-pack" / "skills" / "academic-figure-prompt"
+        self.assertFalse(plug_sk.exists())
+        self.assertIn("1 skills migrated", json.loads(plug_json.read_text(encoding="utf-8"))["description"])
+
+        rb_rm = cv_skills.rollback_skill_backup_api(self.vault, rm["backup_id"], apply=True)
+        self.assertEqual(rb_rm["restored"], 1)
+        self.assertTrue((plug_sk / "SKILL.md").is_file())
+        self.assertIn("2 skills migrated", json.loads(plug_json.read_text(encoding="utf-8"))["description"])
+
+        # 5) 坏 backup_id 与被篡改 dest_root 的 manifest 必须被拒绝
+        with self.assertRaises(ValueError):
+            cv_skills.rollback_skill_backup_api(self.vault, "../evil", apply=False)
+        mp = self.vault / "backups" / rm["backup_id"] / "manifest.json"
+        mdata = json.loads(mp.read_text(encoding="utf-8"))
+        mdata["dest_root"] = str(self.tmp / "outside-evil")
+        mp.write_text(json.dumps(mdata), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            cv_skills.rollback_skill_backup_api(self.vault, rm["backup_id"], apply=False)
+
+    def test_skills_http_inspect_remove_backups_rollback(self):
+        cv_skills.migrate_skills(
+            source="zcode", target="antigravity", selected=["academic-figure-prompt"], apply=True, vault=self.vault
+        )
+        dst_md = self.home / ".gemini" / "config" / "skills" / "academic-figure-prompt" / "SKILL.md"
+        dst_md.write_text("---\nname: academic-figure-prompt\n---\nHTTP_DIFF_OLD\n", encoding="utf-8")
+
+        srv, idx = cv.build_vault_server(self.vault, 0)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            def _req(method: str, path: str, payload: dict | None = None):
+                c = HTTPConnection("127.0.0.1", port, timeout=5)
+                if payload is not None:
+                    c.request(method, path, body=json.dumps(payload).encode("utf-8"),
+                              headers={"Content-Type": "application/json"})
+                else:
+                    c.request(method, path)
+                r = c.getresponse()
+                txt = r.read().decode("utf-8")
+                c.close()
+                return r.status, json.loads(txt)
+
+            sc, ins = _req("GET", "/skills/inspect?source=zcode&target=antigravity&id=academic-figure-prompt")
+            self.assertEqual(sc, 200)
+            self.assertEqual(ins["target_status"], "conflict")
+            self.assertTrue(any("HTTP_DIFF_OLD" in ln for ln in ins["diff_lines"]))
+
+            sc_rm, rm = _req("POST", "/skills/remove", {
+                "target": "antigravity", "slugs": ["academic-figure-prompt"], "apply": True,
+            })
+            self.assertEqual(sc_rm, 200)
+            self.assertEqual(rm["removed"], 1)
+            self.assertFalse(dst_md.exists())
+
+            sc_bk, bks = _req("GET", "/skills/backups")
+            self.assertEqual(sc_bk, 200)
+            self.assertTrue(any(b["id"] == rm["backup_id"] for b in bks["backups"]))
+
+            sc_rb, rb = _req("POST", "/skills/rollback", {"backup_id": rm["backup_id"], "apply": True})
+            self.assertEqual(sc_rb, 200)
+            self.assertEqual(rb["restored"], 1)
+            self.assertIn("HTTP_DIFF_OLD", dst_md.read_text(encoding="utf-8"))
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            idx._close()
+
 
 if __name__ == "__main__":
     unittest.main()
