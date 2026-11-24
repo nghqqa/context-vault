@@ -142,18 +142,22 @@ const copyText=async(t,msg)=>{
   toast(msg||"已复制")};
 
 /* ================= 分区导航 + 快捷键 ================= */
-const TABS=["ov","snap","mig","probe"];
-const TAB_TITLE={ov:"概览",snap:"快照资产",mig:"迁移工作台",probe:"上游哨兵"};
+const TABS=["ov","snap","mig","probe","ops"];
+const TAB_TITLE={ov:"概览",snap:"快照资产",mig:"迁移工作台",probe:"上游哨兵",ops:"设置与运维"};
+let curTab="ov",booted=false,snapsLoaded=false;
 function setTab(t){
   if(!TABS.includes(t))t="ov";
+  curTab=t;
   $$("nav.side-nav button").forEach(x=>{const on=x.dataset.t===t;
     x.classList.toggle("on",on);on?x.setAttribute("aria-current","page"):x.removeAttribute("aria-current")});
   TABS.forEach(k=>{$("#t-"+k).style.display=k===t?"":"none"});
   $("#sec-title").textContent=TAB_TITLE[t];
   const sc=$(".content");if(sc)sc.scrollTop=0;
   if(window.scrollTo)window.scrollTo(0,0);
+  if(t==="snap"&&booted&&!snapsLoaded){snapsLoaded=true;refreshSnaps();}
   if(t==="mig"&&!$("#mig-sid").dataset.filled)fillMig();
   if(t==="probe"&&!$("#probe-list").dataset.loaded)loadProbe();
+  if(t==="ops"&&!$("#ops-mcp-box").dataset.loaded)loadOps(false);
   if(window.history)history.replaceState(null,"","#"+t);
 }
 $$("nav.side-nav button").forEach(b=>b.onclick=()=>setTab(b.dataset.t));
@@ -284,11 +288,14 @@ async function checkHealth(){
 }
 let healthSeq=seqGuard();
 async function boot(){
+  booted=true;
+  // 并发启动健康探活与概览首屏, 消除首屏串行等待; 快照列表按需在进入 snap 分区时再加载
+  const ovP=loadOv();
+  if(curTab==="snap"){snapsLoaded=true;refreshSnaps();}
   try{
     const h=await healthSeq(async()=>checkHealth());
     lastSnapTotal=h?h.snapshots:null;
     stripToken();
-    loadOv();refreshSnaps();
   }catch(e){
     const s=$("#status");
     if(e&&e.code===401){s.classList.remove("err");s.classList.add("auth");
@@ -297,6 +304,7 @@ async function boot(){
       s.innerHTML="<span class='pulse'></span>服务异常 · 4s 后重试";}
     scheduleBoot();
   }
+  await ovP;
 }
 document.addEventListener("visibilitychange",async()=>{
   if(document.visibilityState!=="visible"||(Date.now()-lastHealthAt)<25000)return;
@@ -304,17 +312,33 @@ document.addEventListener("visibilitychange",async()=>{
     const h=await checkHealth();
     if(h&&lastSnapTotal!==null&&h.snapshots!==lastSnapTotal){
       lastSnapTotal=h.snapshots;
-      loadOv();refreshSnaps();
+      loadOv();
+      if(curTab==="snap"){snapsLoaded=true;refreshSnaps();}else{snapsLoaded=false;}
     }
   }catch(e){}
 });
 
-/* ================= 概览 ================= */
-const ovSeq=seqGuard();
+/* ================= 概览 (全卡片并发渐进渲染, 任一慢接口绝不阻塞其余区块) ================= */
+let ovGen=0,quotaPendingTimer=null;
+function scheduleQuotaRefresh(gen,win){
+  clearTimeout(quotaPendingTimer);
+  quotaPendingTimer=setTimeout(async()=>{
+    if(gen!==ovGen||win!==usageWindow)return;
+    try{
+      const u=await api("/ledger/usage?window="+encodeURIComponent(win));
+      if(gen===ovGen&&win===usageWindow&&u)renderQuota(u,usageLedger);
+    }catch(e){}
+  },1200);
+}
 async function loadOv(){
+  const my=++ovGen;
+  clearTimeout(quotaPendingTimer);
   $("#ov-band").innerHTML='<div class="kpi"><div class="skel" style="width:70%"></div></div>'.repeat(4);
-  try{
-    const d=await ovSeq(()=>api("/ledger"));
+  let ledgerCur=null,usageCur=null;
+
+  const pLedger=api("/ledger").then(d=>{
+    if(my!==ovGen)return;
+    ledgerCur=d;usageLedger=d;
     const ow=d.owned||{};
     const zu=d.zcode_usage||{};
     const sessions=(ow.sessions!=null)?ow.sessions:null;
@@ -339,12 +363,44 @@ async function loadOv(){
         "口径: "+hitSem+" · 数据源: vault 快照内嵌 usage",
         hit==null?"尚无缓存样本":"近库加权命中");
     $("#ov-band").innerHTML=band;
+    const ob=$("#ov-onboard");
+    if(ob){
+      if(!(ow.snapshots||0)){
+        ob.hidden=false;
+        ob.innerHTML='<div class="onboard-card"><div class="onboard-hd"><b>欢迎使用 Context Vault — 3 步开启本机上下文资产库</b>'+
+          '<span class="hint">全部数据保留在本机 · 零外发</span></div>'+
+          '<div class="onboard-steps">'+
+          '<div class="onboard-step"><div class="os-t">① 同步本机全部会话</div>'+
+          '<div class="os-d">只读扫描 Claude Code / Codex / ZCode / Antigravity 历史会话与跨会话记忆。</div>'+
+          '<button class="btn sm primary" onclick="syncVaultNow()">立即同步入库</button></div>'+
+          '<div class="onboard-step"><div class="os-t">② 接入 AI 客户端 MCP</div>'+
+          '<div class="os-d">让你的 AI 编程工具在任意新对话里直接检索本机历史决策与踩坑记录。</div>'+
+          '<button class="btn sm" onclick="setTab(\'ops\')">一键接入 MCP →</button></div>'+
+          '<div class="onboard-step"><div class="os-t">③ 同步多端 Token 账本</div>'+
+          '<div class="os-d">离线统计 5h 滚动额度、冷却倒计时、缓存命中率与可选本地 Ollama 语义增强。</div>'+
+          '<button class="btn sm" onclick="opsLedgerSync(true)">同步账本并查看 →</button></div>'+
+          '</div></div>';
+      }else{ob.hidden=true;ob.innerHTML="";}
+    }
+    if(usageCur)renderQuota(usageCur,d);
+  }).catch(e=>{
+    if(my!==ovGen||(e&&e.stale))return;
+    $("#ov-band").innerHTML=errEmpty("概览加载失败："+e.message,"loadOv()");
+  });
 
+  const pUsage=(async()=>{
+    const w=usageWindow;
     let u5=null;
-    try{u5=await api("/ledger/usage?window="+encodeURIComponent(usageWindow))}catch(e){u5=null}
-    renderQuota(u5,d);
+    try{u5=await api("/ledger/usage?window="+encodeURIComponent(w)+"&fast=1")}catch(e){u5=null}
+    if(my!==ovGen||w!==usageWindow)return;
+    usageCur=u5;
+    renderQuota(u5,ledgerCur||usageLedger);
+    if(u5&&u5.quota_pending)scheduleQuotaRefresh(my,w);
+  })();
 
+  const pRecent=(async()=>{
     let rc=null;try{rc=await api("/recent?limit=10&leaves=1")}catch(e){}
+    if(my!==ovGen)return;
     const total=(rc&&rc.total)||0;
     const arr=(rc&&rc.rows)||[];
     $("#ov-latest").innerHTML=(arr.length?table(["来源","会话摘要","位置","入库时间"],
@@ -359,8 +415,11 @@ async function loadOv(){
       '<div class="foot"><span>显示最近 '+arr.length+" 个独立会话 · 共 "+num(total)+" 个会话 / "+
         num((rc&&rc.versions_total)||total)+" 个版本</span>"+
       '<button class="linklike" onclick="setTab(\'snap\')">浏览全部 →</button></div>';
+  })();
 
+  const pProbe=(async()=>{
     let pv=[];try{pv=(await api("/probe_events?limit=60")).filter(e=>e.status!=="prune")}catch(e){}
+    if(my!==ovGen)return;
     if(Array.isArray(pv)&&pv.length){
       const byNode={},orderNodes=[];
       for(const e of pv){
@@ -386,8 +445,11 @@ async function loadOv(){
     }else{
       $("#ov-probe").innerHTML='<div class="hint" style="padding:10px 14px">暂无探测记录 · 到哨兵页点击「立即探测上游」</div>';
     }
+  })();
 
+  const pMem=(async()=>{
     let mr=[];try{mr=await api("/memory?q=&limit=4");mr=(mr&&mr.memories)||[]}catch(e){mr=[]}
+    if(my!==ovGen)return;
     $("#ov-mem").innerHTML=mr.length?mr.map(m=>{
       const km=memKindMeta(m.kind);
       const txt=stripMd(m.content).replace(/\s+/g," ").trim();
@@ -399,8 +461,11 @@ async function loadOv(){
         '<span class="feed-r"><span class="chip">'+esc(m.project||"全局")+"</span></span></div>";
     }).join("")
       :'<div class="hint" style="padding:10px 14px;display:flex;align-items:center;justify-content:space-between;gap:8px"><span>暂无跨会话记忆</span><button class="btn sm" onclick="openMemoryView()">提取记忆 →</button></div>';
+  })();
 
-    let au=null;try{au=await api("/audit")}catch(e){}
+  const pAudit=(async()=>{
+    let au=null;try{au=await api("/audit?summary_only=1")}catch(e){}
+    if(my!==ovGen)return;
     $("#ov-audit").innerHTML=au?
       '<div class="audit-grid">'+
       '<div class="audit-cell"><span class="al">累计事件</span><span class="av">'+num(au.total_events||0)+'</span></div>'+
@@ -409,13 +474,9 @@ async function loadOv(){
       '<div class="audit-cell"><span class="al">切换 / 缺失</span><span class="av">'+num((au.summary||{}).switches||0)+' / '+num((au.summary||{}).model_missing_events||0)+'</span></div>'+
       '</div>'
       :'<div class="hint" style="padding:10px 14px">—</div>';
+  })();
 
-    renderUsageRank();
-  }catch(e){
-    if(e&&e.stale)return;
-    $("#ov-band").innerHTML=errEmpty("概览加载失败："+e.message,"loadOv()");
-    $("#ov-latest").innerHTML="";$("#ov-quota").innerHTML="";
-  }
+  await Promise.allSettled([pLedger,pUsage,pRecent,pProbe,pMem,pAudit]);
 }
 const kpi=(v,k,tip,sub)=>'<div class="kpi"'+(tip?' title="'+esc(tip)+'"':"")+'>'+
   '<div class="k"><span>'+k+'</span></div>'+
@@ -455,8 +516,8 @@ function setUsageRank(k){usageRankKey=k;
 async function setUsageWindow(w){
   usageWindow=USAGE_WINDOWS.some(x=>x[0]===w)?w:"5h";
   $$("#ov-wseg button").forEach(b=>b.classList.toggle("on",b.dataset.w===usageWindow));
-  try{const u=await usageSeq(()=>api("/ledger/usage?window="+encodeURIComponent(usageWindow)));
-    if(u)renderQuota(u,usageLedger)}catch(e){}
+  try{const u=await usageSeq(()=>api("/ledger/usage?window="+encodeURIComponent(usageWindow)+"&fast=1"));
+    if(u){renderQuota(u,usageLedger);if(u.quota_pending)scheduleQuotaRefresh(ovGen,usageWindow)}}catch(e){}
 }
 function renderQuota(u,ledger){
   const el=$("#ov-quota");if(!el)return;
@@ -632,7 +693,12 @@ function setRefTier(v){usageRefTier=+v||0;
 
 /* ================= 快照资产 & 项目树 & 跨会话记忆库 ================= */
 const snapsSeq=seqGuard();
-let snapPage=0,snapAsc=false,snapMode="recent",snapQuery="",snapLeaves=true,snapTreeMode=false,snapMemMode=false,memKind="all",snapInputTimer=null,treeTarget="antigravity",treeApply=false,treeAgent="zcode",treeArchived=false;
+let snapPage=0,snapAsc=false,snapMode="recent",snapQuery="",snapLeaves=true,snapTreeMode=false,snapMemMode=false,snapAgent="",memKind="all",snapInputTimer=null,treeTarget="antigravity",treeApply=false,treeAgent="zcode",treeArchived=false;
+function setSnapAgent(a){
+  snapAgent=String(a||"");snapPage=0;snapMode="recent";
+  $$("#snap-agent-bar .pill-btn").forEach(b=>b.classList.toggle("on",(b.dataset.a||"")===snapAgent));
+  renderSnaps();
+}
 const projOpenState={};
 
 function updateSnapTreeBtn(){
@@ -641,9 +707,10 @@ function updateSnapTreeBtn(){
   if(b){b.setAttribute("aria-pressed",snapTreeMode?"true":"false");b.classList.toggle("on",snapTreeMode)}
   if(mbBtn){mbBtn.setAttribute("aria-pressed",snapMemMode?"true":"false");mbBtn.classList.toggle("on",snapMemMode)}
   if(lbBtn){lbBtn.setAttribute("aria-pressed",isList?"true":"false");lbBtn.classList.toggle("on",isList)}
-  const sb=$("#snap-sort"),lb=$("#snap-leaves");
+  const sb=$("#snap-sort"),lb=$("#snap-leaves"),ab=$("#snap-agent-bar");
   if(sb)sb.style.display=isList?"":"none";
   if(lb)lb.style.display=isList?"":"none";
+  if(ab)ab.style.display=isList?"":"none";
   if(qEl){
     qEl.placeholder=snapMemMode?"检索跨会话记忆 — 历史决策、架构约定或用户偏好…"
       :snapTreeMode?"即时筛选项目名或目录路径…"
@@ -1215,7 +1282,7 @@ async function renderSnaps(){
   $("#snap-list").innerHTML='<div class="skel" style="width:45%"></div><div class="skel" style="width:66%"></div>';
   try{
     const d=await snapsSeq(()=>api("/recent?limit="+LIM+"&offset="+(snapPage*LIM)+"&order="+(snapAsc?"asc":"desc")+
-      "&leaves="+(snapLeaves?1:0)));
+      "&leaves="+(snapLeaves?1:0)+(snapAgent?"&agent="+encodeURIComponent(snapAgent):"")));
     const rows=d.rows||[],total=d.total||0;
     renderSnapTable(rows,{recent:true,total,rows:rows.length,versionsTotal:d.versions_total});
   }catch(e){
@@ -1613,7 +1680,8 @@ function onMigTarget(){
   $$("#tgt-cards .tgt-card").forEach(c=>c.classList.toggle("on",c.querySelector("input").value===t));
   const outOnly=t==="markdown";
   $("#mig-md-note").style.display=outOnly?"block":"none";
-  if(outOnly)$("#mig-md-note").textContent="Markdown 目标始终导出到 outbox，无写入会话目录语义。";
+  if(outOnly)$("#mig-md-note").textContent="Markdown 目标始终导出到 outbox，生成后可直接一键复制简报正文。";
+  const br=$("#mig-budget-row");if(br)br.style.display=outOnly?"flex":"none";
   $("#mig-outbox").textContent=outOnly?"导出交接简报（始终 outbox）":"生成到 outbox（安全）";
   $("#mig-apply").style.display=outOnly?"none":"inline-flex";
   renderMigPreview();
@@ -1713,8 +1781,13 @@ async function migGo(apply){
   btns.forEach(b=>b&&(b.disabled=true));
   $("#mig-result").innerHTML='<div class="skel" style="width:50%"></div>';
   try{
+    const reqBody={id:id,target:t,apply:apply};
+    if(t==="markdown"){
+      const bv=Number(($("#mig-budget")&&$("#mig-budget").value)||0);
+      if(bv>0)reqBody.budget_tokens=bv;
+    }
     const r=await api("/migrate",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({id:id,target:t,apply:apply})});
+      body:JSON.stringify(reqBody)});
     renderMigResult(r,{id,target:t,apply});
     toast(r.applied?"已写入会话目录":"已生成到 outbox");
   }catch(e){
@@ -1725,9 +1798,12 @@ async function migGo(apply){
   }
   btns.forEach(b=>b&&(b.disabled=false));
 }
+let lastMdBrief="";
+function copyLastMdBrief(){if(!lastMdBrief)return toast("暂无可复制简报",1);copyText(lastMdBrief,"已复制 Markdown 交接简报正文")}
 function renderMigResult(r,ctx){
   const fpath=String(r.dest||"");
   const fname=fpath.split(/[\\/]/).pop();
+  lastMdBrief=(ctx.target==="markdown"&&r.content)?String(r.content):"";
   let cmd="",cmdNote="";
   if(ctx.target==="codex"&&r.new_sid){
     cmd=r.applied?("codex resume "+r.new_sid):"codex resume";
@@ -1744,6 +1820,11 @@ function renderMigResult(r,ctx){
   }else{
     cmd="code \""+fpath+"\"";cmdNote="Markdown 简报 — 任意 agent / 编辑器可读";
   }
+  const mdPart=lastMdBrief
+    ?('<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">'+
+      '<button class="btn sm primary" onclick="copyLastMdBrief()">一键复制简报正文 ('+num(lastMdBrief.length)+' 字符)</button></div>'+
+      '<details class="md-preview"><summary>展开预览生成的 Markdown 交接简报</summary><pre>'+esc(lastMdBrief)+'</pre></details>')
+    :"";
   $("#mig-result").innerHTML=
     '<div class="result-card"><div class="rt">'+GOOD+
     (r.applied?"已写入目标会话目录":"已生成到 vault/outbox/")+
@@ -1752,6 +1833,7 @@ function renderMigResult(r,ctx){
     '<button class="btn sm" data-v="'+esc(fpath)+'" onclick="copyData(this,\'已复制文件路径\')">复制路径</button></div>'+
     '<div class="hint">'+num(r.lines)+" 行"+(r.dropped?" · 丢弃未配对 tool_result ×"+num(r.dropped):" · 无丢弃")+
     (r.new_sid?" · session id <span class='mono'>"+esc(r.new_sid)+"</span>":"")+"</div>"+
+    mdPart+
     '<div class="term"><span class="tp">'+esc(cmdNote)+"</span><code>$ "+esc(cmd)+
     '</code><br><button class="btn sm" style="margin-top:8px" data-v="'+esc(cmd)+'" onclick="copyData(this,\'已复制命令\')">复制命令</button></div></div>';
 }
@@ -1858,6 +1940,171 @@ async function probeNow(){
     $("#probe-state").innerHTML='<span class="dot err"></span>探测请求失败';
   }
   b&&(b.disabled=false);probing=false;
+}
+
+/* ================= 设置与运维 (MCP / Ollama 语义层 / 额度 Token / 备份与裁剪) ================= */
+const opsSeq=seqGuard();
+async function loadOps(probeSem){
+  try{
+    const [mcp,st]=await opsSeq(()=>Promise.all([
+      api("/ops/mcp"),
+      api("/ops/status"+(probeSem?"?probe=1":"")),
+    ]));
+    const mb=$("#ops-mcp-box");
+    if(mb){
+      mb.dataset.loaded="1";
+      const rows=(mcp&&mcp.clients)||[];
+      mb.innerHTML=
+        rows.map(c=>'<div class="ops-row"><div class="ops-row-l">'+
+          '<span class="dot '+(c.installed?"ok":(c.detected?"warn":"off"))+'"></span>'+
+          '<span class="ops-row-name">'+esc(c.name)+'</span>'+
+          '<span class="pill '+(c.installed?"ok":(c.detected?"warn":""))+'">'+(c.installed?"已接入":(c.detected?"已检测到 · 未接入":"未检测到"))+'</span>'+
+          '<span class="ops-row-sub" title="'+esc(c.config||"")+'">'+esc(truncPath(c.config||"",34))+'</span></div>'+
+          '<button class="btn sm" onclick="opsInstallMcp(\''+esc(c.id)+'\')">'+(c.installed?"重检":"接入")+'</button></div>').join("")+
+        '<div class="hint" style="margin-top:8px;word-break:break-all">MCP 启动命令：<code class="mono">'+esc((mcp&&mcp.server_cmd)||"")+'</code></div>'+
+        '<div id="ops-mcp-out"></div>';
+    }
+    const sb=$("#ops-sem-box");
+    if(sb){
+      const sem=(st&&st.semantic)||{};
+      const emb=sem.embeddings||{},llm=sem.llm||{};
+      const hostVal=(emb.url||"").replace(/\/v1\/embeddings.*$/,"")||"http://127.0.0.1:11434";
+      sb.innerHTML=
+        '<div class="ops-kv">'+
+        '<b>向量重排</b><span>'+(emb.configured?('<span class="pill ok">已配置</span> '+esc(emb.model||"")+(emb.reachable===true?" · 在线":(emb.reachable===false?" · 不可达":""))):'<span class="pill">未开启 (纯本地零外发)</span>')+'</span>'+
+        '<b>本地 LLM</b><span>'+(llm.configured?('<span class="pill ok">已配置</span> '+esc(llm.model||"")+(llm.reachable===true?" · 在线":(llm.reachable===false?" · 不可达":""))):'<span class="pill">未开启</span>')+'</span>'+
+        '</div>'+
+        '<div class="ops-form">'+
+        '<div class="ops-form-row"><input id="ops-ol-host" value="'+esc(hostVal)+'" placeholder="Ollama 地址 (默认 http://127.0.0.1:11434)" aria-label="Ollama 地址"></div>'+
+        '<div class="ops-form-row">'+
+          '<input id="ops-ol-emb" value="'+esc(emb.model||"nomic-embed-text")+'" placeholder="Embedding 模型" aria-label="Embedding 模型">'+
+          '<input id="ops-ol-llm" value="'+esc(llm.model||"qwen2.5:7b")+'" placeholder="LLM 模型" aria-label="LLM 模型">'+
+        '</div></div>'+
+        '<div class="ops-acts">'+
+          '<button class="btn sm primary" onclick="opsConfigureOllama()">保存并启用 Ollama</button>'+
+          '<button class="btn sm" onclick="opsSemanticRun(\'refine\')">LLM 精炼记忆</button>'+
+          '<button class="btn sm" onclick="opsSemanticRun(\'titles\')">生成会话标题</button>'+
+        '</div><div id="ops-sem-out"></div>';
+    }
+    const qb=$("#ops-quota-box");
+    if(qb){
+      qb.innerHTML=
+        '<div class="ops-kv">'+
+        '<b>智谱实时额度</b><span>'+(st&&st.plan_token_set?('<span class="pill ok">已配置</span> '+esc(st.plan_token_hint||"***")):'<span class="pill">未配置</span>')+'</span>'+
+        '<b>自定义额度池</b><span>'+(st&&st.accounts_configured?'<span class="pill ok">vault/accounts.json 已生效</span>':'<span class="hint">按 7d 峰值纯消耗模式展示</span>')+'</span>'+
+        '</div>'+
+        '<div class="ops-form"><div class="ops-form-row">'+
+          '<input type="password" id="ops-plan-tok" placeholder="粘贴智谱 Coding Plan Token（仅存本机 vault/plan_token.json）" aria-label="智谱 Coding Plan Token">'+
+          '<button class="btn sm primary" onclick="opsSavePlanToken(false)">保存并校验</button>'+
+          (st&&st.plan_token_set?'<button class="btn sm" onclick="opsSavePlanToken(true)">清除</button>':"")+
+        '</div></div><div id="ops-quota-out"></div>';
+    }
+    const mt=$("#ops-maint-box");
+    if(mt){
+      const lb=st&&st.latest_backup;
+      mt.innerHTML=
+        '<div class="ops-kv">'+
+        '<b>当前版本</b><span>v'+esc((st&&st.version)||"?")+(st&&st.frozen?" (Windows 独立托盘版)":" (源码模式)")+'</span>'+
+        '<b>数据目录</b><span>'+esc((st&&st.vault)||"")+'</span>'+
+        '<b>存储占用</b><span>vault.db '+((st&&st.db_mb)||0)+' MB · 倒排索引 '+((st&&st.index_mb)||0)+' MB</span>'+
+        '<b>本地备份</b><span>'+(lb?(esc(lb.name)+' ('+lb.size_mb+' MB · 共 '+num(st.backups_count||0)+' 份)'):'暂无备份')+'</span>'+
+        '</div>'+
+        '<div class="ops-acts">'+
+          '<button class="btn sm primary" id="ops-bk-btn" onclick="opsBackupNow()">立即备份 (zip)</button>'+
+          '<button class="btn sm" onclick="opsPrune(false)">预览可裁剪版本</button>'+
+          '<button class="btn sm danger" onclick="opsPrune(true)">执行裁剪 (自动先备份)</button>'+
+        '</div><div id="ops-maint-out"></div>';
+    }
+  }catch(e){
+    if(e&&e.stale)return;
+    const mb=$("#ops-mcp-box");
+    if(mb)mb.innerHTML=errEmpty("设置面板加载失败："+e.message,"loadOps(false)");
+  }
+}
+async function opsInstallMcp(client){
+  const out=$("#ops-mcp-out");
+  try{
+    const r=await api("/ops/mcp/install",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({client:client||"all"})});
+    const lines=((r&&r.results)||[]).map(x=>"["+x.client+"] "+x.message).join("\n");
+    toast("MCP 配置已执行");
+    await loadOps(false);
+    const out2=$("#ops-mcp-out");
+    if(out2&&lines)out2.innerHTML='<div class="ops-out">'+esc(lines)+'</div>';
+  }catch(e){
+    toast("MCP 接入失败："+e.message,1);
+    if(out)out.innerHTML='<div class="ops-out">'+esc(e.message)+'</div>';
+  }
+}
+async function opsConfigureOllama(){
+  const host=($("#ops-ol-host")&&$("#ops-ol-host").value||"").trim()||"http://127.0.0.1:11434";
+  const emb=($("#ops-ol-emb")&&$("#ops-ol-emb").value||"").trim()||"nomic-embed-text";
+  const llm=($("#ops-ol-llm")&&$("#ops-ol-llm").value||"").trim()||"qwen2.5:7b";
+  try{
+    await api("/semantic/config",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({ollama:true,host:host,embed_model:emb,llm_model:llm,enable_llm:true})});
+    toast("已保存本地 Ollama 语义配置");
+    await loadOps(true);
+  }catch(e){toast("配置保存失败："+e.message,1)}
+}
+async function opsSemanticRun(kind){
+  const out=$("#ops-sem-out");
+  if(out)out.innerHTML='<div class="ops-out">正在执行，请稍候…</div>';
+  try{
+    const url=kind==="titles"?"/semantic/titles":"/semantic/refine";
+    const r=await api(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({limit:15})});
+    if(out)out.innerHTML='<div class="ops-out">'+esc(JSON.stringify(r,null,2))+'</div>';
+    toast(kind==="titles"?"会话标题生成完成":"语义记忆精炼完成");
+    loadOv();
+  }catch(e){
+    if(out)out.innerHTML='<div class="ops-out">'+esc(e.message)+'</div>';
+    toast("执行失败："+e.message,1);
+  }
+}
+async function opsSavePlanToken(clear){
+  const tok=clear?"":(($("#ops-plan-tok")&&$("#ops-plan-tok").value)||"").trim();
+  if(!clear&&!tok)return toast("请先粘贴 Token",1);
+  try{
+    const r=await api("/ops/plan_token",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(clear?{clear:true}:{token:tok,verify:true})});
+    toast(clear?"已清除 Token":(r.probe&&r.probe.ok?"Token 已保存并验证通过":"Token 已保存"));
+    await loadOps(false);loadOv();
+  }catch(e){toast("保存失败："+e.message,1)}
+}
+async function opsLedgerSync(jumpOv){
+  const btn=$("#ops-ledger-btn");if(btn)btn.disabled=true;
+  try{
+    const r=await api("/ops/ledger_sync",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+    toast((r&&r.message)||"多端账本同步完成");
+    const out=$("#ops-quota-out");if(out&&r&&r.message)out.innerHTML='<div class="ops-out">'+esc(r.message)+'</div>';
+    loadOv();
+    if(jumpOv)setTab("ov");
+  }catch(e){toast("账本同步失败："+e.message,1)}
+  if(btn)btn.disabled=false;
+}
+async function opsBackupNow(){
+  const btn=$("#ops-bk-btn");if(btn){btn.disabled=true;btn.textContent="备份中…"}
+  try{
+    const r=await api("/ops/backup",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({keep:10})});
+    toast("备份完成："+(r.name||"zip"));
+    await loadOps(false);
+    const out=$("#ops-maint-out");if(out)out.innerHTML='<div class="ops-out">'+esc(r.message||r.path||"")+'</div>';
+  }catch(e){toast("备份失败："+e.message,1)}
+  if(btn){btn.disabled=false;btn.textContent="立即备份 (zip)"}
+}
+async function opsPrune(apply){
+  if(apply&&!await askConfirm("将清理每个会话同日的冗余中间版本，并保留每日最后一版、最新叶子、fork 与孤本。\n执行前会自动创建一份完整 zip 备份。确认继续？"))return;
+  const out=$("#ops-maint-out");
+  if(out)out.innerHTML='<div class="ops-out">'+(apply?"正在先备份并裁剪…":"正在扫描可回收版本…")+'</div>';
+  try{
+    const r=await api("/ops/prune",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({apply:!!apply})});
+    if(out)out.innerHTML='<div class="ops-out">'+esc(r.message||"")+'</div>';
+    toast(apply?"版本裁剪完成":"可回收 "+num(r.drop_count||0)+" 版 / "+(r.reclaim_mb||0)+" MB");
+    if(apply){await checkHealth();loadOv();await loadOps(false);}
+  }catch(e){
+    if(out)out.innerHTML='<div class="ops-out">'+esc(e.message)+'</div>';
+    toast("裁剪失败："+e.message,1);
+  }
 }
 
 /* ================= 启动 ================= */

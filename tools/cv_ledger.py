@@ -48,6 +48,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import threading
 import time
 from pathlib import Path
 from urllib.parse import unquote
@@ -371,17 +372,50 @@ def fetch_remote_quota(token: str, url: str = None, timeout: float = 4.0) -> dic
 
 
 _REMOTE_Q = {"at": 0.0, "data": None}
+_REMOTE_Q_LOCK = threading.Lock()
+_REMOTE_Q_INFLIGHT = False
 
 
-def remote_quota_cached(vault: Path, ttl: float = 60.0, now: float = None):
+def _refresh_remote_quota_async(token: str) -> None:
+    global _REMOTE_Q_INFLIGHT
+    with _REMOTE_Q_LOCK:
+        if _REMOTE_Q_INFLIGHT:
+            return
+        _REMOTE_Q_INFLIGHT = True
+
+    def _bg():
+        global _REMOTE_Q_INFLIGHT
+        try:
+            r = fetch_remote_quota(token)
+            _REMOTE_Q.update(at=time.time(), data=r)
+        except Exception:
+            pass
+        finally:
+            with _REMOTE_Q_LOCK:
+                _REMOTE_Q_INFLIGHT = False
+
+    threading.Thread(target=_bg, daemon=True).start()
+
+
+def remote_quota_cached(vault: Path, ttl: float = 60.0, now: float = None,
+                        swr: bool = False, nonblocking_cold: bool = False):
     """带 TTL 缓存的远端额度 (serve 热路径每次 /ledger/usage 都调, 不能每请求打厂商)。
-    未配置 Token → None (调用方不附 remote_quota 字段)。"""
+    未配置 Token → None (调用方不附 remote_quota 字段)。
+    swr=True: 已有旧缓存且超时时立刻返回旧值, 同时后台单飞刷新 (绝不阻塞控制台首屏)。
+    nonblocking_cold=True: 首次冷启无缓存时立刻触发后台拉取并返回 {"_pending": True}。"""
     token = load_plan_token(vault)
     if not token:
         return None
     now = time.time() if now is None else float(now)
-    if _REMOTE_Q["data"] is not None and now - _REMOTE_Q["at"] < ttl:
-        return _REMOTE_Q["data"]
+    cur = _REMOTE_Q.get("data")
+    if cur is not None and now - float(_REMOTE_Q.get("at") or 0.0) < ttl:
+        return cur
+    if swr and cur is not None:
+        _refresh_remote_quota_async(token)
+        return cur
+    if nonblocking_cold and cur is None:
+        _refresh_remote_quota_async(token)
+        return {"_pending": True}
     r = fetch_remote_quota(token)
     _REMOTE_Q.update(at=now, data=r)
     return r
@@ -780,13 +814,46 @@ def fetch_agv_quota(timeout: float = 2.0, creds=None) -> dict:
 
 
 _AGV_Q = {"at": 0.0, "data": None}
+_AGV_Q_LOCK = threading.Lock()
+_AGV_Q_INFLIGHT = False
 
 
-def agv_quota_cached(ttl: float = 60.0, now: float = None):
-    """带 TTL (含失败负缓存) 的 Antigravity 实时额度 — 避免热路径反复 spawn 进程扫描。"""
+def _refresh_agv_quota_async() -> None:
+    global _AGV_Q_INFLIGHT
+    with _AGV_Q_LOCK:
+        if _AGV_Q_INFLIGHT:
+            return
+        _AGV_Q_INFLIGHT = True
+
+    def _bg():
+        global _AGV_Q_INFLIGHT
+        try:
+            r = fetch_agv_quota()
+            _AGV_Q.update(at=time.time(), data=r)
+        except Exception:
+            pass
+        finally:
+            with _AGV_Q_LOCK:
+                _AGV_Q_INFLIGHT = False
+
+    threading.Thread(target=_bg, daemon=True).start()
+
+
+def agv_quota_cached(ttl: float = 60.0, now: float = None,
+                     swr: bool = False, nonblocking_cold: bool = False):
+    """带 TTL (含失败负缓存) 的 Antigravity 实时额度 — 避免热路径反复 spawn 进程扫描。
+    swr=True: 过期时旧值 0ms 秒回 + 后台单飞线程异步更新。
+    nonblocking_cold=True: 冷启无缓存时不阻塞请求, 返回 {"_pending": True} 并后台探测。"""
     now = time.time() if now is None else float(now)
-    if _AGV_Q["data"] is not None and now - _AGV_Q["at"] < ttl:
-        return _AGV_Q["data"]
+    cur = _AGV_Q.get("data")
+    if cur is not None and now - float(_AGV_Q.get("at") or 0.0) < ttl:
+        return cur
+    if swr and cur is not None:
+        _refresh_agv_quota_async()
+        return cur
+    if nonblocking_cold and cur is None:
+        _refresh_agv_quota_async()
+        return {"_pending": True}
     r = fetch_agv_quota()
     _AGV_Q.update(at=now, data=r)
     return r

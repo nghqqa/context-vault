@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cv  # noqa: E402
 
 VIEWPORTS = [(380, 740), (900, 800), (1440, 900), (2560, 1300)]
-TABS = ["ov", "snap", "mig", "probe"]
+TABS = ["ov", "snap", "mig", "probe", "ops"]
 # 页面级溢出: 文档宽于视口, 或可见元素越出视口。.tbl-wrap (表格容器) 与 .sidebar (窄屏时栏内横滚)
 # 的内部滚动是设计行为, 排除。
 PROBE = """() => {

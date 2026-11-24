@@ -15,6 +15,19 @@ Your AI coding sessions are your most valuable work asset — yet they're locked
 - Every migration tool on the market is a one-shot **porter**. None of them is an **asset vault** (persistent store, content addressing, lineage, ledger, audit trail).
 - Lock-in is not going to fix itself: vendors benefit from it.
 
+## 🖥️ Console Preview
+
+> Loopback-only `http://127.0.0.1:8791/` · Swiss International Style · Light / Dark / System · **Parallel SWR first-load (< 100ms)**
+
+<p>
+  <img src="docs/assets/console-overview-dark.png" alt="Context Vault Overview and Quota Capsules (Dark Theme)" width="100%" />
+</p>
+<details>
+  <summary>Expand: Settings &amp; Ops Workbench (1-click MCP / Ollama / Backup &amp; Prune) &amp; Light Theme</summary>
+  <p><img src="docs/assets/console-ops-dark.png" alt="Context Vault Settings &amp; Ops Workbench" width="100%" /></p>
+  <p><img src="docs/assets/console-overview-light.png" alt="Context Vault Overview (Light Theme)" width="100%" /></p>
+</details>
+
 ## ✨ Features
 
 - **Snapshot vault** — export Codex / Claude Code / ZCode / Antigravity / 18 bridged harnesses into the vendor-neutral [context-snapshot](docs/snapshot-format.md) format: content-addressed, immutable, idempotent, with automatic lineage (`parent_snapshot` trees & forks) and daily retention pruning (`cv prune`).
@@ -28,11 +41,13 @@ Your AI coding sessions are your most valuable work asset — yet they're locked
 - **MCP backend** — 6 tools (`vault_remember` etc.) turn any MCP client (Claude Code / Codex / Cursor) into a remembering agent with optional `budget_tokens` trimming. One command to install everywhere.
 - **AML Add/Search adapter** — `cv-aml` / `tools/aml_adapter.py` (and `/aml/add`, `/aml/search` mounted on `cv serve`) with tenant isolation, `request_id` idempotent replay & `409 Conflict` detection, plus a zero-dep `Dockerfile.aml`.
 - **Optional secret redaction** — `cv export --redact` or `CV_REDACT_SECRETS=1` masks common API keys, GitHub/AWS tokens, JWTs and PEM private keys before persisting snapshots.
+- **Optional local semantic layer (Ollama / LLM)** — `cv semantic` (and the Console **Settings & Ops** tab) configures local Ollama dense reranking, LLM memory distillation, and automatic session titles; off by default with zero outbound traffic.
+- **Instant local Web Console** — `Ctrl/Cmd+K` global palette, empty-vault 3-step onboarding, manual memory pinning, budgeted Markdown brief 1-click copy, visual MCP/backup/prune controls, and non-blocking SWR quota caching.
 - **Upstream sentinel** — probes relay `/v1/models`, alerts and leaves an audit trail when a model silently disappears.
 
 ## 🚀 Quick Start
 
-> **Windows ready-to-run tray app (no Python required)**: Download [ContextVault.exe (v0.8.0)](https://github.com/nghqqa/context-vault/releases/download/v0.8.0/ContextVault.exe) ([Release notes & SHA256](https://github.com/nghqqa/context-vault/releases/tag/v0.8.0)) and double-click to run the resident hot-index server (`127.0.0.1:8791`), Web Console, periodic sync, and daily backups.
+> **Windows ready-to-run tray app (no Python required, 14 MB single binary)**: Download [ContextVault.exe (v0.9.0)](https://github.com/nghqqa/context-vault/releases/download/v0.9.0/ContextVault.exe) ([Release notes & SHA256](https://github.com/nghqqa/context-vault/releases/tag/v0.9.0)) and double-click to launch the resident Web Console (`127.0.0.1:8791`), **built-in zero-Python MCP server (`--mcp`)**, periodic sync, and daily backups.
 
 ```bash
 pip install -e .                   # optional: installs global `cv`, `cv-mcp`, `cv-aml` commands (zero deps)
@@ -56,7 +71,7 @@ python tools/cv.py migrate ~/.claude/transcripts/ses_xxx.jsonl --target codex
 python tools/cv.py import cv_xxxx --target codex --apply
 ```
 
-For the full CLI reference, scenario playbooks, environment variables, and troubleshooting, see [docs/USAGE.md](docs/USAGE.md).
+For the full CLI reference, Windows `.exe` guide, scenario playbooks, environment variables, and troubleshooting, see **[docs/USAGE.en.md](docs/USAGE.en.md)** (English) or **[docs/USAGE.md](docs/USAGE.md)** (中文完整手册).
 
 ## 📦 What survives a migration
 
@@ -102,7 +117,7 @@ Two rules that don't bend: **snapshots are immutable** (any derived data lives i
 - 195 MB Codex rollout → 12 MB snapshot in **1.5 s**; 39 compaction boundaries, 224M tokens of usage, 838 tool-call pairs intact.
 - **Bidirectional migration, both directions real-machine verified**: Codex→Claude resumes and continues accurately in Claude 2.1.181; Claude→Codex restores **373,160 tokens of full context** in Codex 0.153.4.
 - Reverse-engineered and dodged the two-generation Codex format trap (numeric vs string `ordinal`, resume reading the SQLite thread-store, misleading "rollout is empty").
-- Test suite: **234 tests** including a hot/cold equivalence test — the resident index and the file-scan fallback must return identical results ("the daemon accelerates; it is never a dependency"). CI also runs JS syntax/runtime/unit checks and a real-browser layout probe (380–2560px × six views, page-overflow detection).
+- Test suite: **236 tests** including hot/cold equivalence, SWR non-blocking caching, 413 payload guards, and gzip compression — the resident index and the file-scan fallback must return identical results. CI also runs JS syntax/runtime/unit checks and a real-browser layout probe (380–2560px × all views, zero overflow).
 
 ## Design principles
 
@@ -112,7 +127,7 @@ Two rules that don't bend: **snapshots are immutable** (any derived data lives i
 
 ## Dependencies & data sources
 
-**Core features have zero external dependencies** (pure Python stdlib; the CLI is a single file). The token ledger works from usage records inside your own session files. Optional integrations (headroom proxy, relay billing APIs) are enhancements with environment-variable fallbacks (`CV_RELAY_PROFILES`, `CV_RELAY_KEY`) — see [README.zh.md](README.zh.md) for the full boundary table. Uninstall every integration: the vault loses one byte of nothing.
+**Core features have zero external dependencies** (pure Python 3.9+ stdlib, modular architecture, `pip install -e .`). The token ledger works from usage records inside your own session files. Optional integrations (headroom proxy, relay billing APIs) are enhancements with environment-variable fallbacks (`CV_RELAY_PROFILES`, `CV_RELAY_KEY`) — see [README.zh.md](README.zh.md) for the full boundary table. Uninstall every integration: the vault loses one byte of nothing.
 
 ## 🆚 How this relates to neighbors
 
@@ -144,7 +159,8 @@ Porters are upstream adapters, not competitors — `cv ingest` and `cv export-ha
 - **M2 ✅** resident service + web console · MCP backend · cache warming · sentry/watch · 18-format bridged intake
 - **M3 ✅** memory layer (pluggable engine) · fork/tree lineage · audit timeline
 - **M4 ✅** deep retrieval core (code-aware BM25 + lineage folding + SQLite inverted index) · temporal memory (superseded conflict resolution) · budgeted handoff compression · CodingVault-Bench open ablation
-- **Next** launch & feedback · optional dense vectors by default · optional encryption
+- **M5 ✅** local multi-client ledger & 5h quota ETA · native Antigravity WAL sync · AML multi-tenant adapter · local Ollama semantic layer (`cv semantic`) · Web Console Settings & Ops workbench · parallel SWR sub-100ms load · slim 14 MB zero-Python Windows tray with native `--mcp`
+- **Next** macOS/Linux tray companion · optional encrypted backups · community feedback iterations
 
 ## FAQ
 

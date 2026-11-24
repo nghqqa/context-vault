@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import datetime as dt
+import gzip
 import hmac
 import json
 import os
 import re
 import sqlite3
 import sys
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -26,6 +29,61 @@ def _cv():
 # 索引实现已解耦至 tools/cv_index.py, 前端模板解耦至 tools/ui/ (经 cv_ui 组装)
 
 CONSOLE_HTML = _load_console_html()
+
+
+_CLIENT_DISCONNECT = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+MAX_POST_BYTES = 32 * 1024 * 1024  # 单次 POST 上限 32 MiB, 防异常大包 OOM
+GZIP_MIN_BYTES = 4096              # ≥4KB 响应在客户端声明 gzip 时自动压缩 (零依赖)
+
+
+def _file_stamp(p: Path):
+    try:
+        st = p.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _db_stamp(p: Path):
+    """同时采集主库与 -wal 文件指纹: SQLite WAL 写入会先改 -wal 而不立刻动主库 mtime。"""
+    return (_file_stamp(p), _file_stamp(Path(str(p) + "-wal")))
+
+
+class _ServerCache:
+    """进程内轻量结果缓存 (隔离在每个 build_vault_server 实例内, 避免单测串态)。
+    key 纳入 DB + WAL 文件指纹, 外部进程写入自动失效; 服务内写接口亦会显式 clear()。"""
+
+    def __init__(self, max_entries: int = 128):
+        self._lock = threading.Lock()
+        self._data: dict = {}
+        self._max = max_entries
+
+    def get_or_compute(self, key, fn):
+        with self._lock:
+            if key in self._data:
+                return self._data[key]
+        val = fn()
+        with self._lock:
+            if len(self._data) >= self._max:
+                self._data.clear()
+            self._data[key] = val
+        return val
+
+    def clear(self):
+        with self._lock:
+            self._data.clear()
+
+
+def _ensure_vault_tables_if_missing(conn: sqlite3.Connection) -> None:
+    """热读路径只在核心表或二级索引缺失时补齐, 避免每次 GET 跑 DDL 与后台 sync 争 SQLite 写锁。"""
+    n = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE"
+        " (type='table' AND name IN ('snapshots','ledger_events','memory_items','probe_events'))"
+        " OR (type='index' AND name IN ('idx_snapshots_parent','idx_snapshots_agent_ref','idx_probe_status_id'))"
+    ).fetchone()[0]
+    if n < 7:
+        conn.executescript(_cv().SCHEMA)
+        conn.commit()
 
 
 class _KeyStub:
@@ -47,7 +105,108 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
     from mcp_server import ledger_summary
     import cv_ledger  # 本地多端账本 (usage_events); 延迟导入防循环 (cv_ledger 顶层 import cv)  # ledger_summary: /stats 端点 (曾漏导入致 500)
     idx = VaultIndex(vault, block_text)  # block_text 用本模块规范实现, 与 mcp 冷回退同源
+    cache = _ServerCache()
     aml_router_holder = [None]
+
+    def _compute_zcode_usage():
+        zcode_usage = {}
+        try:  # 真相源: zcode 主库 model_usage (全量调用); model-io 审计文件仅零头
+            zdb = sqlite3.connect(f"file:{_cv().ZCODE_DB}?mode=ro", uri=True)
+            try:
+                for r in zdb.execute("SELECT model_id, COUNT(*), COALESCE(SUM(input_tokens),0),"
+                                     " COALESCE(SUM(output_tokens),0), COALESCE(SUM(cache_read_input_tokens),0)"
+                                     " FROM model_usage GROUP BY model_id"):
+                    zcode_usage.setdefault(r[0] or "未知",
+                                           {"n": r[1], "tin": r[2], "tout": r[3], "cr": r[4]})
+            finally:
+                zdb.close()
+        except sqlite3.Error:
+            pass  # 无 zcode / 无表 = 无自有用量, 合法空态
+        return zcode_usage
+
+    def _compute_ledger():
+        conn = _cv().db(vault)
+        try:
+            _ensure_vault_tables_if_missing(conn)
+            try:
+                mem_n = conn.execute("SELECT COUNT(*) n FROM memory_items").fetchone()["n"]
+            except sqlite3.OperationalError:
+                mem_n = 0
+            prices = {}
+            prices_p = vault / "prices.json"  # {"模型": {"input":x,"output":y,"cache_read":z}} $/Mtok
+            num_ok = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool)
+            if prices_p.exists():
+                try:
+                    pj = json.loads(prices_p.read_text(encoding="utf-8"))
+                    # bool 是 int 子类, float(True)=1.0 会编造假成本 (二轮 regression-1)
+                    prices = {m: v for m, v in pj.items()
+                              if isinstance(v, dict) and num_ok(v.get("input")) and num_ok(v.get("output"))}
+                except (ValueError, AttributeError, OSError):
+                    pass  # 非法 JSON/顶层非 dict/prices 是目录: 无价目诚实显示, 不 500
+            zcode_raw = cache.get_or_compute(
+                ("zcode_usage", str(_cv().ZCODE_DB), _db_stamp(_cv().ZCODE_DB)),
+                _compute_zcode_usage,
+            )
+            zcode_usage = {m: dict(v) for m, v in zcode_raw.items()}
+            zcode_snapshots = 0
+            try:
+                zn = conn.execute("SELECT COUNT(*) FROM snapshots WHERE agent='zcode'").fetchone()[0]
+                if zn:
+                    zcode_snapshots = zn
+            except sqlite3.Error:
+                pass
+            for m, a in zcode_usage.items():
+                pr = prices.get(m)
+                if pr is None:
+                    a["cost"] = None
+                    continue
+                try:  # 值级坏形状 (字符串/null/list) 只损失该模型成本, 不拖垮整个 /ledger
+                    crp = pr.get("cache_read")
+                    a["cost"] = round((a["tin"] * float(pr["input"]) + a["tout"] * float(pr["output"])
+                                       + a["cr"] * (float(crp) if num_ok(crp) else 0)) / 1e6, 2)
+                except (TypeError, ValueError):
+                    a["cost"] = None
+            lt = conn.execute("SELECT tokens_saved, cost_usd, raw FROM ledger_events"
+                              " WHERE source='headroom-lifetime'").fetchone()
+            by_model = conn.execute("SELECT model, COUNT(*) n, SUM(tokens_saved) t, SUM(cost_usd) c"
+                                    " FROM ledger_events WHERE kind='compression'"
+                                    " GROUP BY model ORDER BY c DESC").fetchall()
+            monthly = conn.execute("SELECT substr(occurred_at,1,7) m, SUM(cost_usd) c"
+                                   " FROM ledger_events WHERE kind='compression'"
+                                   " GROUP BY m ORDER BY m").fetchall()
+        finally:
+            conn.close()
+        raw = json.loads(lt["raw"]) if lt else {}
+        return {"lifetime": {"tokens_saved": lt["tokens_saved"] if lt else 0,
+                             "saved_usd": lt["cost_usd"] if lt else 0, **raw},
+                "by_model": [dict(r) for r in by_model],
+                "monthly": [dict(r) for r in monthly],
+                "owned": _cv().owned_stats(vault), "memories": mem_n,
+                "zcode_usage": zcode_usage, "zcode_snapshots": zcode_snapshots}
+
+    def _get_ledger_cached():
+        key = (
+            "ledger",
+            _db_stamp(vault / "vault.db"),
+            _file_stamp(vault / "snapshots"),
+            _file_stamp(vault / "prices.json"),
+            str(_cv().ZCODE_DB),
+            _db_stamp(_cv().ZCODE_DB),
+        )
+        return cache.get_or_compute(key, _compute_ledger)
+
+    def _get_usage_base_cached(w: str, acct):
+        key = (
+            "usage",
+            _db_stamp(vault / "vault.db"),
+            _file_stamp(vault / "accounts.json"),
+            _file_stamp(vault / "prices.json"),
+            _file_stamp(vault / "pricing.json"),
+            w,
+            acct,
+            int(time.time() // 15),
+        )
+        return cache.get_or_compute(key, lambda: cv_ledger.usage_payload(vault, window=w, account=acct))
 
     def _get_aml_router():
         if aml_router_holder[0] is None:
@@ -75,7 +234,9 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                 pass
             line = re.sub(r"([?&])token=[^& ]*", r"\1token=***", line, flags=re.IGNORECASE)
             try:
-                with (vault / "serve_http.log").open("a", encoding="utf-8") as fh:
+                log_p = vault / "serve_http.log"
+                _cv().rotate_log_if_needed(log_p)
+                with log_p.open("a", encoding="utf-8") as fh:
                     fh.write(f"{dt.datetime.now().isoformat(timespec='seconds')} "
                              f"{self.client_address[0]} \"{line}\" {code} "
                              f"UA={str(self.headers.get('User-Agent', ''))[:48]}\n")
@@ -83,17 +244,25 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                 pass
 
         def _send(self, body: bytes, ctype: str, code: int = 200):
-            """统一响应出口: _new_cookie (首访 ?token= 种 cookie) 对 HTML 与 JSON 一视同仁 —
-            曾只在 _json 发, 致控制台首访 HTML 后的 fetch 全部 401。"""
+            """统一响应出口: _new_cookie 对 HTML/JSON 一视同仁; 大包按 Accept-Encoding 自动 gzip。"""
+            ae = (self.headers.get("Accept-Encoding") or "").lower()
+            use_gzip = len(body) >= GZIP_MIN_BYTES and "gzip" in ae
+            out_body = gzip.compress(body, compresslevel=5) if use_gzip else body
             self.send_response(code)
             nc = getattr(self, "_new_cookie", None)
             if nc:
                 self.send_header("Set-Cookie", nc)
                 self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(body)))
+            if use_gzip:
+                self.send_header("Content-Encoding", "gzip")
+                self.send_header("Vary", "Accept-Encoding")
+            self.send_header("Content-Length", str(len(out_body)))
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.wfile.write(out_body)
+            except _CLIENT_DISCONNECT:
+                pass
 
         def _json(self, obj, code=200):
             self._send(json.dumps(obj, ensure_ascii=False).encode("utf-8"),
@@ -177,8 +346,12 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     return self._json({"service": "context-vault", "status": "ok",
                                        "snapshots": len(idx.meta), "terms": idx.term_count})
                 if u.path == "/audit":
-                    return self._json(_cv().audit_summary_and_timeline(
-                        vault, q.get("since", ""), "all"))
+                    since = q.get("since", "")
+                    sum_only = (q.get("summary_only") == "1")
+                    akey = ("audit", _db_stamp(vault / "vault.db"), since, sum_only)
+                    return self._json(cache.get_or_compute(
+                        akey, lambda: _cv().audit_summary_and_timeline(
+                            vault, since, "all", summary_only=sum_only)))
                 if u.path == "/memory":
                     try:
                         mlim = max(1, min(int(q.get("limit", 8)), 200))
@@ -195,6 +368,36 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                 if u.path == "/semantic/status":
                     import cv_semantic as _sem
                     return self._json(_sem.semantic_status(vault, probe=(q.get("probe") == "1")))
+                if u.path == "/ops/mcp":
+                    return self._json(_cv().mcp_status_api(vault))
+                if u.path == "/ops/status":
+                    import cv_semantic as _sem
+                    vdb = vault / "vault.db"
+                    idb = vault / "search_index.db"
+                    bdir = vault / "backups"
+                    bfiles = sorted(bdir.glob("cv-backup-*.zip")) if bdir.is_dir() else []
+                    latest_b = bfiles[-1] if bfiles else None
+                    tok = cv_ledger.load_plan_token(vault) or ""
+                    tok_hint = (tok[:4] + "…" + tok[-4:]) if len(tok) >= 10 else ("***" if tok else "")
+                    accts = cv_ledger.load_accounts(vault)
+                    return self._json({
+                        "version": _cv().VERSION,
+                        "vault": str(vault.resolve()),
+                        "frozen": bool(getattr(sys, "frozen", False)),
+                        "snapshots": len(idx.meta),
+                        "terms": idx.term_count,
+                        "db_mb": round(vdb.stat().st_size / 1048576, 2) if vdb.is_file() else 0.0,
+                        "index_mb": round(idb.stat().st_size / 1048576, 2) if idb.is_file() else 0.0,
+                        "backups_count": len(bfiles),
+                        "latest_backup": {
+                            "name": latest_b.name,
+                            "size_mb": round(latest_b.stat().st_size / 1048576, 2),
+                        } if latest_b and latest_b.is_file() else None,
+                        "plan_token_set": bool(tok),
+                        "plan_token_hint": tok_hint,
+                        "accounts_configured": bool(accts.get("profiles")),
+                        "semantic": _sem.semantic_status(vault, probe=(q.get("probe") == "1")),
+                    })
                 if u.path == "/probe_events":
                     conn = _cv().db(vault)  # ThreadingHTTPServer 每请求短连接; 显式关闭归还 WAL 句柄
                     try:
@@ -211,83 +414,28 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     conn.close()
                     return self._json([dict(r) for r in rows])
                 if u.path == "/ledger":
-                    conn = _cv().db(vault)
-                    conn.executescript(_cv().SCHEMA)  # 只 connect 不建表会留零表空库毒化冷路径 (全面测试 M5)
-                    try:
-                        mem_n = conn.execute("SELECT COUNT(*) n FROM memory_items").fetchone()["n"]
-                    except sqlite3.OperationalError:
-                        mem_n = 0
-                    prices = {}
-                    prices_p = vault / "prices.json"  # {"模型": {"input":x,"output":y,"cache_read":z}} $/Mtok
-                    if prices_p.exists():
-                        num_ok = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool)
-                        try:
-                            pj = json.loads(prices_p.read_text(encoding="utf-8"))
-                            # bool 是 int 子类, float(True)=1.0 会编造假成本 (二轮 regression-1)
-                            prices = {m: v for m, v in pj.items()
-                                      if isinstance(v, dict) and num_ok(v.get("input")) and num_ok(v.get("output"))}
-                        except (ValueError, AttributeError, OSError):
-                            pass  # 非法 JSON/顶层非 dict/prices 是目录: 无价目诚实显示, 不 500
-                    zcode_usage = {}
-                    zcode_snapshots = 0
-                    try:  # 真相源: zcode 主库 model_usage (全量调用); model-io 审计文件仅零头
-                        zdb = sqlite3.connect(f"file:{_cv().ZCODE_DB}?mode=ro", uri=True)
-                        try:
-                            for r in zdb.execute("SELECT model_id, COUNT(*), COALESCE(SUM(input_tokens),0),"
-                                                 " COALESCE(SUM(output_tokens),0), COALESCE(SUM(cache_read_input_tokens),0)"
-                                                 " FROM model_usage GROUP BY model_id"):
-                                zcode_usage.setdefault(r[0] or "未知",
-                                                       {"n": r[1], "tin": r[2], "tout": r[3], "cr": r[4]})
-                        finally:
-                            zdb.close()
-                    except sqlite3.Error:
-                        pass  # 无 zcode / 无表 = 无自有用量, 合法空态
-                    try:
-                        zn = conn.execute("SELECT COUNT(*) FROM snapshots WHERE agent='zcode'").fetchone()[0]
-                        if zn:
-                            zcode_snapshots = zn
-                    except sqlite3.Error:
-                        pass
-                    for m, a in zcode_usage.items():
-                        pr = prices.get(m)
-                        if pr is None:
-                            a["cost"] = None
-                            continue
-                        try:  # 值级坏形状 (字符串/null/list) 只损失该模型成本, 不拖垮整个 /ledger
-                            crp = pr.get("cache_read")
-                            a["cost"] = round((a["tin"] * float(pr["input"]) + a["tout"] * float(pr["output"])
-                                               + a["cr"] * (float(crp) if num_ok(crp) else 0)) / 1e6, 2)
-                        except (TypeError, ValueError):
-                            a["cost"] = None
-                    lt = conn.execute("SELECT tokens_saved, cost_usd, raw FROM ledger_events"
-                                      " WHERE source='headroom-lifetime'").fetchone()
-                    by_model = conn.execute("SELECT model, COUNT(*) n, SUM(tokens_saved) t, SUM(cost_usd) c"
-                                            " FROM ledger_events WHERE kind='compression'"
-                                            " GROUP BY model ORDER BY c DESC").fetchall()
-                    monthly = conn.execute("SELECT substr(occurred_at,1,7) m, SUM(cost_usd) c"
-                                           " FROM ledger_events WHERE kind='compression'"
-                                           " GROUP BY m ORDER BY m").fetchall()
-                    conn.close()
-                    raw = json.loads(lt["raw"]) if lt else {}
-                    return self._json({"lifetime": {"tokens_saved": lt["tokens_saved"] if lt else 0,
-                                                    "saved_usd": lt["cost_usd"] if lt else 0, **raw},
-                                       "by_model": [dict(r) for r in by_model],
-                                       "monthly": [dict(r) for r in monthly],
-                       "owned": _cv().owned_stats(vault), "memories": mem_n,
-                       "zcode_usage": zcode_usage, "zcode_snapshots": zcode_snapshots})
+                    return self._json(_get_ledger_cached())
                 if u.path == "/ledger/usage":
                     # 本地多端账本滚动窗口 (无 headroom 主账本): 5h 进度/恢复 ETA/跑道/多维聚合
                     w = q.get("window", "5h") or "5h"
                     if w not in cv_ledger.WINDOW_CHOICES:
                         return self._json({"error": "invalid window: 可选 5h|24h|7d|30d"}, 400)
-                    payload = cv_ledger.usage_payload(
-                        vault, window=w, account=q.get("account") or None)
-                    rq = cv_ledger.remote_quota_cached(vault)  # 配置了 CV_PLAN_TOKEN 才有值
-                    if rq is not None:
-                        payload["remote_quota"] = rq  # 厂商实时套餐额度 (TTL 60s 缓存)
-                    aq = cv_ledger.agv_quota_cached()  # Antigravity IDE 本机 RPC (TTL 60s 含负缓存)
-                    if aq is not None:
+                    acct = q.get("account") or None
+                    payload = dict(_get_usage_base_cached(w, acct))
+                    fast = (q.get("fast") == "1")
+                    pending = False
+                    rq = cv_ledger.remote_quota_cached(vault, swr=True, nonblocking_cold=fast)
+                    if isinstance(rq, dict) and rq.get("_pending"):
+                        pending = True
+                    elif rq is not None:
+                        payload["remote_quota"] = rq  # 厂商实时套餐额度 (TTL 60s + SWR 异步刷新)
+                    aq = cv_ledger.agv_quota_cached(swr=True, nonblocking_cold=fast)
+                    if isinstance(aq, dict) and aq.get("_pending"):
+                        pending = True
+                    elif aq is not None:
                         payload["remote_quota_agv"] = aq
+                    if pending:
+                        payload["quota_pending"] = True
                     return self._json(payload)
                 if u.path == "/preview":
                     qid = q.get("id", "")
@@ -354,21 +502,31 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     except ValueError:
                         return self._json({"error": "invalid limit/offset: 需要整数"}, 400)
                     desc = q.get("order", "desc") != "asc"
+                    agent_f = (q.get("agent") or "").strip().lower()
                     # 迭代只追加的 sids 而非 dict.items(): 增量插入并发时 dict 迭代会 RuntimeError
                     pairs = [(sid, meta[sid]) for sid in sids]
+                    if agent_f:
+                        pairs = [(sid, m) for sid, m in pairs if str(m.get("agent") or "").lower() == agent_f]
+                        total = len(pairs)
                     versions = {}
                     if q.get("leaves") == "1":
                         # 每个会话只列演进链的当前版本 (叶子), 附该会话的版本数 (×N 徽章);
                         # 口径与 owned_stats 一致 (库内 parent_snapshot), 库不可读时退化为全量
-                        try:
+                        def _load_leaves():
                             c = _cv().db(vault)
-                            parents = {r[0] for r in c.execute(
-                                "SELECT parent_snapshot FROM snapshots WHERE parent_snapshot IS NOT NULL")}
-                            per_sess = {(r[0], r[1]): r[2] for r in c.execute(
-                                "SELECT agent, session_ref, COUNT(*) FROM snapshots GROUP BY agent, session_ref")}
-                            sess_of = {r[0]: (r[1], r[2]) for r in c.execute(
-                                "SELECT id, agent, session_ref FROM snapshots")}
-                            c.close()
+                            try:
+                                parents_ = {r[0] for r in c.execute(
+                                    "SELECT parent_snapshot FROM snapshots WHERE parent_snapshot IS NOT NULL")}
+                                per_sess_ = {(r[0], r[1]): r[2] for r in c.execute(
+                                    "SELECT agent, session_ref, COUNT(*) FROM snapshots GROUP BY agent, session_ref")}
+                                sess_of_ = {r[0]: (r[1], r[2]) for r in c.execute(
+                                    "SELECT id, agent, session_ref FROM snapshots")}
+                                return parents_, per_sess_, sess_of_
+                            finally:
+                                c.close()
+                        try:
+                            parents, per_sess, sess_of = cache.get_or_compute(
+                                ("recent_leaves", _db_stamp(vault / "vault.db")), _load_leaves)
                             pairs = [kv for kv in pairs if kv[0] not in parents]
                             versions = {sid: per_sess.get(sess_of.get(sid), 1) for sid, _ in pairs}
                         except sqlite3.Error:
@@ -414,13 +572,16 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     return self._json({"stats": ledger_summary(vault), "owned": _cv().owned_stats(vault),
                                        "usage": cv_ledger.usage_stats_summary(vault)})
                 if u.path == "/projects":
-                    return self._json(_cv().group_conversations_by_project(
-                        vault,
-                        project=q.get("project") or None,
-                        include_subagents=(q.get("subagents") == "1"),
-                        include_archived=(q.get("archived") == "1"),
-                        agent=q.get("agent") or None,
-                    ))
+                    p_proj = q.get("project") or None
+                    p_sub = (q.get("subagents") == "1")
+                    p_arch = (q.get("archived") == "1")
+                    p_ag = q.get("agent") or None
+                    pkey = ("projects", _db_stamp(vault / "vault.db"), str(_cv().ZCODE_DB),
+                            _db_stamp(_cv().ZCODE_DB), p_proj, p_sub, p_arch, p_ag)
+                    return self._json(cache.get_or_compute(
+                        pkey, lambda: _cv().group_conversations_by_project(
+                            vault, project=p_proj, include_subagents=p_sub,
+                            include_archived=p_arch, agent=p_ag)))
                 if u.path == "/antigravity/sync":
                     only_ag = q["only_agent"].strip() or None if "only_agent" in q else "zcode"
                     res = _cv().sync_antigravity_archived(
@@ -487,6 +648,8 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                                        "POST /sync", "POST /migrate", "POST /migrate_project",
                                        "POST /fork", "POST /memory/extract", "POST /memory/dedup",
                                        "POST /antigravity/sync", "POST /antigravity/batch", "POST /probe"]}, 404)
+            except _CLIENT_DISCONNECT:
+                pass
             except Exception as e:
                 self._json({"error": str(e)}, 500)
 
@@ -535,6 +698,12 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
             except ValueError:
                 self._json({"error": "invalid Content-Length"}, 400)
                 return
+            if n < 0:
+                self._json({"error": "invalid Content-Length"}, 400)
+                return
+            if n > MAX_POST_BYTES:
+                self._json({"error": f"payload too large: 上限 {MAX_POST_BYTES // 1048576} MB"}, 413)
+                return
             raw = self.rfile.read(n) if n > 0 else b""
             if not self._guard(True):
                 return
@@ -561,6 +730,14 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                         return self._json({"error": str(e)}, 404)
                     except _cv().BadMigrateTarget as e:  # HTTP 层没有 argparse choices, 未知 target 挡在这
                         return self._json({"error": str(e)}, 400)
+                    # Markdown 交接简报附带正文 (≤64KB), 控制台可直接一键复制/预览
+                    if str(body.get("target") or "").lower() == "markdown" and r.get("dest"):
+                        try:
+                            dp = Path(r["dest"])
+                            if dp.is_file() and dp.stat().st_size <= 65536:
+                                r = {**r, "content": dp.read_text(encoding="utf-8", errors="replace")}
+                        except OSError:
+                            pass
                     return self._json(r)
                 if u.path == "/migrate_project":
                     proj = str(body.get("project") or "").strip()
@@ -599,6 +776,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                 if u.path == "/sync":
                     res = _cv().sync_vault(vault, debounce=bool(body.get("debounce")), quiet=True)
                     idx.rebuild()
+                    cache.clear()
                     if body.get("extract_memory", True):
                         try:
                             mres = _cv().extract_memories_incremental(vault)
@@ -609,9 +787,12 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     return self._json(res)
                 if u.path == "/memory/extract":
                     mres = _cv().extract_memories_incremental(vault, force=bool(body.get("force")))
+                    cache.clear()
                     return self._json(mres)
                 if u.path == "/memory/dedup":
-                    return self._json(_cv().memory_dedup(vault))
+                    dres = _cv().memory_dedup(vault)
+                    cache.clear()
+                    return self._json(dres)
                 if u.path == "/memory/add":
                     try:
                         mres = _cv().memory_add_manual(
@@ -621,18 +802,21 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                             project=body.get("project") or "manual",
                             pinned=bool(body.get("pinned", False)),
                         )
+                        cache.clear()
                         return self._json(mres)
                     except ValueError as e:
                         return self._json({"error": str(e)}, 400)
                 if u.path == "/memory/delete":
                     try:
                         dres = _cv().memory_delete(vault, body.get("id"))
+                        cache.clear()
                         return self._json(dres)
                     except (TypeError, ValueError) as e:
                         return self._json({"error": str(e)}, 400)
                 if u.path == "/memory/pin":
                     try:
                         pres = _cv().memory_set_pin(vault, body.get("id"), pinned=bool(body.get("pinned", True)))
+                        cache.clear()
                         return self._json(pres)
                     except (TypeError, ValueError) as e:
                         return self._json({"error": str(e)}, 400)
@@ -661,6 +845,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                             )
                             if not uid:
                                 idx.rebuild()  # 默认主库写入同步刷新热索引
+                                cache.clear()
                             return self._json(ares)
                         top_k_raw = body.get("top_k", 100)
                         if isinstance(top_k_raw, bool):
@@ -687,6 +872,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     except _cv().SnapshotNotFound as e:
                         return self._json({"error": str(e)}, 404)
                     idx.rebuild()
+                    cache.clear()
                     return self._json(fres)
                 if u.path == "/antigravity/sync":
                     only_ag = str(body["only_agent"]).strip() or None if "only_agent" in body else "zcode"
@@ -725,6 +911,7 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     alerts = _cv().probe_once(vault, _cv().load_profiles(), _cv().resolve_key(_KeyStub()), baseline,
                                         verbose=False)
                     _cv().atomic_write_text(baseline_p, json.dumps(baseline, ensure_ascii=False, indent=1))
+                    cache.clear()
                     return self._json({"alerts": alerts})
                 if u.path == "/semantic/config":
                     import cv_semantic as _sem
@@ -761,7 +948,58 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                         vault, limit=lim, force=bool(body.get("force")),
                         use_llm=bool(body.get("use_llm", True)),
                     ))
+                if u.path == "/ops/mcp/install":
+                    try:
+                        return self._json(_cv().mcp_install_api(vault, str(body.get("client") or "all")))
+                    except ValueError as e:
+                        return self._json({"error": str(e)}, 400)
+                if u.path == "/ops/backup":
+                    try:
+                        keep_n = int(body.get("keep") or 10)
+                    except (TypeError, ValueError):
+                        return self._json({"error": "invalid keep"}, 400)
+                    try:
+                        return self._json(_cv().backup_vault_api(vault, keep=keep_n))
+                    except SystemExit as e:
+                        return self._json({"error": str(e)}, 400)
+                if u.path == "/ops/prune":
+                    apply_flag = bool(body.get("apply"))
+                    res = _cv().prune_snapshots_api(vault, apply=apply_flag)
+                    if apply_flag:
+                        idx.rebuild(force=True)
+                        cache.clear()
+                    return self._json(res)
+                if u.path == "/ops/plan_token":
+                    p = vault / "plan_token.json"
+                    if body.get("clear"):
+                        if p.exists():
+                            p.unlink()
+                        cv_ledger._REMOTE_Q.update(at=0.0, data=None)
+                        cache.clear()
+                        return self._json({"ok": True, "plan_token_set": False, "message": "已清除智谱 Coding Plan Token"})
+                    tok = str(body.get("token") or "").strip()
+                    if not tok:
+                        return self._json({"error": "token 不能为空 (如需清除请传 clear=true)"}, 400)
+                    _cv().atomic_write_text(p, json.dumps({"token": tok, "set_at": _cv().now_iso()}, ensure_ascii=False))
+                    cv_ledger._REMOTE_Q.update(at=0.0, data=None)
+                    cache.clear()
+                    probe = cv_ledger.remote_quota_cached(vault, ttl=0.0) if body.get("verify", True) else None
+                    return self._json({"ok": True, "plan_token_set": True,
+                                       "plan_token_hint": (tok[:4] + "…" + tok[-4:]) if len(tok) >= 10 else "***",
+                                       "probe": probe})
+                if u.path == "/ops/ledger_sync":
+                    import io as _io
+                    import contextlib as _cl
+                    from types import SimpleNamespace as _NS
+                    buf = _io.StringIO()
+                    with _cl.redirect_stdout(buf):
+                        cv_ledger.cmd_ledger_sync(_NS(vault=str(vault)))
+                    cache.clear()
+                    lines = [ln.strip() for ln in buf.getvalue().splitlines() if ln.strip()]
+                    return self._json({"ok": True, "message": lines[-1] if lines else "账本同步完成"})
                 self._json({"error": "unknown route"}, 404)
+            except _CLIENT_DISCONNECT:
+                pass
             except Exception as e:
                 self._json({"error": str(e)}, 500)
 
@@ -798,7 +1036,31 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
         finally:
             orig_close()
 
+    def _warm_async():
+        """常驻服务/托盘启动后后台预热首屏高频缓存与实时额度, 打开浏览器时直接热态秒回。"""
+        def _run():
+            try:
+                _get_ledger_cached()
+            except Exception:
+                pass
+            try:
+                _get_usage_base_cached("5h", None)
+            except Exception:
+                pass
+            try:
+                cv_ledger.remote_quota_cached(vault, swr=True)
+            except Exception:
+                pass
+            try:
+                cv_ledger.agv_quota_cached(swr=True)
+            except Exception:
+                pass
+
+        threading.Thread(target=_run, daemon=True).start()
+
     srv.server_close = _close_with_aml
+    srv.warm_async = _warm_async
+    srv.clear_cache = cache.clear
     return srv, idx
 
 
@@ -831,6 +1093,8 @@ def cmd_serve(args):
     print("  MCP server 自动发现本服务走热索引 (vault/serve.json; CV_VAULT_SVC 可显式覆盖)")
     print("  本地访问防护已启用: Host/Origin 回环校验 + POST 强制 application/json"
           " (浏览器跨站与 DNS rebinding 会被 403 拦截, 本地进程不受影响)")
+    if hasattr(srv, "warm_async"):
+        srv.warm_async()
     if getattr(args, "open", False):
         import threading
         import time

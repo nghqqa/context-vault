@@ -15,6 +15,19 @@
 - 市面上的迁移工具全是**一次性搬运工**；没有一个是**资产库**（持久存储、内容寻址、谱系、账本、审计）。
 - 锁定问题不会自己消失：厂商从中受益。
 
+## 🖥️ 控制台预览
+
+> 本地回环 `http://127.0.0.1:8791/` · 瑞士国际主义网格 · 亮/暗/跟随三态 · **首屏并发秒开（< 100ms）**
+
+<p>
+  <img src="docs/assets/console-overview-dark.png" alt="Context Vault 概览与多端配额窗口（深色主题）" width="100%" />
+</p>
+<details>
+  <summary>展开查看：设置与运维工作台（MCP 一键接入 / Ollama 语义层 / 备份裁剪）与浅色主题预览</summary>
+  <p><img src="docs/assets/console-ops-dark.png" alt="Context Vault 设置与运维工作台" width="100%" /></p>
+  <p><img src="docs/assets/console-overview-light.png" alt="Context Vault 概览（浅色主题）" width="100%" /></p>
+</details>
+
 ## ✨ 核心能力
 
 - **快照资产库**——把 Codex / Claude Code / ZCode / Antigravity / 18 种桥接 harness 的会话导出为供应商中立的 [context-snapshot](docs/snapshot-format.md) 格式：内容寻址、不可变、幂等、自动 lineage（会话树与 fork），并支持按天保留裁剪（`cv prune`）。
@@ -28,11 +41,13 @@
 - **MCP 记忆后端**——6 个工具让任意 MCP 客户端（Claude Code / Codex / Cursor）变成"记得住的 agent"，支持显式 `budget_tokens` 预算裁剪，一条命令全客户端接入。
 - **AML 标准 Add/Search 适配**——内置 `cv-aml` / [tools/aml_adapter.py](tools/aml_adapter.py)（及挂载于 `cv serve` 的 `/aml/add`、`/aml/search`），支持多租户隔离、`request_id` 幂等重放与 `409 Conflict` 冲突检测，附带零依赖 [Dockerfile.aml](Dockerfile.aml)。
 - **可选敏感信息脱敏**——`cv export --redact` 或 `CV_REDACT_SECRETS=1` 在入库前自动对常见 API Key / GitHub Token / AWS Key / JWT / PEM 私钥打码。
+- **可选本地语义增强（Ollama / LLM）**——`cv semantic`（及控制台「设置与运维」页）支持接入本地 Ollama 做向量混合重排、LLM 记忆精炼与自动会话标题；默认关闭零外发。
+- **开箱即用 Web 控制台**——支持 `Ctrl/Cmd+K` 全局联想、空库 3 步新手向导、记忆手动置顶、Markdown 预算简报一键复制、MCP/备份/裁剪可视化运维与 SWR 异步秒开。
 - **上游哨兵**——定时探测 relay `/v1/models`，模型静默消失即刻告警并留审计痕。
 
 ## 🚀 快速开始
 
-> **Windows 绿色托盘版（免装 Python，双击即用）**：直接下载 [ContextVault.exe (v0.8.0)](https://github.com/nghqqa/context-vault/releases/download/v0.8.0/ContextVault.exe)（校验见 [Release 页](https://github.com/nghqqa/context-vault/releases/tag/v0.8.0)），自动常驻系统托盘、启动 Web 控制台（`127.0.0.1:8791`）、定时同步全端会话与每日自动备份。
+> **Windows 绿色托盘版（免装 Python，14 MB 单文件双击即用）**：直接下载 [ContextVault.exe (v0.9.0)](https://github.com/nghqqa/context-vault/releases/download/v0.9.0/ContextVault.exe)（校验见 [Release 页](https://github.com/nghqqa/context-vault/releases/tag/v0.9.0)），内置 Web 控制台（`127.0.0.1:8791`）、**免 Python 原生 MCP 服务（`--mcp`）**、定时同步全端会话与每日自动备份。
 
 ```bash
 pip install -e .                   # 可选：注册全局命令 cv / cv-mcp / cv-aml (零第三方依赖)
@@ -102,7 +117,7 @@ vault/
 - 195MB Codex rollout → **1.5 秒**导出 → 12MB 快照；39 个压缩边界、2.24 亿 token 用量、838 对工具调用全部保真。
 - **双向迁移真机验证全部通过**：Codex→Claude 在 2.1.181 里 resume 续写；Claude→Codex 在 0.153.4 里恢复 **373,160 tokens 全量上下文**。
 - 逆向并规避 codex 两代格式陷阱（`ordinal` 数字/字符串互不兼容、resume 走 SQLite thread-store、"rollout is empty" 误导性报错）。
-- 测试 **234 项用例**，含冷热双路径等价测试——常驻索引与文件扫描回退必须结果一致（"常驻只是加速，不是依赖"被写进了测试）；CI 另有控制台 JS 执行/单元回归与真实浏览器多视口布局探针（380–2560px × 六视图溢出检测）。
+- 测试 **236 项用例**，含冷热双路径等价、SWR 非阻塞缓存、POST 413 限流与 gzip 压测——常驻索引与文件扫描回退必须结果一致；CI 另有控制台 JS 执行/单元回归与真实浏览器多视口布局探针（380–2560px × 全分区溢出检测）。
 
 ## 设计原则
 
@@ -112,7 +127,7 @@ vault/
 
 ## 依赖与数据源（架构边界）
 
-**核心功能零外部依赖**（纯 Python 标准库，CLI 单文件）。token 账本直接提取自你 会话文件自带的 usage 记录（实测本机 3,800+ 快照版本 / 1,000+ 独立会话 / 200 亿+ 输入 tokens / 缓存命中率 97%——命中率分母按各来源 usage 语义归一，演进版本按 lineage 去重，全部零外部依赖）。headroom 的节省**金额**是增强项，未安装时显示接入引导。
+**核心功能零外部依赖**（纯 Python 3.9+ 标准库，模块化架构，支持 `pip install -e .`）。token 账本直接提取自你会话文件自带的 usage 记录（实测本机 3,800+ 快照版本 / 1,000+ 独立会话 / 200 亿+ 输入 tokens / 缓存命中率 97%——命中率分母按各来源 usage 语义归一，演进版本按 lineage 去重，全部零外部依赖）。headroom 的节省**金额**是增强项，未安装时显示接入引导。
 
 | 功能 | headroom 提供 | 无 headroom 的替代 |
 |---|---|---|
@@ -153,7 +168,8 @@ vault/
 - **M2 ✅** 常驻服务 + Web 控制台 · MCP 后端 · 缓存预热 · 哨兵/守望 · 18 格式桥接接入
 - **M3 ✅** 记忆层（引擎可插拔）· fork/谱系 · 审计时间线
 - **M4 ✅** 深度检索内核（代码感知 BM25 + Lineage 折叠 + SQLite 倒排）· 双时态记忆（superseded 覆盖）· 预算受限交接压缩 · CodingVault-Bench 公开消融基准
-- **下一步** 发布与反馈 · 可选稠密向量默认接入 · 可选加密
+- **M5 ✅** 本地多端账本与 5h 配额 ETA · 原生 Antigravity WAL 同步 · AML 多租户适配 · 本地 Ollama 语义层（`cv semantic`）· 控制台「设置与运维」工作台 · 首屏并发 SWR 秒开 · 14 MB 免 Python Windows 托盘与原生 `--mcp` 直出
+- **下一步** macOS/Linux 托盘支持 · 可选端到端加密备份 · 持续社区反馈迭代
 
 ## FAQ
 

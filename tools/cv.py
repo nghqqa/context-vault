@@ -67,7 +67,7 @@ from cv_index import (  # noqa: F401 — re-exported as public engine API
 
 FORMAT_VERSION = "0.1"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # noconsole 进程 spawn 控制台程序不弹窗   # context-snapshot 格式版本
-VERSION = "0.8.0"  # 本地多端账本 / 原生 Antigravity WAL 同步 / AML / 语义层 / 瑞士极简控制台
+VERSION = "0.9.0"  # 设置与运维工作台 / 极速并发首屏 / SWR 实时额度 / 瘦身直出托盘 / 双语手册
 TOOL_RESULT_LIMIT = 256 * 1024  # spec §8.2 裁决: 单块截断阈值 256KB
 HOME = Path.home()
 HEADROOM_DIR = HOME / ".headroom"
@@ -93,8 +93,24 @@ CREATE TABLE IF NOT EXISTS probe_events(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, profile TEXT, endpoint TEXT,
   status TEXT, http_code INTEGER, latency_ms INTEGER, models TEXT, missing_models TEXT);
 CREATE INDEX IF NOT EXISTS idx_ledger_ts ON ledger_events(occurred_at);
+CREATE INDEX IF NOT EXISTS idx_snapshots_parent ON snapshots(parent_snapshot);
+CREATE INDEX IF NOT EXISTS idx_snapshots_agent_ref ON snapshots(agent, session_ref);
+CREATE INDEX IF NOT EXISTS idx_probe_status_id ON probe_events(status, id);
+CREATE INDEX IF NOT EXISTS idx_probe_ts ON probe_events(ts);
 CREATE TABLE IF NOT EXISTS vault_meta(key TEXT PRIMARY KEY, value TEXT);
 """
+
+
+def rotate_log_if_needed(path: Path, max_bytes: int = 5 * 1024 * 1024) -> None:
+    """单文件体积超阈值时滚动为 .1 (防常驻日志无限膨胀)。"""
+    try:
+        if path.is_file() and path.stat().st_size >= max_bytes:
+            bak = path.with_name(path.name + ".1")
+            if bak.exists():
+                bak.unlink()
+            path.replace(bak)
+    except OSError:
+        pass
 
 
 def vault_dir(args) -> Path:
@@ -1131,9 +1147,10 @@ def owned_stats(vault: Path) -> dict:
         disk_snaps = 0
     conn = db(vault)
     try:
-        try:  # 只 connect 不建表的调用路径 (如 /stats 直查) 曾留下零表空库毒化冷路径 — 这里兜底建表
-            conn.executescript(SCHEMA)
-            conn.commit()
+        try:  # 只 connect 不建表的调用路径 (如 /stats 直查) 曾留下零表空库毒化冷路径 — 仅在缺表时建表, 避免热读路径反复跑 DDL 抢写锁
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='snapshots'").fetchone() is None:
+                conn.executescript(SCHEMA)
+                conn.commit()
         except sqlite3.OperationalError:
             pass
         leaf = ("id NOT IN (SELECT parent_snapshot FROM snapshots"
@@ -2292,26 +2309,31 @@ def cmd_tree(args):
 
 # ------------------------------------------------- audit: 审计时间线回放 (M3)
 
-def audit_summary_and_timeline(vault: Path, since: str, kind: str, limit: int = 200) -> dict:
-    """统一事件流: probe/switch/warm + 汇总。数据源 probe_events (哨兵/守望/预热全留痕)。"""
+def audit_summary_and_timeline(vault: Path, since: str, kind: str, limit: int = 200,
+                               summary_only: bool = False) -> dict:
+    """统一事件流: probe/switch/warm + 汇总。数据源 probe_events (哨兵/守望/预热全留痕)。
+    summary_only=True 时只做单次 SQL 汇总聚合, 不序列化明细 (控制台概览卡秒回)。"""
     conn = db(vault)
-    q = "SELECT * FROM probe_events WHERE 1=1"
-    params = []
-    if since:
-        q += " AND ts >= ?"
-        params.append(since)
     rows = []
     try:
-        rows = conn.execute(q + " ORDER BY id DESC LIMIT ?", (*params, limit)).fetchall()
-        if kind != "all":
-            rows = [r for r in rows if kind in (r["status"],)]
-        total = conn.execute("SELECT COUNT(*) FROM probe_events").fetchone()[0]
-        model_missing = sum(1 for r in conn.execute(
-            "SELECT missing_models FROM probe_events WHERE missing_models != '[]'"
-            " AND missing_models IS NOT NULL"))
-        switches = conn.execute("SELECT COUNT(*) FROM probe_events WHERE status='switch'").fetchone()[0]
-        ok_probes = conn.execute("SELECT COUNT(*) FROM probe_events WHERE status='ok'").fetchone()[0]
-        prune_n = conn.execute("SELECT COUNT(*) FROM probe_events WHERE status='prune'").fetchone()[0]
+        agg = conn.execute(
+            "SELECT COUNT(*),"
+            " COALESCE(SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END), 0),"
+            " COALESCE(SUM(CASE WHEN status='switch' THEN 1 ELSE 0 END), 0),"
+            " COALESCE(SUM(CASE WHEN status='prune' THEN 1 ELSE 0 END), 0),"
+            " COALESCE(SUM(CASE WHEN missing_models IS NOT NULL AND missing_models != '[]' THEN 1 ELSE 0 END), 0)"
+            " FROM probe_events"
+        ).fetchone()
+        total, ok_probes, switches, prune_n, model_missing = (int(x or 0) for x in agg)
+        if not summary_only:
+            q = "SELECT * FROM probe_events WHERE 1=1"
+            params = []
+            if since:
+                q += " AND ts >= ?"
+                params.append(since)
+            rows = conn.execute(q + " ORDER BY id DESC LIMIT ?", (*params, limit)).fetchall()
+            if kind != "all":
+                rows = [r for r in rows if kind in (r["status"],)]
     except sqlite3.OperationalError:
         conn.close()
         return {"since": since or "(全部)", "total_events": 0,
@@ -2358,6 +2380,8 @@ def cmd_audit(args):
 # ------------------------------------------------- mcp install: 一键接入客户端
 
 def _mcp_cmd_parts(vault: Path) -> tuple:
+    if getattr(sys, "frozen", False):
+        return str(Path(sys.executable).resolve()), ["--mcp", "--vault", str(vault.resolve())]
     server = (Path(__file__).resolve().parent / "mcp_server.py")
     py = "python"
     return py, [str(server), "--vault", str(vault.resolve())]
@@ -2433,6 +2457,111 @@ def _install_mcp_antigravity(vault: Path) -> str:
     servers["context-vault"] = {"command": py, "args": args}
     cfg.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return "已写入 ~/.gemini/config/mcp_config.json"
+
+
+def mcp_status_api(vault: Path) -> dict:
+    """结构化检测各客户端 MCP 接入状态 (免 spawn 慢 CLI 优先读配置, 控制台设置页用)。"""
+    py, args_ = _mcp_cmd_parts(vault)
+
+    def _has_cv(p: Path) -> bool:
+        try:
+            return p.is_file() and "context-vault" in p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+
+    claude_cfg = HOME / ".claude.json"
+    claude_exe = _claude_exe()
+    claude_on = _has_cv(claude_cfg)
+    if not claude_on and claude_exe:
+        try:
+            out = subprocess.run([claude_exe, "mcp", "list"], capture_output=True, text=True,
+                                 timeout=5, creationflags=NO_WINDOW).stdout or ""
+            claude_on = "context-vault" in out
+        except Exception:
+            pass
+    codex_dir = HOME / ".codex"
+    codex_cfg = codex_dir / "config.toml"
+    cursor_dir = Path.home() / ".cursor"
+    cursor_cfg = cursor_dir / "mcp.json"
+    gemini_dir = HOME / ".gemini"
+    agy_cfg1 = gemini_dir / "config" / "mcp_config.json"
+    agy_cfg2 = gemini_dir / "antigravity" / "mcp_config.json"
+
+    clients = [
+        {"id": "claude", "name": "Claude Code", "detected": bool(claude_exe or claude_cfg.exists()),
+         "installed": claude_on, "config": str(claude_cfg)},
+        {"id": "codex", "name": "Codex", "detected": codex_dir.exists(),
+         "installed": _has_cv(codex_cfg), "config": str(codex_cfg)},
+        {"id": "cursor", "name": "Cursor", "detected": cursor_dir.exists(),
+         "installed": _has_cv(cursor_cfg), "config": str(cursor_cfg)},
+        {"id": "antigravity", "name": "Antigravity", "detected": gemini_dir.exists(),
+         "installed": _has_cv(agy_cfg1) or _has_cv(agy_cfg2),
+         "config": str(agy_cfg2 if _has_cv(agy_cfg2) else agy_cfg1)},
+    ]
+    return {"server_cmd": f"{py} {' '.join(args_)}", "clients": clients,
+            "installed_count": sum(1 for c in clients if c["installed"]),
+            "detected_count": sum(1 for c in clients if c["detected"])}
+
+
+def mcp_install_api(vault: Path, client: str = "all") -> dict:
+    """结构化执行 MCP 写入并返回各客户端结果与最新状态。"""
+    installers = {"claude": _install_mcp_claude, "codex": _install_mcp_codex,
+                  "cursor": _install_mcp_cursor, "antigravity": _install_mcp_antigravity}
+    if client == "all":
+        targets = list(installers)
+    elif client in installers:
+        targets = [client]
+    else:
+        raise ValueError(f"未知客户端: {client}")
+    results = []
+    for c in targets:
+        try:
+            msg = installers[c](vault)
+        except Exception as e:
+            msg = f"失败: {e}"
+        results.append({"client": c, "message": msg})
+    return {"results": results, "status": mcp_status_api(vault)}
+
+
+def prune_snapshots_api(vault: Path, apply: bool = False) -> dict:
+    """结构化版本裁剪接口 (复用 cmd_prune 逻辑, 供控制台设置页调用)。"""
+    import io as _io
+    import contextlib as _cl
+    from types import SimpleNamespace as _NS
+    buf = _io.StringIO()
+    with _cl.redirect_stdout(buf):
+        cmd_prune(_NS(vault=str(vault), apply=bool(apply)))
+    out = buf.getvalue().strip()
+    m = re.search(r"保留\s+(\d+)\s*/\s*(\d+)\s*版.*?回收\s+(\d+)\s*版\s*/\s*([\d.]+)\s*MB", out)
+    return {
+        "applied": bool(apply),
+        "kept": int(m.group(1)) if m else 0,
+        "total": int(m.group(2)) if m else 0,
+        "drop_count": int(m.group(3)) if m else 0,
+        "reclaim_mb": float(m.group(4)) if m else 0.0,
+        "message": out,
+    }
+
+
+def backup_vault_api(vault: Path, keep: int = 10) -> dict:
+    """结构化一致性备份接口 (复用 cmd_backup)。"""
+    import io as _io
+    import contextlib as _cl
+    from types import SimpleNamespace as _NS
+    buf = _io.StringIO()
+    with _cl.redirect_stdout(buf):
+        cmd_backup(_NS(vault=str(vault), out=None, keep=max(1, min(int(keep or 10), 50))))
+    out = buf.getvalue().strip()
+    backups = sorted((vault / "backups").glob("cv-backup-*.zip")) if (vault / "backups").is_dir() else []
+    latest = backups[-1] if backups else None
+    return {
+        "ok": True,
+        "name": latest.name if latest else "",
+        "path": str(latest) if latest else "",
+        "size_mb": round(latest.stat().st_size / 1048576, 2) if latest and latest.exists() else 0.0,
+        "backups_count": len(backups),
+        "message": out.splitlines()[0] if out else "备份完成",
+    }
 
 
 def cmd_mcp(args):

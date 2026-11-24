@@ -246,9 +246,213 @@ class TestProjectImprovements(unittest.TestCase):
         self.assertIn("cv serve --open", help_txt)
 
         # 文档卫生: 公开文档不得残留本机 file:/// 绝对路径死链
-        for rel in ("docs/USAGE.md", "README.md", "README.zh.md", "llms.txt"):
+        for rel in ("docs/USAGE.md", "docs/USAGE.en.md", "README.md", "README.zh.md", "llms.txt"):
             txt = (ROOT / rel).read_text(encoding="utf-8")
             self.assertNotIn("file:///", txt, f"{rel} 不应包含本机 file:/// 死链")
+
+    def test_serve_fast_path_swr_audit_summary_and_cache_invalidation(self):
+        """验证首屏加速路径: /audit?summary_only=1、/ledger/usage?fast=1 非阻塞 SWR、写入即时清缓存。"""
+        import os
+        import time
+        from unittest import mock
+        import cv_ledger as cl
+
+        vault = self.tmp / "fast_vault"
+        (vault / "snapshots").mkdir(parents=True)
+        conn = cv.db(vault)
+        conn.executescript(cv.SCHEMA)
+        conn.execute(
+            "INSERT INTO probe_events(ts,profile,endpoint,status,http_code,latency_ms,models,missing_models)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            ("2026-11-24T10:00:00+08:00", "p1", "https://example.invalid", "ok", 200, 120, "[]", "[]"),
+        )
+        conn.execute(
+            "INSERT INTO probe_events(ts,profile,endpoint,status,http_code,latency_ms,models,missing_models)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            ("2026-11-24T10:05:00+08:00", "p1", "https://example.invalid", "http_error", 502, 50, "[]", '["m1"]'),
+        )
+        conn.commit()
+        conn.close()
+
+        release = threading.Event()
+
+        def slow_remote(token, url=None, timeout=None):
+            release.wait(2.0)
+            return {"ok": True, "plan": "PRO", "limits": []}
+
+        def slow_agv(timeout=2.0, creds=None):
+            release.wait(2.0)
+            return {"ok": True, "plan": "AGV", "limits": []}
+
+        def _req(port, method, path, body=None):
+            c = HTTPConnection("127.0.0.1", port, timeout=5)
+            headers = {"Content-Type": "application/json"} if body is not None else {}
+            data = json.dumps(body).encode("utf-8") if body is not None else None
+            c.request(method, path, body=data, headers=headers)
+            r = c.getresponse()
+            raw = r.read().decode("utf-8")
+            c.close()
+            return r.status, json.loads(raw)
+
+        with mock.patch.dict(os.environ, {"CV_PLAN_TOKEN": "slow-tok"}), \
+             mock.patch.object(cl, "_REMOTE_Q", {"at": 0.0, "data": None}), \
+             mock.patch.object(cl, "_AGV_Q", {"at": 0.0, "data": None}), \
+             mock.patch.object(cl, "_REMOTE_Q_INFLIGHT", False), \
+             mock.patch.object(cl, "_AGV_Q_INFLIGHT", False), \
+             mock.patch.object(cl, "fetch_remote_quota", side_effect=slow_remote), \
+             mock.patch.object(cl, "fetch_agv_quota", side_effect=slow_agv):
+            srv, idx = cv.build_vault_server(vault, 0)
+            port = srv.server_address[1]
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            try:
+                # 1) /audit?summary_only=1 单 SQL 汇总且不回明细
+                code, au = _req(port, "GET", "/audit?summary_only=1")
+                self.assertEqual(code, 200)
+                self.assertEqual(au["total_events"], 2)
+                self.assertEqual(au["summary"]["ok_probes"], 1)
+                self.assertEqual(au["summary"]["abnormal"], 1)
+                self.assertEqual(au["summary"]["model_missing_events"], 1)
+                self.assertEqual(au["timeline"], [])
+
+                # 2) /ledger/usage?window=5h&fast=1 远端慢时立刻返回 quota_pending=True
+                t0 = time.perf_counter()
+                code, u = _req(port, "GET", "/ledger/usage?window=5h&fast=1")
+                dt_ms = (time.perf_counter() - t0) * 1000
+                self.assertEqual(code, 200)
+                self.assertLess(dt_ms, 500.0)
+                self.assertTrue(u.get("quota_pending"))
+
+                # 放行后台刷新后缓存就绪, 再次请求 0ms 拿实时额度
+                release.set()
+                deadline = time.time() + 2.0
+                while time.time() < deadline and (cl._REMOTE_Q["data"] is None or cl._AGV_Q["data"] is None):
+                    time.sleep(0.02)
+                code, u2 = _req(port, "GET", "/ledger/usage?window=5h&fast=1")
+                self.assertEqual(code, 200)
+                self.assertFalse(u2.get("quota_pending"))
+                self.assertEqual(u2.get("remote_quota", {}).get("plan"), "PRO")
+                self.assertEqual(u2.get("remote_quota_agv", {}).get("plan"), "AGV")
+
+                # 3) /ledger 缓存在写入记忆后立即失效
+                code, l1 = _req(port, "GET", "/ledger")
+                self.assertEqual(code, 200)
+                self.assertEqual(l1["memories"], 0)
+                code, _ = _req(port, "POST", "/memory/add", {"content": "测试缓存失效", "kind": "decision"})
+                self.assertEqual(code, 200)
+                code, l2 = _req(port, "GET", "/ledger")
+                self.assertEqual(code, 200)
+                self.assertEqual(l2["memories"], 1)
+            finally:
+                release.set()
+                srv.shutdown()
+                srv.server_close()
+                idx._close()
+
+    def test_v090_hardening_gzip_ops_agent_filter_and_log_rotation(self):
+        """验证 v0.9.0 加固: POST 413 限流、gzip 响应压缩、日志轮换、/ops/* 运维端点与 /recent?agent= 筛选。"""
+        import gzip as _gzip
+
+        vault = self.tmp / "ops_vault"
+        (vault / "snapshots").mkdir(parents=True)
+        conn = cv.db(vault)
+        conn.executescript(cv.SCHEMA)
+        sids = []
+        for idx_i, ag in enumerate(("codex", "antigravity")):
+            env = cv.build_envelope({
+                "capture": {"agent": ag, "source_format": f"{ag}-test", "completeness": "full",
+                            "session_ref": f"ses_{idx_i}", "cwd": f"E:/proj_{idx_i}"},
+                "conversation": [
+                    {"type": "text", "role": "user", "content": f"hello from {ag} session {idx_i}"},
+                    {"type": "text", "role": "assistant", "content": f"reply from {ag}"},
+                ],
+                "stats": cv.zero_stats(),
+            })
+            sid = cv.snapshot_id(env)
+            p = vault / "snapshots" / f"{sid}.json"
+            p.write_text(json.dumps(env, ensure_ascii=False), encoding="utf-8")
+            cv.register_snapshot(conn, env, sid, p)
+            sids.append(sid)
+        conn.commit()
+        conn.close()
+
+        # 日志轮换单元测试
+        lf = vault / "rot.log"
+        lf.write_bytes(b"x" * 2048)
+        cv.rotate_log_if_needed(lf, max_bytes=1024)
+        self.assertFalse(lf.exists())
+        self.assertTrue((vault / "rot.log.1").is_file())
+
+        srv, idx = cv.build_vault_server(vault, 0)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            # 1) gzip 自动压缩 (HTML > 4KB)
+            c = HTTPConnection("127.0.0.1", port, timeout=5)
+            c.request("GET", "/", headers={"Accept-Encoding": "gzip"})
+            r = c.getresponse()
+            raw = r.read()
+            c.close()
+            self.assertEqual(r.status, 200)
+            self.assertEqual(r.getheader("Content-Encoding"), "gzip")
+            self.assertIn("Context Vault", _gzip.decompress(raw).decode("utf-8"))
+
+            # 2) POST 超限返回 413
+            c = HTTPConnection("127.0.0.1", port, timeout=5)
+            c.request("POST", "/sync", body=b"",
+                      headers={"Content-Type": "application/json", "Content-Length": str(64 * 1024 * 1024)})
+            r = c.getresponse()
+            r.read()
+            c.close()
+            self.assertEqual(r.status, 413)
+
+            # 3) /recent?agent= 精确来源筛选
+            c = HTTPConnection("127.0.0.1", port, timeout=5)
+            c.request("GET", "/recent?limit=10&agent=antigravity")
+            r = c.getresponse()
+            d = json.loads(r.read().decode("utf-8"))
+            c.close()
+            self.assertEqual(r.status, 200)
+            self.assertEqual(d["total"], 1)
+            self.assertEqual(d["rows"][0]["agent"], "antigravity")
+
+            # 4) /ops/status + /ops/mcp + /ops/backup + /ops/prune + /ops/plan_token
+            def _j(method, path, body=None):
+                cc = HTTPConnection("127.0.0.1", port, timeout=5)
+                hdr = {"Content-Type": "application/json"} if body is not None else {}
+                cc.request(method, path, body=json.dumps(body).encode("utf-8") if body is not None else None, headers=hdr)
+                rr = cc.getresponse()
+                txt = rr.read().decode("utf-8")
+                cc.close()
+                return rr.status, json.loads(txt)
+
+            code, st = _j("GET", "/ops/status")
+            self.assertEqual(code, 200)
+            self.assertEqual(st["version"], cv.VERSION)
+            code, mcp = _j("GET", "/ops/mcp")
+            self.assertEqual(code, 200)
+            self.assertEqual(len(mcp["clients"]), 4)
+            code, bk = _j("POST", "/ops/backup", {"keep": 5})
+            self.assertEqual(code, 200)
+            self.assertTrue(bk["ok"] and bk["name"].endswith(".zip"))
+            code, pr = _j("POST", "/ops/prune", {"apply": False})
+            self.assertEqual(code, 200)
+            self.assertEqual(pr["applied"], False)
+            code, pt = _j("POST", "/ops/plan_token", {"token": "demo-token-123456", "verify": False})
+            self.assertEqual(code, 200)
+            self.assertTrue(pt["plan_token_set"])
+            code, pt2 = _j("POST", "/ops/plan_token", {"clear": True})
+            self.assertEqual(code, 200)
+            self.assertFalse(pt2["plan_token_set"])
+
+            # 5) /migrate target=markdown 返回 content 供一键复制
+            code, mg = _j("POST", "/migrate", {"id": sids[0], "target": "markdown", "apply": False, "budget_tokens": 2000})
+            self.assertEqual(code, 200)
+            self.assertIn("content", mg)
+            self.assertIn("hello from codex", mg["content"])
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            idx._close()
 
 
 if __name__ == "__main__":

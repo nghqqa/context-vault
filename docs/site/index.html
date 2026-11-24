@@ -321,11 +321,11 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
   <!-- ============ Hero ============ -->
   <section class="hero" aria-label="简介">
     <div class="wrap">
-      <span class="badge"><span class="dot" aria-hidden="true"></span>v0.8.0 · 完全免费 · 本地优先 · Windows 托盘直出</span>
+      <span class="badge"><span class="dot" aria-hidden="true"></span>v0.9.0 · 完全免费 · 首屏秒开 · 14 MB 精简托盘直出</span>
       <h1>换模型、换工具，<br>会话上下文<em>不再清零</em></h1>
       <p class="lede">Context Vault 把 AI 编程会话导出为<b>你自己机器上的中立快照</b>：内容寻址、不可变、带谱系。双向迁移、深度检索、token 账本、双时态记忆、MCP 后端——agent 来来去去，vault 一直在。</p>
       <div class="cta">
-        <a class="btn primary" href="https://github.com/nghqqa/context-vault/releases/download/v0.8.0/ContextVault.exe">
+        <a class="btn primary" href="https://github.com/nghqqa/context-vault/releases/download/v0.9.0/ContextVault.exe">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19.5h14"/></svg>
           下载 Windows 托盘版 (.exe)
         </a>
@@ -338,7 +338,7 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
           GitHub 仓库
         </a>
       </div>
-      <p class="meta">v0.8.0 · Windows 绿色单文件 (26.7 MB, 免配 Python) · 或 Python 3.9+ 纯标准库零依赖 · MIT 开源免费</p>
+      <p class="meta">v0.9.0 · Windows 精简单文件 (14.0 MB, 免配 Python · 内置原生 MCP) · 或 Python 3.9+ 纯标准库零依赖 · MIT 开源免费</p>
     </div>
   </section>
 
@@ -384,7 +384,7 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
         <article class="card">
           <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M3 9h18M6.5 6.8h.01M9.3 6.8h.01"/></svg></div>
           <h3>本地控制台与语义增强</h3>
-          <p><code>cv serve --open</code> 零外发本地工作台：<code>Ctrl+K</code> 命令面板、记忆手动录入/置顶、高密度配额胶囊面板、Antigravity 原生 WAL 同步，可选接本地 Ollama 做向量重排与记忆精炼。</p>
+          <p><code>cv serve --open</code> 并发 SWR 首屏 &lt;100ms 秒开：<code>Ctrl+K</code> 命令面板、空库 3 步引导、记忆置顶、Markdown 简报一键复制、<strong>设置与运维工作台</strong>（一键 MCP / Ollama 语义重排 / 备份裁剪）。</p>
         </article>
       </div>
     </div>
@@ -457,7 +457,7 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
         <p class="sub">2026-10-27 ~ 11-18 本机实测；与 docs/BENCHMARK.md、benchmarks/results 同源，不挑选、不修饰。</p>
       </div>
       <div class="stats">
-        <div class="stat"><span class="v">234</span><span class="k">自动化单测 · 含冷热双路径等价与并发压测</span></div>
+        <div class="stat"><span class="v">236</span><span class="k">自动化单测 · 含冷热等价、SWR 与多视口探针</span></div>
         <div class="stat"><span class="v">-87<small>%</small></span><span class="k">千级快照索引体积（778.5 → 100.9 MiB）</span></div>
         <div class="stat"><span class="v">1.0</span><span class="k">Ours Recall@5（162 题金标 · P95 &lt;1ms）</span></div>
         <div class="stat"><span class="v">0.0</span><span class="k">过期记忆入侵率（双时态冲突覆盖）</span></div>
@@ -478,15 +478,15 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
       </div>
       <div class="dl-card">
         <div class="dl-info">
-          <div class="dl-head">Windows 绿色托盘版（免装 Python，双击即用）<span class="dl-tag">v0.8.0 · 26.7 MB</span></div>
-          <p class="dl-desc">开箱内置热索引服务（<code>127.0.0.1:8791</code>）、Web 控制台、每 2 分钟自动增量同步、上游哨兵与每日自动备份。</p>
+          <div class="dl-head">Windows 绿色托盘版（免装 Python，双击即用）<span class="dl-tag">v0.9.0 · 14.0 MB</span></div>
+          <p class="dl-desc">体积减半的精简单文件，内置热索引服务（<code>127.0.0.1:8791</code>）、<strong>原生免 Python MCP 服务</strong>、Web 控制台设置页、自动同步、上游哨兵与每日备份。</p>
         </div>
         <div class="dl-acts">
-          <a class="btn primary" href="https://github.com/nghqqa/context-vault/releases/download/v0.8.0/ContextVault.exe">
+          <a class="btn primary" href="https://github.com/nghqqa/context-vault/releases/download/v0.9.0/ContextVault.exe">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19.5h14"/></svg>
             下载 ContextVault.exe
           </a>
-          <a class="dl-sub" href="https://github.com/nghqqa/context-vault/releases/tag/v0.8.0">Release 说明 &amp; SHA256</a>
+          <a class="dl-sub" href="https://github.com/nghqqa/context-vault/releases/tag/v0.9.0">Release 说明 &amp; SHA256</a>
         </div>
       </div>
       <p class="term-label" style="margin-top:0">命令行安装（Windows / Linux / macOS，纯 Python 3.9+ 标准库零依赖）</p>
@@ -513,8 +513,8 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
 
 <footer>
   <div class="wrap foot-in">
-    <div>Context Vault v0.8.0 · 完全免费 · 代码 MIT · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/snapshot-format.md">快照格式规范 CC-BY</a></div>
-    <div><a href="https://github.com/nghqqa/context-vault/releases/download/v0.8.0/ContextVault.exe">下载 Windows 托盘版</a> · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.md">用户手册</a> · <a href="https://github.com/nghqqa/context-vault">GitHub</a> · <a href="https://github.com/nghqqa/context-vault/releases">Releases</a> · <a href="https://raw.githubusercontent.com/nghqqa/context-vault/main/llms.txt">llms.txt</a></div>
+    <div>Context Vault v0.9.0 · 完全免费 · 代码 MIT · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/snapshot-format.md">快照格式规范 CC-BY</a></div>
+    <div><a href="https://github.com/nghqqa/context-vault/releases/download/v0.9.0/ContextVault.exe">下载 Windows 托盘版</a> · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.md">中文手册</a> · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.en.md">English Guide</a> · <a href="https://github.com/nghqqa/context-vault">GitHub</a> · <a href="https://github.com/nghqqa/context-vault/releases">Releases</a> · <a href="https://raw.githubusercontent.com/nghqqa/context-vault/main/llms.txt">llms.txt</a></div>
   </div>
 </footer>
 
