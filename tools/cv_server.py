@@ -368,6 +368,20 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                 if u.path == "/semantic/status":
                     import cv_semantic as _sem
                     return self._json(_sem.semantic_status(vault, probe=(q.get("probe") == "1")))
+                if u.path == "/skills/list":
+                    import cv_skills as _sk
+                    try:
+                        ws = Path(q["workspace"]) if q.get("workspace") else None
+                        return self._json(_sk.list_skills_api(
+                            source=q.get("source") or "zcode",
+                            include_plugins=(q.get("include_plugins") == "1"),
+                            target=q.get("target") or "antigravity",
+                            agy_mode=q.get("agy_mode") or "skills",
+                            plugin_name=q.get("plugin_name") or "",
+                            workspace_dir=ws,
+                        ))
+                    except ValueError as e:
+                        return self._json({"error": str(e)}, 400)
                 if u.path == "/ops/mcp":
                     return self._json(_cv().mcp_status_api(vault))
                 if u.path == "/ops/status":
@@ -997,6 +1011,29 @@ def build_vault_server(vault: Path, port: int, token: str | None = None):
                     cache.clear()
                     lines = [ln.strip() for ln in buf.getvalue().splitlines() if ln.strip()]
                     return self._json({"ok": True, "message": lines[-1] if lines else "账本同步完成"})
+                if u.path == "/skills/migrate":
+                    import cv_skills as _sk
+                    sel = body.get("selected")
+                    if sel is not None and not isinstance(sel, list):
+                        return self._json({"error": "selected 必须为字符串数组"}, 400)
+                    ws_raw = str(body.get("workspace") or "").strip()
+                    try:
+                        res = _sk.migrate_skills(
+                            source=str(body.get("source") or "zcode"),
+                            target=str(body.get("target") or "antigravity"),
+                            selected=sel,
+                            include_plugins=bool(body.get("include_plugins")),
+                            agy_mode=str(body.get("agy_mode") or "skills"),
+                            plugin_name=str(body.get("plugin_name") or ""),
+                            conflict=str(body.get("conflict") or "skip"),
+                            normalize=bool(body.get("normalize", True)),
+                            workspace_dir=Path(ws_raw) if ws_raw else None,
+                            apply=bool(body.get("apply")),
+                            vault=vault,
+                        )
+                        return self._json(res)
+                    except ValueError as e:
+                        return self._json({"error": str(e)}, 400)
                 self._json({"error": "unknown route"}, 404)
             except _CLIENT_DISCONNECT:
                 pass

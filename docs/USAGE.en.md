@@ -9,7 +9,7 @@ Context Vault is a **100% free, local-first, zero-dependency** asset vault for A
 ## 1. 3-Minute Quick Start
 
 ### Option A — Windows Ready-to-Run Tray Binary (No Python Required, 14 MB)
-1. Download [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.9.0/ContextVault.exe) from [GitHub Releases (v0.9.0)](https://github.com/nghqqa/context-vault/releases/tag/v0.9.0) and optionally verify via `SHA256SUMS.txt`:
+1. Download [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.10.0/ContextVault.exe) from [GitHub Releases (v0.10.0)](https://github.com/nghqqa/context-vault/releases/tag/v0.10.0) and optionally verify via `SHA256SUMS.txt`:
    ```powershell
    certutil -hashfile ContextVault.exe SHA256
    ```
@@ -58,6 +58,14 @@ cv import cv_xxxx --target codex --apply                           # write into 
 cv import cv_xxxx --target markdown --budget-tokens 4000           # 5-slot utility handoff brief
 ```
 In the Web Console **Migrate (`3`)** tab, selecting **Markdown** lets you choose a token budget (`2K / 4K / 8K / Unlimited`) and copy the generated handoff brief in one click.
+
+### Cross-Agent Skill Migration (`SKILL.md` Packages)
+```bash
+cv skills list --source zcode                                                    # inspect local skills & prompt-token cost
+cv skills migrate --from zcode --to antigravity --agy-mode skills                # dry-run to ~/.gemini/config/skills/
+cv skills migrate --from zcode --to antigravity --agy-mode plugin --apply        # bundle as toggleable Antigravity plugin
+```
+In the Web Console **Migrate (`3`) → Skill Migration**, toggle between standalone skills and plugin caches, inspect conflict/hardcoded-path warnings and estimated System Prompt tokens, and switch Antigravity output between **Global Skills Dir** and **Reversible Plugin Bundle (`plugin.json`)**.
 
 ### Cross-Session Temporal Memory & MCP
 ```bash

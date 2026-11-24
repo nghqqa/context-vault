@@ -122,6 +122,16 @@ def main() -> int:
                                 if not ok_sub:
                                     failures.append((w, sub_lbl))
                             page.click("#snap-list-btn")
+                        if tab == "mig":
+                            page.click("#mig-tab-skills")
+                            page.wait_for_timeout(350)
+                            r_sk = page.evaluate(PROBE)
+                            ok_sk = r_sk["docW"] <= r_sk["vw"] and not r_sk["bad"]
+                            print(f"{w:>5}px {'mig:sk':<8} docW={r_sk['docW']:<5} "
+                                  + ("OK" if ok_sk else "OVERFLOW " + "; ".join(r_sk["bad"])))
+                            if not ok_sk:
+                                failures.append((w, "mig:sk"))
+                            page.click("#mig-tab-session")
                 browser.close()
         finally:
             srv.shutdown()

@@ -34,6 +34,7 @@ Your AI coding sessions are your most valuable work asset — yet they're locked
 - **Handoff brief** — `--target markdown --budget-tokens 4000` assembles a utility-maximized brief under an explicit token budget (stop state / active decisions / disproven dead-ends / touched-file topology / live-context tail), folding repeated file reads and duplicate errors, with compression stats.
 - **Vault backup** — `cv backup`: consistent sqlite snapshot + rotated zips; optional `CV_SERVE_TOKEN` auth for the resident console.
 - **Honest migration & bidirectional sync** — bidirectional Codex ⇄ Claude Code, native Antigravity `.db`/Proto round-trip & project-tree batch sync/cleanup, experimental ZCode write-back (with auto-backup), dry-run by default, and a per-migration report of exactly what survives and what doesn't.
+- **Cross-agent Skill migration** — `cv skills` and the Web Console **Migrate → Skill Migration** tab discover, filter, normalize, deduplicate, and batch-migrate `SKILL.md` packages across ZCode, Claude Code, Codex, Antigravity, and Cursor with prompt-token budget warnings and toggleable Antigravity output modes (direct global `~/.gemini/config/skills/` vs. reversible plugin bundle with `plugin.json`).
 - **Deep retrieval core** — code-aware tokenization (camelCase/snake_case/path/error-code composite+subword dual indexing), block-role-weighted BM25 (global IDF + length normalization), lineage folding (chain hits collapse to the latest version), time decay and optional dense-vector RRF; a compact SQLite inverted index replaces the giant pickle.
 - **Open reproducible benchmark** — `python benchmarks/run_bench.py` reproduces a 162-query, 5-dimension ablation (full v0→v2 evolution) in ~30s; see [docs/BENCHMARK.md](docs/BENCHMARK.md).
 - **Token ledger** — per-model costs, cache hit rates aggregated from usage records *inside your own session files*. No proxy required. `cv ledger sync` directly harvests Claude Code / Codex / ZCode / Antigravity local logs (read-only, idempotent) into a `usage_events` time series, and `cv ledger quota` reports the 5-hour rolling window, recovery ETA, 7d/monthly runway (optional `vault/accounts.json` quota pools) and per-model/project/account rankings — fully offline, no headroom required.
@@ -47,7 +48,7 @@ Your AI coding sessions are your most valuable work asset — yet they're locked
 
 ## 🚀 Quick Start
 
-> **Windows ready-to-run tray app (no Python required, 14 MB single binary)**: Download [ContextVault.exe (v0.9.0)](https://github.com/nghqqa/context-vault/releases/download/v0.9.0/ContextVault.exe) ([Release notes & SHA256](https://github.com/nghqqa/context-vault/releases/tag/v0.9.0)) and double-click to launch the resident Web Console (`127.0.0.1:8791`), **built-in zero-Python MCP server (`--mcp`)**, periodic sync, and daily backups.
+> **Windows ready-to-run tray app (no Python required, 14 MB single binary)**: Download [ContextVault.exe (v0.10.0)](https://github.com/nghqqa/context-vault/releases/download/v0.10.0/ContextVault.exe) ([Release notes & SHA256](https://github.com/nghqqa/context-vault/releases/tag/v0.10.0)) and double-click to launch the resident Web Console (`127.0.0.1:8791`), **built-in zero-Python MCP server (`--mcp`)**, periodic sync, and daily backups.
 
 ```bash
 pip install -e .                   # optional: installs global `cv`, `cv-mcp`, `cv-aml` commands (zero deps)
@@ -117,7 +118,7 @@ Two rules that don't bend: **snapshots are immutable** (any derived data lives i
 - 195 MB Codex rollout → 12 MB snapshot in **1.5 s**; 39 compaction boundaries, 224M tokens of usage, 838 tool-call pairs intact.
 - **Bidirectional migration, both directions real-machine verified**: Codex→Claude resumes and continues accurately in Claude 2.1.181; Claude→Codex restores **373,160 tokens of full context** in Codex 0.153.4.
 - Reverse-engineered and dodged the two-generation Codex format trap (numeric vs string `ordinal`, resume reading the SQLite thread-store, misleading "rollout is empty").
-- Test suite: **236 tests** including hot/cold equivalence, SWR non-blocking caching, 413 payload guards, and gzip compression — the resident index and the file-scan fallback must return identical results. CI also runs JS syntax/runtime/unit checks and a real-browser layout probe (380–2560px × all views, zero overflow).
+- Test suite: **240 tests** including hot/cold equivalence, SWR non-blocking caching, cross-agent skill migration, 413 payload guards, and gzip compression — the resident index and the file-scan fallback must return identical results. CI also runs JS syntax/runtime/unit checks and a real-browser layout probe (380–2560px × all views, zero overflow).
 
 ## Design principles
 

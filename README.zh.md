@@ -34,6 +34,7 @@
 - **交接简报档**——`--target markdown --budget-tokens 4000` 在显式 token 预算下按五槽位效用装配（停靠态/关键裁决/已证伪死路/触碰文件拓扑/活上下文尾部），自动折叠重复读文件与重复报错，附压缩统计。
 - **vault 备份**——`cv backup`：一致性快照 + 轮换 zip；常驻控制台可选 `CV_SERVE_TOKEN` 鉴权。
 - **诚实迁移与双向同步**——Codex ⇄ Claude Code 双向（双端真机验证）、Antigravity 原生 `.db`/Proto 双向迁回与项目树批量清理/补齐、实验性 ZCode 写回（自动备份），默认 dry-run，每次迁移产出"什么保住了/什么丢了"的完整报告。
+- **跨工具 Skill 技能迁移**——`cv skills` 与控制台「迁移工作台 → Skill 技能迁移」支持在 ZCode / Claude Code / Codex / Antigravity / Cursor 间批量扫描、勾选并迁移 `SKILL.md` 技能包，自动处理目录展平、Frontmatter 规范化、内容哈希去重、源路径告警与 System Prompt Token 预算预警；迁往 Antigravity 支持「直写全局目录」与「打包为可一键开关的独立插件」双模式自由切换。
 - **深度检索内核**——代码感知分词（camel/snake/路径/错误码复合+子词双索引）、块角色加权 BM25（全局 IDF + 长度归一）、Lineage 折叠（演进链命中折叠到最新版）、时间衰减与可选稠密向量 RRF；SQLite 紧凑倒排取代巨型 pickle。
 - **公开可复现 Benchmark**——`python benchmarks/run_bench.py` 30 秒复现 162 题五维度消融（v0→v2 全演进链），见 [docs/BENCHMARK.md](docs/BENCHMARK.md)。
 - **token 账本**——从你自己会话文件内嵌的 usage 记录聚合出按模型成本、缓存命中率，不需要任何代理。`cv ledger sync` 直接只读采集 Claude Code / Codex / ZCode / Antigravity 四端本地日志（幂等去重）形成 `usage_events` 事件流，`cv ledger quota` 输出 5 小时滚动窗口、恢复 ETA、7d/月跑道（可选 `vault/accounts.json` 账号额度池）与按模型/项目/账号排行——纯本地离线，无需 headroom。
@@ -47,7 +48,7 @@
 
 ## 🚀 快速开始
 
-> **Windows 绿色托盘版（免装 Python，14 MB 单文件双击即用）**：直接下载 [ContextVault.exe (v0.9.0)](https://github.com/nghqqa/context-vault/releases/download/v0.9.0/ContextVault.exe)（校验见 [Release 页](https://github.com/nghqqa/context-vault/releases/tag/v0.9.0)），内置 Web 控制台（`127.0.0.1:8791`）、**免 Python 原生 MCP 服务（`--mcp`）**、定时同步全端会话与每日自动备份。
+> **Windows 绿色托盘版（免装 Python，14 MB 单文件双击即用）**：直接下载 [ContextVault.exe (v0.10.0)](https://github.com/nghqqa/context-vault/releases/download/v0.10.0/ContextVault.exe)（校验见 [Release 页](https://github.com/nghqqa/context-vault/releases/tag/v0.10.0)），内置 Web 控制台（`127.0.0.1:8791`）、**免 Python 原生 MCP 服务（`--mcp`）**、定时同步全端会话与每日自动备份。
 
 ```bash
 pip install -e .                   # 可选：注册全局命令 cv / cv-mcp / cv-aml (零第三方依赖)
@@ -117,7 +118,7 @@ vault/
 - 195MB Codex rollout → **1.5 秒**导出 → 12MB 快照；39 个压缩边界、2.24 亿 token 用量、838 对工具调用全部保真。
 - **双向迁移真机验证全部通过**：Codex→Claude 在 2.1.181 里 resume 续写；Claude→Codex 在 0.153.4 里恢复 **373,160 tokens 全量上下文**。
 - 逆向并规避 codex 两代格式陷阱（`ordinal` 数字/字符串互不兼容、resume 走 SQLite thread-store、"rollout is empty" 误导性报错）。
-- 测试 **236 项用例**，含冷热双路径等价、SWR 非阻塞缓存、POST 413 限流与 gzip 压测——常驻索引与文件扫描回退必须结果一致；CI 另有控制台 JS 执行/单元回归与真实浏览器多视口布局探针（380–2560px × 全分区溢出检测）。
+- 测试 **240 项用例**，含冷热双路径等价、SWR 非阻塞缓存、跨工具 Skill 迁移、POST 413 限流与 gzip 压测——常驻索引与文件扫描回退必须结果一致；CI 另有控制台 JS 执行/单元回归与真实浏览器多视口布局探针（380–2560px × 全分区溢出检测）。
 
 ## 设计原则
 

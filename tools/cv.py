@@ -67,7 +67,7 @@ from cv_index import (  # noqa: F401 — re-exported as public engine API
 
 FORMAT_VERSION = "0.1"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # noconsole 进程 spawn 控制台程序不弹窗   # context-snapshot 格式版本
-VERSION = "0.9.0"  # 设置与运维工作台 / 极速并发首屏 / SWR 实时额度 / 瘦身直出托盘 / 双语手册
+VERSION = "0.10.0"  # 跨 Agent Skill 批量迁移 / Antigravity 双落盘模式 / 设置与运维工作台 / 极速并发首屏
 TOOL_RESULT_LIMIT = 256 * 1024  # spec §8.2 裁决: 单块截断阈值 256KB
 HOME = Path.home()
 HEADROOM_DIR = HOME / ".headroom"
@@ -2847,6 +2847,12 @@ def cmd_semantic(args):
         print(json.dumps(res, ensure_ascii=False, indent=2))
 
 
+def cmd_skills(args):
+    """跨工具 Skill 盘点与批量迁移 (延迟导入 cv_skills)。"""
+    import cv_skills
+    cv_skills.cmd_skills(args)
+
+
 def main(argv=None):
     _force_utf8_stdio()  # 全子命令统一 (曾仅 doctor 有: env -u PYTHONUTF8 下 list --top 管道崩)
     ap = argparse.ArgumentParser(
@@ -3109,6 +3115,41 @@ def main(argv=None):
     sem_tt.add_argument("--force", action="store_true", help="强制重算所有近期会话标题")
     sem_tt.add_argument("--heuristic-only", action="store_true", help="仅用本地零依赖启发式清洗, 不调用 LLM")
     sem_tt.set_defaults(func=cmd_semantic)
+
+    sk = sub.add_parser("skills", help="跨工具 Skill 技能盘点与批量迁移 (ZCode/Claude/Codex/Antigravity/Cursor)")
+    sksub = sk.add_subparsers(dest="skills_cmd", required=True)
+    sk_ls = sksub.add_parser("list", help="盘点各端本地 Skill 数量、预估 Prompt Token 与目标冲突状态")
+    sk_ls.add_argument("--source", default="zcode", choices=["zcode", "claude", "codex", "antigravity", "cursor", "all"],
+                       help="来源工具 (默认 zcode)")
+    sk_ls.add_argument("--target", default="antigravity",
+                       choices=["antigravity", "claude", "codex", "cursor", "zcode", "workspace"],
+                       help="对比目标 (默认 antigravity)")
+    sk_ls.add_argument("--agy-mode", default="skills", choices=["skills", "plugin"],
+                       help="Antigravity 落盘模式: skills=全局目录 | plugin=独立插件包")
+    sk_ls.add_argument("--plugin-name", default="", help="Antigravity 插件模式名称 (默认 migrated-from-<source>)")
+    sk_ls.add_argument("--include-plugins", action="store_true", help="同时包含插件缓存目录内的 Skill")
+    sk_ls.add_argument("--json", action="store_true", help="输出 JSON")
+    sk_ls.set_defaults(func=cmd_skills)
+
+    sk_mg = sksub.add_parser("migrate", help="批量迁移 Skill (默认 dry-run 预演, 加 --apply 才写入)")
+    sk_mg.add_argument("--from", dest="source", default="zcode",
+                       choices=["zcode", "claude", "codex", "antigravity", "cursor", "all"],
+                       help="来源工具 (默认 zcode)")
+    sk_mg.add_argument("--to", dest="target", default="antigravity",
+                       choices=["antigravity", "claude", "codex", "cursor", "zcode", "workspace"],
+                       help="目标工具 (默认 antigravity)")
+    sk_mg.add_argument("--only", help="仅迁移指定 Skill (逗号分隔 slug 或 id)")
+    sk_mg.add_argument("--include-plugins", action="store_true", help="同时包含插件缓存目录内的 Skill")
+    sk_mg.add_argument("--agy-mode", default="skills", choices=["skills", "plugin"],
+                       help="迁往 Antigravity 模式: skills=直写全局目录 | plugin=打包为可一键开关插件")
+    sk_mg.add_argument("--plugin-name", default="", help="Antigravity 插件名 (默认 migrated-from-<source>)")
+    sk_mg.add_argument("--conflict", default="skip", choices=["skip", "overwrite", "rename"],
+                       help="同名不同内容处理策略: skip(默认安全) | overwrite(覆盖前自动备份) | rename")
+    sk_mg.add_argument("--no-normalize", action="store_true", help="保持原 SKILL.md 不规范化 frontmatter")
+    sk_mg.add_argument("--workspace", help="当 --to workspace 时指定目标项目根目录")
+    sk_mg.add_argument("--apply", action="store_true", help="真实写入目标目录 (默认 dry-run)")
+    sk_mg.add_argument("--json", action="store_true", help="输出 JSON")
+    sk_mg.set_defaults(func=cmd_skills)
 
 
     args = ap.parse_args(argv)

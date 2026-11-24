@@ -155,6 +155,14 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 
   <!-- ============ 迁移工作台 ============ -->
   <section id="t-mig" style="display:none" aria-label="迁移工作台">
+    <div class="mig-modebar">
+      <div class="seg" role="tablist" aria-label="迁移类型">
+        <button type="button" role="tab" class="btn on" id="mig-tab-session" aria-selected="true" onclick="setMigMode('session')">会话迁移</button>
+        <button type="button" role="tab" class="btn" id="mig-tab-skills" aria-selected="false" onclick="setMigMode('skills')">Skill 技能迁移</button>
+      </div>
+      <span class="hint" id="mig-mode-hint">跨工具搬运历史对话（支持保真度预演与 Markdown 预算简报）</span>
+    </div>
+    <div id="mig-session-pane">
     <div class="mig-shell">
       <div class="mig-col">
         <div class="mig-step">
@@ -223,6 +231,99 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
             </div>
             <div id="mig-result" style="margin-top:12px" aria-live="polite"></div>
             <div class="section-note">写入真实目录后，对应 agent 重启或使用恢复命令即可续写；默认写入 <code>vault/outbox/</code> 零副作用。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    </div>
+
+    <div id="mig-skills-pane" hidden>
+      <div class="mig-shell">
+        <div class="mig-col">
+          <div class="mig-step">
+            <div class="card-h">
+              <span class="ch-l"><span class="stepno">1</span>选择源端 Skill</span>
+              <span class="sub" id="sk-sel-stat">加载中…</span>
+            </div>
+            <div class="card-b">
+              <div class="agent-pills" id="sk-src-bar" role="group" aria-label="Skill 来源工具"></div>
+              <div class="mig-src-search" style="margin-top:8px">
+                <div class="ctl-search">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+                  <input type="search" id="sk-q" placeholder="筛选 Skill 名称、描述或分类…" aria-label="筛选 Skill" oninput="renderSkillList()">
+                </div>
+                <label class="sk-chk-inline" title="默认仅列独立 Skill；勾选后展开插件缓存内 Skill">
+                  <input type="checkbox" id="sk-inc-plug" onchange="loadSkills()">包含插件包
+                </label>
+              </div>
+              <div class="sk-bulk-bar">
+                <button type="button" class="btn sm" onclick="skSelectBatch('visible')">全选当前筛选</button>
+                <button type="button" class="btn sm" onclick="skSelectBatch('new')">仅选未同步</button>
+                <button type="button" class="btn sm" onclick="skSelectBatch('none')">清空选择</button>
+                <button type="button" class="btn sm" onclick="loadSkills()" style="margin-left:auto">刷新扫描</button>
+              </div>
+              <div class="sk-list" id="sk-list" aria-live="polite"><div class="skel" style="width:65%"></div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mig-col">
+          <div class="mig-step">
+            <div class="card-h"><span class="ch-l"><span class="stepno">2</span>目标工具与落盘选项</span><span class="sub">源目录严格只读</span></div>
+            <div class="card-b">
+              <div class="tgt-cards" id="sk-tgt-cards" role="radiogroup" aria-label="Skill 迁移目标">
+                <label class="tgt-card on"><input type="radio" name="sk-tgt" value="antigravity" checked onchange="onSkillTargetChange()">
+                  <span><span class="tt">Antigravity</span><br><span class="td">全局目录或独立插件包</span></span></label>
+                <label class="tgt-card"><input type="radio" name="sk-tgt" value="claude" onchange="onSkillTargetChange()">
+                  <span><span class="tt">Claude Code</span><br><span class="td">~/.claude/skills/</span></span></label>
+                <label class="tgt-card"><input type="radio" name="sk-tgt" value="codex" onchange="onSkillTargetChange()">
+                  <span><span class="tt">Codex</span><br><span class="td">~/.codex/skills/</span></span></label>
+                <label class="tgt-card"><input type="radio" name="sk-tgt" value="cursor" onchange="onSkillTargetChange()">
+                  <span><span class="tt">Cursor</span><br><span class="td">~/.cursor/skills/</span></span></label>
+                <label class="tgt-card wide"><input type="radio" name="sk-tgt" value="zcode" onchange="onSkillTargetChange()">
+                  <span><span class="tt">ZCode</span><br><span class="td">~/.zcode/skills/（双向互迁）</span></span></label>
+              </div>
+
+              <div class="sk-agy-box" id="sk-agy-opts">
+                <div class="sk-agy-hd">Antigravity 落盘模式（可自由切换）</div>
+                <div class="sk-agy-modes" role="radiogroup" aria-label="Antigravity 落盘模式">
+                  <label class="sk-mode-card on"><input type="radio" name="sk-agy-mode" value="skills" checked onchange="onSkillAgyModeChange()">
+                    <span><b>直写全局目录</b><small>~/.gemini/config/skills/ · 全项目自动发现</small></span></label>
+                  <label class="sk-mode-card"><input type="radio" name="sk-agy-mode" value="plugin" onchange="onSkillAgyModeChange()">
+                    <span><b>打包为独立插件</b><small>~/.gemini/config/plugins/&lt;名称&gt;/ · 一键整体开关</small></span></label>
+                </div>
+                <div class="ops-form-row" id="sk-plugin-row" style="display:none;margin-top:8px">
+                  <label for="sk-plugin-name" style="font-size:12px;color:var(--ink-2);white-space:nowrap">插件目录名</label>
+                  <input type="text" id="sk-plugin-name" placeholder="migrated-from-zcode" aria-label="Antigravity 插件目录名" onchange="loadSkills()">
+                </div>
+              </div>
+
+              <div class="sk-opts-row">
+                <label class="sk-opt-field">
+                  <span>同名冲突策略</span>
+                  <select id="sk-conflict" aria-label="Skill 冲突策略">
+                    <option value="skip" selected>跳过同名冲突（安全）</option>
+                    <option value="overwrite">覆盖并自动备份原目录</option>
+                    <option value="rename">冲突时自动重命名</option>
+                  </select>
+                </label>
+                <label class="sk-chk-inline" style="align-self:end;height:var(--ctl-h)">
+                  <input type="checkbox" id="sk-norm" checked>规范化 Frontmatter（name slug / description）
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div class="mig-step">
+            <div class="card-h"><span class="ch-l"><span class="stepno">3</span>预估开销与执行迁移</span></div>
+            <div class="card-b">
+              <div class="sk-budget" id="sk-budget-box">正在计算所选 Skill 数量与 System Prompt 开销…</div>
+              <div class="exec-bar" style="margin-top:10px">
+                <button class="btn primary" id="sk-dry-btn" onclick="skRunMigrate(false)">预演迁移报告（安全）</button>
+                <button class="btn danger" id="sk-apply-btn" onclick="skRunMigrate(true)">执行迁移写入目标</button>
+              </div>
+              <div id="sk-result" style="margin-top:12px" aria-live="polite"></div>
+            </div>
           </div>
         </div>
       </div>

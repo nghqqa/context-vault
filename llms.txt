@@ -38,5 +38,5 @@ Rules for agents using this tool: never modify source session files (read-only);
 - [User Guide (EN)](https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.en.md): Concise English user guide — Windows `.exe` (`--mcp`), CLI quick start, Web Console, playbooks & env vars
 - [Snapshot format spec v0.1](https://github.com/nghqqa/context-vault/blob/main/docs/snapshot-format.md): vendor-neutral envelope, block types, what migrates and what cannot
 - [README](https://github.com/nghqqa/context-vault/blob/main/README.md): fidelity table ("what survives"), comparison with porters/memory layers, dependency boundary
-- [BENCHMARK](https://github.com/nghqqa/context-vault/blob/main/docs/BENCHMARK.md): CodingVault-Bench — 162 gold queries, 5 dimensions + noisy/streaming panels (236 unit tests in CI)
+- [BENCHMARK](https://github.com/nghqqa/context-vault/blob/main/docs/BENCHMARK.md): CodingVault-Bench — 162 gold queries, 5 dimensions + noisy/streaming panels (240 unit tests in CI)
 - [Releases](https://github.com/nghqqa/context-vault/releases): verification receipts (tests, real-machine checks)
