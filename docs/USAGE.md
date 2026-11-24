@@ -7,7 +7,7 @@
 ## 0. 3 分钟快速上手（90% 用户只需要这 3 步）
 
 > **路径 A · Windows 绿色托盘版（免装 Python，14.4 MB 单文件双击即用）**
-> 1. 前往 [GitHub Releases (v0.11.0)](https://github.com/nghqqa/context-vault/releases/tag/v0.11.0) 下载 [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.11.0/ContextVault.exe)（可用同页 `SHA256SUMS.txt` 校验：`certutil -hashfile ContextVault.exe SHA256`）。
+> 1. 前往 [GitHub Releases (v0.12.0)](https://github.com/nghqqa/context-vault/releases/tag/v0.12.0) 下载 [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.12.0/ContextVault.exe)（可用同页 `SHA256SUMS.txt` 校验：`certutil -hashfile ContextVault.exe SHA256`）。
 > 2. 双击启动：如首次触发 Windows SmartScreen 未知发布者提示，点击「更多信息 → 仍要运行」即可。托盘图标出现在右下角系统托盘，双击图标打开 Web 控制台 `http://127.0.0.1:8791/`。
 > 3. **免命令行用满全部功能**：首次空库会在概览顶部显示 **3 步引导卡**——点击即可完成全端会话同步、账本同步，并在「设置与运维」页按需勾选将 `ContextVault.exe --mcp` 接入 Claude Code / Codex / Cursor / Antigravity / DeepSeek Harness（全程无需安装 Python）。
 > 4. **数据存放在哪 / 如何卸载**：首次在独立目录运行时自动初始化到 `~/.context-vault/vault`，并在 `~/.context-vault/config.json` 记录正本路径（移动 exe 位置也不丢数据）；右键托盘菜单提供「立即同步」「立即备份」「检查新版本」「开机自启」。如需彻底卸载：先取消勾选「开机自启」→ 退出托盘 → 删除 exe 及 `~/.context-vault/` 即可。
@@ -24,7 +24,8 @@ pip install -e .        # 注册全局命令 cv / cv-mcp / cv-aml（不装任何
 
 ### 第二步：一键初始化并接入 MCP
 ```bash
-cv setup --mcp
+cv setup --mcp                       # 自动接入检测到主程序的客户端（跳过残留目录）
+cv setup --mcp --mcp-clients claude,dsh  # 或显式指定要接入的客户端列表
 ```
 这一条命令会自动完成：**建库 → 扫描同步本机全部会话（Claude Code / Codex / ZCode / Antigravity / DeepSeek Harness）→ 同步多端 token 账本 → 提取跨会话长期记忆 → 自动将 MCP 记忆后端写入已检测到主程序的客户端（跳过卸载残留目录）**。
 
@@ -65,7 +66,7 @@ cv serve --open
 
 ### 1.3 环境体检
 ```bash
-cv doctor        # 检查 Python 版本、本机各 Agent 会话目录、smigrate 与数据库状态
+cv doctor        # 检查 Python 版本、本机各 Agent 会话目录、DSH Zstd 后端、MCP 接入摘要与数据库状态
 cv init          # 如需显式初始化空 vault（setup / sync 也会按需自动初始化）
 ```
 
@@ -89,7 +90,7 @@ cv init          # 如需显式初始化空 vault（setup / sync 也会按需自
    - **最近列表**：按来源胶囊筛选（全部 / Antigravity / ZCode / Codex / Claude Code / DeepSeek Harness），支持按时间/相关性排序、切换「仅最新版本 / 全部历史版本」、点击任意行打开右侧详情抽屉（代码块复制、工具调用折叠、会话内搜索高亮、不可变分叉与「迁移此快照 →」直达）。
    - **项目树**：按项目文件夹折叠主对话，来源筛选支持 `ZCode` / `Antigravity` / `Claude Code` / `Codex` / `DeepSeek Harness` 及库内动态发现的其他来源，支持整项或单条一键迁移，以及 Antigravity 免命令行双向清理/补齐。
    - **记忆库**：按「决策 / 偏好 / 踩坑 / 红线 / 压缩摘要」筛选；支持 **「+ 手动记一条」** 直接录入个人红线、**置顶优先**、**删除**、**增量提取** 与 **去重合并**。
-3. **迁移工作台**：顶部可切换 **「会话迁移」** 与 **「Skill 技能迁移」**。会话迁移支持 Codex / Claude Code / Antigravity / DeepSeek Harness (`dsh`) / ZCode / Markdown 交接简报（可选 Token 预算档位与一键复制正文）；Skill 迁移与「设置与运维」已接入 MCP 后端强一致——仅展示已接入且非零 Skill 的源端和已接入的目标端（自动隐藏 0 Skill 与未接入工具），实时估算 System Prompt Token 开销、检测冲突与源路径引用，迁往 Antigravity 时可自由切换 **直写全局目录** 或 **打包为可一键开关的独立插件**。
+3. **迁移工作台**：顶部可切换 **「会话迁移」** 与 **「Skill 技能迁移」**。会话迁移支持 Codex / Claude Code / Antigravity / DeepSeek Harness (`dsh`) / ZCode / Markdown 交接简报（可选 Token 预算档位与一键复制正文）；Skill 迁移与「设置与运维」已接入 MCP 后端强一致——仅展示已接入且非零 Skill 的源端和已接入的目标端（自动隐藏 0 Skill 与未接入工具，切源撞同源时自动切换目标），每行可点击 **「预览 / 对比差异」** 查看 unified diff 与文件增删清单，支持 **「目标端管理与历史备份」**（移除或覆盖前自动完整备份至 `vault/backups/`，支持一键恢复），迁往 Antigravity 时可自由切换 **直写全局目录** 或 **打包为可一键开关的独立插件**。
 4. **设置与运维页（`4`）**：免命令行管理 **MCP 客户端按需勾选与单项安全移除**（精确探测真实主程序并识别卸载残留目录，默认折叠未检测到/未接入客户端，移除时仅删除 `context-vault` 条目并自动备份 `.bak-cv`）、**本地 Ollama 语义重排与 LLM 记忆精炼/自动标题**、**智谱 Coding Plan Token 配置与多端账本同步**、**一键一致性 zip 备份与中间版本裁剪（dry-run / 自动先备份后执行）**。
 
 ![Context Vault 设置与运维工作台](assets/console-ops-dark.png)
@@ -180,12 +181,16 @@ cv export-harness cv_xxxxxxxx --to opencode
 cv export-harness --project context-vault --to cursor --limit 5
 ```
 
-### 4.5 跨工具 Skill 技能迁移（`SKILL.md` 包）
+### 4.5 跨工具 Skill 技能工作台（预览 Diff / 迁移 / 安全移除 / 一键回滚）
 支持 `zcode`、`claude`、`codex`、`antigravity`、`cursor`、`dsh` 六端（Web 控制台会自动与「设置与运维 → MCP 接入」保持一致，隐藏未接入与 0 Skill 工具）：
 ```bash
 cv skills list --source zcode                                                    # 盘点本地 Skill 与 System Prompt Token 开销
+cv skills inspect academic-figure-prompt --source zcode --target antigravity     # 预览规范化 SKILL.md 与逐行 Diff / 附属文件变更
 cv skills migrate --from zcode --to dsh                                          # dry-run 迁移报告（零改动磁盘）
 cv skills migrate --from zcode --to antigravity --agy-mode plugin --apply        # 打包为可一键停用的 Antigravity 独立插件
+cv skills remove --target antigravity --only archify --apply                     # 移除前自动完整备份到 vault/backups/ 并联动更新 plugin.json
+cv skills backups                                                                # 查看 Skill 覆盖/移除前留存的历史备份清单
+cv skills rollback skills-20261125-000001-remove --apply                         # 校验 manifest 安全路径后一键恢复原目标目录
 ```
 
 ---
@@ -207,10 +212,10 @@ cv memory dedup                                        # 合并跨快照重复�
 ### 5.2 按需接入与安全移除 MCP 客户端
 支持 `claude`、`codex`、`cursor`、`antigravity`、`dsh`（DeepSeek Harness 注入 `$DSH_HOME/cordis.patch.yml`，全局跨 profile 生效）：
 ```bash
-cv mcp status                        # 查看各客户端安装态与卸载残留识别
-cv mcp install --all                 # 接入已检测到主程序的客户端（自动跳过仅残留配置目录）
-cv mcp install --client dsh          # 或按需显式指定客户端接入
-cv mcp uninstall --client cursor     # 安全摘除 context-vault 条目（保留原配置并生成 .bak-cv 备份）
+cv mcp status                            # 查看各客户端安装态与卸载残留识别
+cv mcp install --all                     # 接入已检测到主程序的客户端（自动跳过仅残留配置目录）
+cv mcp install --clients claude,dsh      # 或按需显式指定多个客户端接入
+cv mcp uninstall --client cursor         # 安全摘除 context-vault 条目（支持 --clients a,b；自动 .bak-cv 备份）
 ```
 
 接入后 Agent 获得 6 个纯本地 MCP 工具（其中检索类工具均支持可选 `budget_tokens` 预算上限，超出自动从尾部精确裁剪）：

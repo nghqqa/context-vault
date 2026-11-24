@@ -7,22 +7,22 @@ Rules for agents using this tool: never modify source session files (read-only);
 ## Quick Start
 
 - `pip install -e .` — optional zero-dep install registering global `cv`, `cv-mcp`, `cv-aml` commands (or run `python tools/cv.py ...` directly)
-- `cv setup --mcp` — one-shot onboarding: init vault → sync all local agents → sync ledger → extract memories → register MCP clients
+- `cv setup --mcp [--mcp-clients a,b]` — one-shot onboarding: init vault → sync all local agents → sync ledger → extract memories → register MCP clients
 - `cv serve --open` — start local web console + hot-index HTTP API + unified `/aml/add`, `/aml/search` at `http://127.0.0.1:8791`
 
 ## Commands
 
-- `cv doctor` — environment check
+- `cv doctor` — environment check (Python, session sources, DSH Zstd backend, MCP summary, vault DB)
 - `cv sync [--debounce]` — incremental intake across Claude Code / Codex / ZCode / Antigravity / DeepSeek Harness (`dsh` V4/Zstd)
 - `cv export <session-file> [--redact]` — snapshot a session (idempotent, content-addressed; `--redact` or `CV_REDACT_SECRETS=1` masks common secrets)
 - `cv migrate <file> --target codex|claude|antigravity|dsh|markdown` — export → honest diff → import (dry-run by default; `--apply` writes real dirs)
-- `cv skills list|migrate` — cross-agent `SKILL.md` inventory & bulk migration across ZCode / Claude Code / Codex / Antigravity / Cursor / DeepSeek Harness (Web Console enforces `connected_only=1` aligned with MCP connections)
+- `cv skills list|inspect|migrate|remove|backups|rollback` — cross-agent `SKILL.md` inventory, unified-diff preview, bulk migration, auto-backed removal & verified rollback across ZCode / Claude Code / Codex / Antigravity / Cursor / DeepSeek Harness (Web Console enforces `connected_only=1` aligned with MCP connections)
 - `cv ingest <file> [--format X]` / `cv export-harness <sid> --to X` — bridged read/write via `session-migrate` (18 formats)
 - `cv memory extract|search|list|dedup` — temporal memory (decisions/preferences/pitfalls/constraints; active-only by default, `--history` traces superseded chains)
 - `cv semantic status|setup|refine|titles` — optional Ollama / OpenAI-compatible embeddings (`vault/ai_config.json`), LLM memory refinement & session title cleanup
 - `cv ledger sync [--recompute]` / `cv ledger quota [--window 5h|24h|7d|30d]` / `cv ledger stats` — local multi-client token ledger (including DeepSeek V4/Flash pricing), 5h cooldown ETA & real-time IDE/provider quotas
-- `cv backup [--out DIR] [--keep N]` / `cv prune [--apply]` — consistent zip backups & daily retention GC
-- `cv mcp install --all|--client X` / `cv mcp uninstall --client X` / `cv mcp status` — selective MCP management across claude/codex/cursor/antigravity/dsh (skips uninstalled residuals, writes `.bak-cv` backups)
+- `cv backup [--out DIR] [--keep N]` / `cv prune [--apply]` — consistent full-config + DB/snapshot zip backups & daily retention GC
+- `cv mcp install [--all|--client X|--clients a,b]` / `cv mcp uninstall [--client X|--clients a,b]` / `cv mcp status` — selective MCP management across claude/codex/cursor/antigravity/dsh (skips uninstalled residuals, writes `.bak-cv` backups)
 - `cv-aml --serve` — standalone AML Add/Search HTTP server (or `Dockerfile.aml` on `0.0.0.0:8000`)
 - `python benchmarks/run_bench.py` — reproducible 162-query ablation + noisy & streaming panels (CodingVault-Bench)
 
@@ -39,5 +39,5 @@ Rules for agents using this tool: never modify source session files (read-only);
 - [User Guide (EN)](https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.en.md): Concise English user guide — Windows `.exe` (`--mcp`), CLI quick start, Web Console, playbooks & env vars
 - [Snapshot format spec v0.1](https://github.com/nghqqa/context-vault/blob/main/docs/snapshot-format.md): vendor-neutral envelope, block types, what migrates and what cannot
 - [README](https://github.com/nghqqa/context-vault/blob/main/README.md): fidelity table ("what survives"), comparison with porters/memory layers, dependency boundary
-- [BENCHMARK](https://github.com/nghqqa/context-vault/blob/main/docs/BENCHMARK.md): CodingVault-Bench — 162 gold queries, 5 dimensions + noisy/streaming panels (251 unit tests in CI)
+- [BENCHMARK](https://github.com/nghqqa/context-vault/blob/main/docs/BENCHMARK.md): CodingVault-Bench — 162 gold queries, 5 dimensions + noisy/streaming panels (258 unit tests in CI)
 - [Releases](https://github.com/nghqqa/context-vault/releases): verification receipts (tests, real-machine checks)

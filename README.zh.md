@@ -34,12 +34,12 @@
 - **交接简报档**——`--target markdown --budget-tokens 4000` 在显式 token 预算下按五槽位效用装配（停靠态/关键裁决/已证伪死路/触碰文件拓扑/活上下文尾部），自动折叠重复读文件与重复报错，附压缩统计。
 - **vault 备份**——`cv backup`：一致性快照 + 轮换 zip；常驻控制台可选 `CV_SERVE_TOKEN` 鉴权。
 - **诚实迁移与双向同步**——Codex ⇄ Claude Code 双向（双端真机验证）、Antigravity 原生 `.db`/Proto 双向迁回与项目树批量清理/补齐、DeepSeek Harness 原生 V4 拼接式 `.jsonl.zstd` 迁入与 `workspace.json` 工作区自动登记、实验性 ZCode 写回（自动备份），默认 dry-run，每次迁移产出"什么保住了/什么丢了"的完整报告。
-- **跨工具 Skill 技能迁移**——`cv skills` 与控制台「迁移工作台 → Skill 技能迁移」支持在 ZCode / Claude Code / Codex / Antigravity / Cursor / DeepSeek Harness 间批量扫描、勾选并迁移 `SKILL.md` 技能包（Web 控制台与已接入 MCP 后端强一致，自动隐藏 0 Skill 与未接入工具），自动处理目录展平、Frontmatter 规范化、内容哈希去重、源路径告警与 System Prompt Token 预算预警；迁往 Antigravity 支持「直写全局目录」与「打包为可一键开关的独立插件」双模式自由切换。
+- **跨工具 Skill 技能工作台**——`cv skills`（`list|inspect|migrate|remove|backups|rollback`）与控制台「迁移工作台 → Skill 技能迁移」支持在 ZCode / Claude Code / Codex / Antigravity / Cursor / DeepSeek Harness 间批量扫描、对比差异并迁移 `SKILL.md` 技能包（Web 控制台与已接入 MCP 后端强一致，自动隐藏 0 Skill 与未接入工具、切源自动切换同源目标），迁入前可逐行预览 unified diff 与附属文件变化，移除/覆盖前自动保留完整备份并支持一键回滚，迁往 Antigravity 支持「直写全局目录」与「打包为可一键开关的独立插件」双模式切换。
 - **深度检索内核**——代码感知分词（camel/snake/路径/错误码复合+子词双索引）、块角色加权 BM25（全局 IDF + 长度归一）、Lineage 折叠（演进链命中折叠到最新版）、时间衰减与可选稠密向量 RRF；SQLite 紧凑倒排取代巨型 pickle。
 - **公开可复现 Benchmark**——`python benchmarks/run_bench.py` 30 秒复现 162 题五维度消融（v0→v2 全演进链），见 [docs/BENCHMARK.md](docs/BENCHMARK.md)。
 - **token 账本**——从你自己会话文件内嵌的 usage 记录聚合出按模型成本、缓存命中率，不需要任何代理。`cv ledger sync` 直接只读采集 Claude Code / Codex / ZCode / Antigravity / DeepSeek Harness（内置 DeepSeek V4/Flash 费率）本地日志（幂等去重）形成 `usage_events` 事件流，`cv ledger quota` 输出 5 小时滚动窗口、恢复 ETA、7d/月跑道（可选 `vault/accounts.json` 账号额度池）与按模型/项目/账号排行——纯本地离线，无需 headroom。
 - **跨会话双时态记忆**——从历史自动提取决策/偏好/摘要/踩坑/架构红线，每条带精确出处（快照#块 + 会话真实时间）与主题签名；方案被推翻时旧记忆自动标记 `superseded` 并默认不再返回，`include_history` 可追溯完整演变链。
-- **MCP 记忆后端**——6 个工具让任意 MCP 客户端（Claude Code / Codex / Cursor / Antigravity / DeepSeek Harness `cordis.patch.yml`）变成"记得住的 agent"，支持显式 `budget_tokens` 预算裁剪；精确识别卸载残留目录，支持按需勾选接入与 `.bak-cv` 安全移除（`cv mcp uninstall`）。
+- **MCP 记忆后端**——6 个工具让任意 MCP 客户端（Claude Code / Codex / Cursor / Antigravity / DeepSeek Harness `cordis.patch.yml`）变成"记得住的 agent"，支持显式 `budget_tokens` 预算裁剪；精确识别卸载残留目录，支持 `--clients` 多选接入与 `.bak-cv` 安全移除（`cv mcp uninstall`）。
 - **AML 标准 Add/Search 适配**——内置 `cv-aml` / [tools/aml_adapter.py](tools/aml_adapter.py)（及挂载于 `cv serve` 的 `/aml/add`、`/aml/search`），支持多租户隔离、`request_id` 幂等重放与 `409 Conflict` 冲突检测，附带零依赖 [Dockerfile.aml](Dockerfile.aml)。
 - **可选敏感信息脱敏**——`cv export --redact` 或 `CV_REDACT_SECRETS=1` 在入库前自动对常见 API Key / GitHub Token / AWS Key / JWT / PEM 私钥打码。
 - **可选本地语义增强（Ollama / LLM）**——`cv semantic`（及控制台「设置与运维」页）支持接入本地 Ollama 做向量混合重排、LLM 记忆精炼与自动会话标题；默认关闭零外发。
@@ -47,21 +47,21 @@
 
 ## 🚀 快速开始
 
-> **Windows 绿色托盘版（免装 Python，14.4 MB 单文件双击即用）**：直接下载 [ContextVault.exe (v0.11.0)](https://github.com/nghqqa/context-vault/releases/download/v0.11.0/ContextVault.exe)（校验见 [Release 页](https://github.com/nghqqa/context-vault/releases/tag/v0.11.0)），内置 Web 控制台（`127.0.0.1:8791`）、**免 Python 原生 MCP 服务（`--mcp`）**、定时同步全端会话与每日自动备份。
+> **Windows 绿色托盘版（免装 Python，14.4 MB 单文件双击即用）**：直接下载 [ContextVault.exe (v0.12.0)](https://github.com/nghqqa/context-vault/releases/download/v0.12.0/ContextVault.exe)（校验见 [Release 页](https://github.com/nghqqa/context-vault/releases/tag/v0.12.0)），内置 Web 控制台（`127.0.0.1:8791`）、**免 Python 原生 MCP 服务（`--mcp`）**、定时同步全端会话与每日自动备份。
 
 ```bash
 pip install -e .                   # 可选：注册全局命令 cv / cv-mcp / cv-aml (零第三方依赖)
-cv setup --mcp                     # 一步式初始化：建库 → 同步全端会话 → 账本 → 提取记忆 → 接入 MCP
+cv setup --mcp                     # 一步式初始化：建库 → 同步全端会话 → 账本 → 提取记忆 → 接入 MCP (支持 --mcp-clients a,b)
 cv serve --open                    # 启动 Web 控制台 + 热索引 + 统一 /aml/* 接口并自动打开浏览器
 ```
 
 或免安装直接运行（Python 3.9+ 零依赖）：
 
 ```bash
-python tools/cv.py doctor              # 环境体检（零依赖，Python 3.9+）
+python tools/cv.py doctor              # 环境体检（Python、会话源、DSH Zstd 后端、MCP 摘要）
 python tools/cv.py sync                # 自动入库: 扫描全部本地会话源 (增量 + lineage)
 python tools/cv.py serve               # Web 控制台 http://127.0.0.1:8791
-python tools/cv.py mcp install --all   # 接入已检测到主程序的客户端 (自动跳过卸载残留目录)
+python tools/cv.py mcp install --all   # 接入已检测到主程序的客户端 (或 --clients claude,dsh 多选)
 python tools/cv.py mcp uninstall --client cursor  # 安全移除指定客户端 context-vault 配置 (.bak-cv 备份)
 ```
 
@@ -118,7 +118,7 @@ vault/
 - 195MB Codex rollout → **1.5 秒**导出 → 12MB 快照；39 个压缩边界、2.24 亿 token 用量、838 对工具调用全部保真。
 - **双向迁移真机验证全部通过**：Codex→Claude 在 2.1.181 里 resume 续写；Claude→Codex 在 0.153.4 里恢复 **373,160 tokens 全量上下文**。
 - 逆向并规避 codex 两代格式陷阱（`ordinal` 数字/字符串互不兼容、resume 走 SQLite thread-store、"rollout is empty" 误导性报错）。
-- 测试 **251 项用例**，含冷热双路径等价、SWR 非阻塞缓存、DeepSeek Harness V4/Zstd/Cordis 全链路、MCP 按需自选与卸载残留隔离、跨工具 Skill 迁移（`connected_only` 强制校验与自失效缓存）、`/stats` 与数据库迁移缓存、POST 413 限流与 gzip 压测——常驻索引与文件扫描回退必须结果一致；并在 **DeepSeek Harness Desktop**（MCP 工具调用、V4 压缩会话渲染、`/tdd` Skill 识别）、**Claude Code 2.1.181** 与 **Codex 0.153.4** 完成真机实测；CI 另有控制台 JS 执行/单元回归与真实浏览器多视口布局探针（380–2560px × 全分区溢出检测）。
+- 测试 **258 项用例**，含冷热双路径等价、SWR 非阻塞缓存、DeepSeek Harness V4/Zstd/Cordis 全链路、MCP 按需自选与卸载残留隔离、Skill 工作台（Diff 预览 / 路径安全移除 / 备份一键回滚 / `connected_only` 与自失效缓存）、HTTP 安全响应头与 IPv6 `[::1]` 守卫、`/stats` 与数据库迁移缓存、POST 413 限流与 gzip 压测——常驻索引与文件扫描回退必须结果一致；并在 **DeepSeek Harness Desktop**（MCP 工具调用、V4 压缩会话渲染、`/tdd` Skill 识别）、**Claude Code 2.1.181** 与 **Codex 0.153.4** 完成真机实测；CI 另有控制台 JS 执行/单元回归（`S1-S8`）、真实浏览器多视口布局探针（380–2560px × 全分区溢出检测）、20 模块纯标准库导入校验与安装包冒烟测试。
 
 ## 设计原则
 

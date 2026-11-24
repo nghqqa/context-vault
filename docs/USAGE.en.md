@@ -9,7 +9,7 @@ Context Vault is a **100% free, local-first, zero-dependency** asset vault for A
 ## 1. 3-Minute Quick Start
 
 ### Option A — Windows Ready-to-Run Tray Binary (No Python Required, 14.4 MB)
-1. Download [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.11.0/ContextVault.exe) from [GitHub Releases (v0.11.0)](https://github.com/nghqqa/context-vault/releases/tag/v0.11.0) and optionally verify via `SHA256SUMS.txt`:
+1. Download [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.12.0/ContextVault.exe) from [GitHub Releases (v0.12.0)](https://github.com/nghqqa/context-vault/releases/tag/v0.12.0) and optionally verify via `SHA256SUMS.txt`:
    ```powershell
    certutil -hashfile ContextVault.exe SHA256
    ```
@@ -21,8 +21,9 @@ Context Vault is a **100% free, local-first, zero-dependency** asset vault for A
 ```bash
 git clone https://github.com/nghqqa/context-vault && cd context-vault
 pip install -e .        # registers global `cv`, `cv-mcp`, `cv-aml` (0 third-party deps)
-cv setup --mcp          # init -> sync sessions -> token ledger -> extract memory -> install MCP (skips uninstalled residuals)
-cv serve --open         # start resident hot-index server & open Web Console automatically
+cv setup --mcp                       # init -> sync sessions -> ledger -> memory -> install MCP (skips residuals)
+cv setup --mcp --mcp-clients claude,dsh  # or choose explicit MCP clients
+cv serve --open                      # start resident hot-index server & open Web Console automatically
 ```
 > Without `pip install -e .`, replace `cv <cmd>` with `python tools/cv.py <cmd>`. Pass `--vault <dir>` before the subcommand to target a custom directory (default `./vault`).
 
@@ -60,22 +61,26 @@ cv import cv_xxxx --target markdown --budget-tokens 4000           # 5-slot util
 ```
 In the Web Console **Migrate (`3`)** tab, selecting **Markdown** lets you choose a token budget (`2K / 4K / 8K / Unlimited`) and copy the generated handoff brief in one click.
 
-### Cross-Agent Skill Migration (`SKILL.md` Packages)
+### Cross-Agent Skill Workbench (`SKILL.md` Packages)
 ```bash
 cv skills list --source zcode                                                    # inspect local skills & prompt-token cost
+cv skills inspect academic-figure-prompt --source zcode --target antigravity     # inspect normalized SKILL.md, unified diff & file deltas
 cv skills migrate --from zcode --to dsh                                          # dry-run for DeepSeek Harness (~/.dsh/skills/)
 cv skills migrate --from zcode --to antigravity --agy-mode plugin --apply        # bundle as toggleable Antigravity plugin
+cv skills remove --target antigravity --only archify --apply                     # backup to vault/backups/ before safely deleting
+cv skills backups                                                                # list restorable overwrite/removal skill backups
+cv skills rollback skills-20261125-000001-remove --apply                         # restore backed-up skill directory after path verification
 ```
-In the Web Console **Migrate (`3`) → Skill Migration**, source/target availability automatically tracks your connected MCP backends (hiding unconnected clients and 0-skill sources); inspect conflicts, hardcoded-path warnings, and System Prompt token budgets, and switch Antigravity output between **Global Skills Dir** and **Reversible Plugin Bundle (`plugin.json`)**.
+In the Web Console **Migrate (`3`) → Skill Migration**, source/target availability automatically tracks your connected MCP backends (hiding unconnected clients and 0-skill sources, auto-switching colliding targets); open the per-row **Preview / Diff** drawer before overwriting, manage target skills with automatic backup-before-delete + 1-click rollback, and switch Antigravity output between **Global Skills Dir** and **Reversible Plugin Bundle (`plugin.json`)**.
 
 ### Cross-Session Temporal Memory & MCP
 ```bash
-cv memory extract                    # extract decisions, preferences, pitfalls, constraints with provenance
-cv memory search "SQLite WAL"        # active facts only (superseded decisions hidden by default)
+cv memory extract                        # extract decisions, preferences, pitfalls, constraints with provenance
+cv memory search "SQLite WAL"            # active facts only (superseded decisions hidden by default)
 cv memory search "SQLite WAL" --history  # trace full A -> B -> C evolution chain
-cv mcp status                        # inspect detected binaries vs uninstall residual dirs
-cv mcp install --all                 # register MCP in detected apps (Claude/Codex/Cursor/Antigravity/DSH, skips residuals)
-cv mcp uninstall --client cursor     # remove context-vault safely with .bak-cv backup
+cv mcp status                            # inspect detected binaries vs uninstall residual dirs
+cv mcp install --all                     # register MCP in detected apps (or --clients claude,dsh)
+cv mcp uninstall --client cursor         # remove context-vault safely (supports --clients a,b; writes .bak-cv backup)
 ```
 MCP tools exposed (`cv-mcp` / `ContextVault.exe --mcp`): `vault_remember`, `vault_context`, `vault_search`, `vault_recent`, `vault_snapshot`, `vault_stats` (retrieval tools support `budget_tokens` trimming).
 
@@ -107,7 +112,7 @@ cv semantic titles --limit 30        # generate concise session titles
 cv backup --keep 10                  # consistent online SQLite backup + snapshots zip rotation
 cv prune                             # dry-run: keep daily last + leaves + forks + orphaned chains
 cv prune --apply                     # auto-backup first, then prune intermediate versions
-cv doctor                            # inspect Python, local agent dirs, DB & index health
+cv doctor                            # inspect Python, local agent dirs, DSH Zstd backend, MCP summary & DB health
 ```
 
 ---

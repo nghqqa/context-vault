@@ -78,7 +78,7 @@ from cv_index import (  # noqa: F401 — re-exported as public engine API
 
 FORMAT_VERSION = "0.1"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # noconsole 进程 spawn 控制台程序不弹窗   # context-snapshot 格式版本
-VERSION = "0.11.0"  # DeepSeek Harness 五合一原生适配 / MCP 按需自选与安全移除 / Skill 与已接入后端强一致
+VERSION = "0.12.0"  # Skill 预览Diff与安全移除回滚 / 并发与安全加固 / 核心模块拆分
 TOOL_RESULT_LIMIT = 256 * 1024  # spec §8.2 裁决: 单块截断阈值 256KB
 HOME = Path.home()
 HEADROOM_DIR = HOME / ".headroom"

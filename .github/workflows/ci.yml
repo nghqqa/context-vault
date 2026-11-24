@@ -13,7 +13,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
         python: ["3.10", "3.12"]
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             python: "3.9"
           - os: macos-latest
             python: "3.12"
@@ -23,7 +23,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: pip install pytest
+      - run: pip install pytest setuptools wheel
       - run: python -m pytest tests/ -v
       - name: console JS syntax + runtime check (内嵌脚本崩一则整页失灵)
         run: |

@@ -187,13 +187,7 @@ class TestAMLFeatures(unittest.TestCase):
         class _TestSrv(aml_adapter._AMLHTTPServer):
             pass
 
-        # 复用 serve_aml 同款 Handler 逻辑: 通过线程启动真实 serve_aml 在临时端口上测试
-        import socket
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
-
-        # 启动前用子线程运行 _AMLHTTPServer 以便优雅 shutdown
+        # 启动前用子线程运行 _AMLHTTPServer 以便优雅 shutdown (port=0 消除 TOCTOU 竞态)
         srv_holder = {}
         orig_cls = aml_adapter._AMLHTTPServer
 
@@ -205,16 +199,17 @@ class TestAMLFeatures(unittest.TestCase):
         aml_adapter._AMLHTTPServer = _CaptureSrv
         th = threading.Thread(
             target=aml_adapter.serve_aml,
-            args=(self.tmp, "127.0.0.1", port, None),
+            args=(self.tmp, "127.0.0.1", 0, None),
             daemon=True,
         )
         th.start()
         try:
-            for _ in range(50):
+            for _ in range(250):
                 if "srv" in srv_holder:
                     break
                 time.sleep(0.02)
             self.assertIn("srv", srv_holder)
+            port = srv_holder["srv"].server_address[1]
             self.assertEqual(ThreadingHTTPServer.allow_reuse_address, orig_reuse)
 
             def req(method: str, path: str, body: bytes | None = None, headers: dict | None = None):
