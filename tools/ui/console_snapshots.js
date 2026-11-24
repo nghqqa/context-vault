@@ -292,7 +292,7 @@ function onProjCardToggle(el){
 const CHEV_IC='<svg class="tw" width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const PROJ_FOLD_IC='<svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 4.5a1.3 1.3 0 0 1 1.3-1.3h2.8l1.3 1.3h5.3a1.3 1.3 0 0 1 1.3 1.3v6.2a1.3 1.3 0 0 1-1.3 1.3H3.3A1.3 1.3 0 0 1 2 12V4.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>';
 const PROJ_CHAT_IC='<svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 3.5h10a1 1 0 0 1 1 1v6.2a1 1 0 0 1-1 1H6.5L3.5 14v-2.3H3a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>';
-const treeCanApply=t=>t==="codex"||t==="claude"||t==="antigravity"||t==="zcode";
+const treeCanApply=t=>t==="codex"||t==="claude"||t==="antigravity"||t==="zcode"||t==="dsh";
 function onTreeTgtChange(val){
   treeTarget=val;
   const ok=treeCanApply(val);
@@ -320,7 +320,8 @@ function renderProjectTree(d,q){
     ["","全部来源（ZCode / Antigravity / Claude / Codex…）"],
     ["antigravity","仅 Antigravity"],
     ["claude-code","仅 Claude Code"],
-    ["codex","仅 Codex"]
+    ["codex","仅 Codex"],
+    ["dsh","仅 DeepSeek Harness"]
   ];
   const seenAg=new Set(baseAgentOpts.map(x=>x[0]));
   const extraAgs=((d&&d.available_agents)||[]).filter(a=>a&&!seenAg.has(String(a).toLowerCase()));
@@ -348,6 +349,7 @@ function renderProjectTree(d,q){
         '<option value="codex"'+(treeTarget==="codex"?" selected":"")+'>Codex</option>'+
         '<option value="markdown"'+(treeTarget==="markdown"?" selected":"")+'>Markdown 简报（outbox）</option>'+
         '<option value="zcode"'+(treeTarget==="zcode"?" selected":"")+'>ZCode 写回（实验性）</option>'+
+        '<option value="dsh"'+(treeTarget==="dsh"?" selected":"")+'>DeepSeek Harness（V4 原生会话）</option>'+
         '<option value="cursor"'+(treeTarget==="cursor"?" selected":"")+'>Cursor</option>'+
         '<option value="opencode"'+(treeTarget==="opencode"?" selected":"")+'>OpenCode</option>'+
         '<option value="qwen"'+(treeTarget==="qwen"?" selected":"")+'>Qwen Code</option>'+
@@ -425,6 +427,7 @@ function showTreeExportRes(html,isErr){
 function agyTargetLabel(t){
   if(t==="antigravity")return "Antigravity conversations 目录（需重启 Antigravity 生效）";
   if(t==="zcode")return "ZCode 主数据库（写回前自动备份，需重启 ZCode 生效）";
+  if(t==="dsh")return "DeepSeek Harness 会话目录（~/.dsh/sessions + workspace.json）";
   if(t==="codex")return "Codex 会话目录";
   if(t==="claude")return "Claude Code projects 目录";
   return t+" 会话目录";
@@ -432,6 +435,7 @@ function agyTargetLabel(t){
 function agyApplyHint(t){
   if(t==="antigravity")return "已写入 conversations 目录，完全重启 Antigravity 生效";
   if(t==="zcode")return "已写回 ZCode 主库（已自动备份），完全重启 ZCode 生效";
+  if(t==="dsh")return "已写入 ~/.dsh/sessions 并登记工作区，刷新或重启 DeepSeek Harness 生效";
   return "已写入目标原生会话目录";
 }
 async function agySyncPreview(){
@@ -534,7 +538,7 @@ async function agyBatchApply(){
 async function quickExportConv(btn){
   const sid=btn.dataset.sid,title=btn.dataset.title||sid;
   const tgt=($("#tree-tgt")&&$("#tree-tgt").value)||treeTarget||"antigravity";
-  const canApply=tgt==="codex"||tgt==="claude"||tgt==="antigravity"||tgt==="zcode";
+  const canApply=treeCanApply(tgt);
   const apply=canApply&&!!(($("#tree-apply")&&$("#tree-apply").checked)||treeApply);
   if(apply){
     if(!await askConfirm("源对话: "+title.slice(0,60)+"\n目标: "+agyTargetLabel(tgt)+"\n\n将写入目标工具的真实会话数据。", "确认写入真实会话目录", "确认写入"))return;
@@ -560,7 +564,7 @@ async function quickExportConv(btn){
 async function quickExportProj(btn){
   const proj=btn.dataset.proj,name=btn.dataset.name||proj,cnt=btn.dataset.count||"全部";
   const tgt=($("#tree-tgt")&&$("#tree-tgt").value)||treeTarget||"antigravity";
-  const canApply=tgt==="codex"||tgt==="claude"||tgt==="antigravity"||tgt==="zcode";
+  const canApply=treeCanApply(tgt);
   const apply=canApply&&!!(($("#tree-apply")&&$("#tree-apply").checked)||treeApply);
   if(apply){
     if(!await askConfirm("项目: "+name+"（"+cnt+" 条主对话）\n目标: "+agyTargetLabel(tgt)+"\n\n将批量写入目标工具的真实会话目录。", "确认批量写入真实目录", "确认写入"))return;

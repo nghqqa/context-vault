@@ -78,7 +78,7 @@ from cv_index import (  # noqa: F401 — re-exported as public engine API
 
 FORMAT_VERSION = "0.1"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # noconsole 进程 spawn 控制台程序不弹窗   # context-snapshot 格式版本
-VERSION = "0.10.3"  # 宽屏四分区比例精调 / Skill 双列主工作台 / 设置卡片等高对齐
+VERSION = "0.11.0"  # DeepSeek Harness 五合一原生适配 / MCP 按需自选与安全移除 / Skill 与已接入后端强一致
 TOOL_RESULT_LIMIT = 256 * 1024  # spec §8.2 裁决: 单块截断阈值 256KB
 HOME = Path.home()
 HEADROOM_DIR = HOME / ".headroom"
@@ -121,6 +121,9 @@ def iter_jsonl(path: Path):
 
 
 def first_jsonl(path: Path) -> dict:
+    if path.name.endswith(".zstd"):
+        import cv_dsh
+        return cv_dsh.first_dsh_jsonl(path)
     with open(path, encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
@@ -152,9 +155,13 @@ def detect_format(first: dict, path: Path) -> str:
     t = first.get("type")
     if t in ("session_meta", "event_msg", "response_item", "turn_context"):
         return "codex-rollout"
+    if t == "session" and isinstance(first.get("version"), int) and "id" in first:
+        return "dsh-jsonl"
     if t in ("user", "tool_use", "tool_result"):
         # 标准 Claude Code: user/assistant 行带 message 嵌套; ZCode 变体: 平铺 content
         return "claude-projects" if "message" in first else "claude-transcript"
+    if path.name.endswith(".zstd"):
+        raise SystemExit(f"无法识别源格式: {path} (首行 type={t!r})")
     # 首行可能是 queue-operation/attachment 等辅助行, 扫前 20 行找判别行
     with open(path, encoding="utf-8") as fh:
         for i, line in enumerate(fh):
@@ -341,6 +348,12 @@ def export_claude_code(path: Path, drop_developer: bool) -> dict:
     return {"capture": capture, "conversation": blocks, "stats": stats}
 
 
+def export_dsh(path: Path, drop_developer: bool = False) -> dict:
+    """DeepSeek Harness 会话 (.v4.jsonl[.zstd] 等) → 规范快照 dict。"""
+    import cv_dsh
+    return cv_dsh.export_dsh(path, drop_developer)
+
+
 def build_envelope(exported: dict) -> dict:
     return {"format_version": FORMAT_VERSION, "created_at": now_iso(),
             "capture": exported["capture"], "conversation": exported["conversation"],
@@ -353,7 +366,7 @@ SNAP_COLS = ("id,created_at,agent,source_format,provider,model,session_ref,origi
              "total_tokens,cost_usd,usage_events,blocks_total,blocks_dropped,path,parent_snapshot,"
              "fork_of,migrated_from,migration_baseline,cwd,parent_session_ref,summary_title")
 
-_GENERIC_ORIGINATORS = {"codex_cli_rs", "codex_vscode", "claude-code", "antigravity"}
+_GENERIC_ORIGINATORS = {"codex_cli_rs", "codex_vscode", "claude-code", "antigravity", "dsh"}
 
 
 def _derive_summary_title(envelope: dict) -> str:
@@ -510,7 +523,7 @@ def cmd_export(args):
     src = Path(args.source).expanduser()
     fmt = detect_format(first_jsonl(src), src)
     exporters = {"codex-rollout": export_codex, "claude-transcript": export_claude,
-                 "claude-projects": export_claude_code}
+                 "claude-projects": export_claude_code, "dsh-jsonl": export_dsh}
     exported = exporters[fmt](src, args.drop_developer)
     envelope = build_envelope(exported)
     do_redact = bool(getattr(args, "redact", False)) or os.environ.get("CV_REDACT_SECRETS") == "1"
@@ -976,6 +989,7 @@ from cv_migrate import (  # noqa: F401,E402
     claude_project_dir,
     _zcode_project_id,
     blocks_to_zcode,
+    blocks_to_dsh,
     do_import_zcode,
     estimate_text_tokens,
     _BRIEF_LINE_CAP,
@@ -1116,7 +1130,7 @@ def owned_stats(vault: Path) -> dict:
         # 产物) 的 tokens_in 只是未缓存输入, 总输入 = 未缓存+读+写; OpenAI 语义 (codex/zcode)
         # 的 input 已含缓存 (实证 zcode model_usage 0 行 cache_read>input), 总输入 = input
         sf = r["source_format"] or ""
-        denom += (i + c + w) if (sf == "claude-projects" or sf.startswith("via-smigrate")) else i
+        denom += (i + c + w) if (sf == "claude-projects" or sf.startswith("via-smigrate") or sf.startswith("dsh-")) else i
         a = agg.setdefault(r["agent"], [0, 0])
         a[0] += 1
         a[1] += i
@@ -1415,18 +1429,25 @@ def load_migrations(vault: Path) -> dict:
 
 def scan_sources(extra_roots: list | None = None) -> list:
     """扫描本机全部会话源 (只读)。返回 [Path, ...]。"""
+    import cv_dsh
     roots = [("codex", CODEX_SESSIONS.glob("*/*/*/rollout-*.jsonl")),
              ("claude-projects", (HOME / ".claude" / "projects").glob("*/*.jsonl")),
-             ("claude-transcripts", (HOME / ".claude" / "transcripts").glob("*.jsonl"))]
+             ("claude-transcripts", (HOME / ".claude" / "transcripts").glob("*.jsonl")),
+             ("dsh", cv_dsh.discover_dsh_session_files())]
     for r in (extra_roots or []):
         p = Path(r).expanduser()
         roots.append((f"extra:{p.name}", p.rglob("*.jsonl")))
+        roots.append((f"extra-dsh:{p.name}", cv_dsh.discover_dsh_session_files(p)))
     files = []
+    seen = set()
     for _, it in roots:
         for f in it:
             try:
                 if f.is_file() and f.stat().st_size > 0:
-                    files.append(f)
+                    k = _norm_path(f)
+                    if k not in seen:
+                        seen.add(k)
+                        files.append(f)
             except OSError:
                 continue
     return files
@@ -1445,7 +1466,7 @@ def sync_one(conn, vault: Path, path: Path, migrations=None, debounce=False) -> 
         return "skip"
     fmt = detect_format(first_jsonl(path), path)
     exporters = {"codex-rollout": export_codex, "claude-transcript": export_claude,
-                 "claude-projects": export_claude_code}
+                 "claude-projects": export_claude_code, "dsh-jsonl": export_dsh}
     exported = exporters[fmt](path, False)
     envelope = build_envelope(exported)
     if exported["stats"]["blocks_total"] == 0:
@@ -2320,62 +2341,157 @@ def _mcp_cmd_parts(vault: Path) -> tuple:
     return py, [str(server), "--vault", str(vault.resolve())]
 
 
+def _has_local_bin_cmd(home: Path, names: tuple[str, ...]) -> str | None:
+    local_bin = home / ".local" / "bin"
+    if not local_bin.is_dir():
+        return None
+    exts = ("", ".exe", ".cmd", ".ps1", ".bat") if sys.platform.startswith("win") else ("",)
+    for name in names:
+        for ext in exts:
+            cand = local_bin / f"{name}{ext}"
+            if cand.is_file():
+                return str(cand)
+    return None
+
+
+def _is_real_home_dir() -> bool:
+    try:
+        return Path(HOME).resolve() == Path.home().resolve()
+    except OSError:
+        return str(HOME) == str(Path.home())
+
+
+def _detect_mcp_client_app(client_id: str) -> bool:
+    """探测客户端主程序/CLI 是否真实存在于本机, 避免将卸载残留配置目录误判为已安装应用。"""
+    home = Path(HOME)
+    real_home = _is_real_home_dir()
+
+    def _has_cli(names: tuple[str, ...]) -> bool:
+        if _has_local_bin_cmd(home, names):
+            return True
+        return bool(real_home and any(shutil.which(n) for n in names))
+
+    pf_dirs = [Path(os.environ[k]) for k in ("ProgramFiles", "ProgramFiles(x86)") if real_home and os.environ.get(k)]
+
+    if client_id == "claude":
+        return _has_cli(("claude",))
+    if client_id == "codex":
+        if _has_cli(("codex",)):
+            return True
+        for ext_dir in (home / ".vscode" / "extensions", home / ".vscode-insiders" / "extensions"):
+            if ext_dir.is_dir() and any(ext_dir.glob("openai.chatgpt-*")):
+                return True
+        return False
+    if client_id == "cursor":
+        if _has_cli(("cursor",)):
+            return True
+        cands = [
+            home / "AppData" / "Local" / "Programs" / "cursor" / "Cursor.exe",
+            home / "Applications" / "Cursor.app",
+        ]
+        if real_home:
+            cands.extend(d / "cursor" / "Cursor.exe" for d in pf_dirs)
+            cands.extend((Path("/Applications/Cursor.app"), Path("/usr/share/cursor"), Path("/opt/cursor")))
+        return any(p.exists() for p in cands)
+    if client_id == "antigravity":
+        if _has_cli(("antigravity", "agy")):
+            return True
+        cands = [
+            home / "AppData" / "Local" / "Programs" / "Antigravity" / "Antigravity.exe",
+            home / "Applications" / "Antigravity.app",
+        ]
+        if real_home:
+            cands.extend(d / "Antigravity" / "Antigravity.exe" for d in pf_dirs)
+            cands.extend((Path("/Applications/Antigravity.app"), Path("/usr/share/antigravity"), Path("/opt/antigravity")))
+        return any(p.exists() for p in cands)
+    if client_id == "dsh":
+        if _has_cli(("dsh",)):
+            return True
+        cands = [
+            home / "AppData" / "Local" / "Programs" / "DeepSeek Harness" / "DeepSeek Harness.exe",
+            home / "Applications" / "DeepSeek Harness.app",
+        ]
+        if real_home:
+            cands.extend(d / "DeepSeek Harness" / "DeepSeek Harness.exe" for d in pf_dirs)
+            cands.extend((Path("/Applications/DeepSeek Harness.app"), Path("/usr/share/deepseek-harness"),
+                          Path("/opt/deepseek-harness")))
+        return any(p.exists() for p in cands)
+    return False
+
+
 def _claude_exe() -> str | None:
-    import shutil
-    return shutil.which("claude")  # npm .cmd shim 需 which 解析全路径
+    local_cmd = _has_local_bin_cmd(Path(HOME), ("claude",))
+    if local_cmd:
+        return local_cmd
+    if _is_real_home_dir():
+        return shutil.which("claude")  # npm .cmd shim 需 which 解析全路径
+    return None
 
 
 def _install_mcp_claude(vault: Path) -> str:
     exe = _claude_exe()
     if not exe:
         return "未找到 claude CLI (跳过)"
-    r = subprocess.run([exe, "mcp", "list"], capture_output=True, text=True, creationflags=NO_WINDOW)
+    r = subprocess.run([exe, "mcp", "list"], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
     if "context-vault" in (r.stdout or ""):
         return "已安装 (跳过)"
     py, args = _mcp_cmd_parts(vault)
     r = subprocess.run([exe, "mcp", "add", "context-vault", "-s", "user", "--", py] + args,
-                       capture_output=True, text=True, creationflags=NO_WINDOW)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       creationflags=NO_WINDOW)
     return "已写入 ~/.claude.json (user scope)" if r.returncode == 0 else f"失败: {(r.stderr or r.stdout)[:120]}"
 
 
 def _install_mcp_codex(vault: Path) -> str:
     cfg = HOME / ".codex" / "config.toml"
     if not cfg.parent.exists():
-        return "未找到 ~/.codex (codex 未安装)"
-    text = cfg.read_text(encoding="utf-8")
+        if _detect_mcp_client_app("codex"):
+            cfg.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            return "未找到 ~/.codex (codex 未安装)"
+    text = cfg.read_text(encoding="utf-8", errors="replace") if cfg.exists() else ""
     if "context-vault" in text:
         return "已安装 (跳过)"
-    cfg.with_suffix(".toml.bak-cv").write_text(text, encoding="utf-8")  # 备份
+    had_cfg = cfg.exists()
+    if had_cfg:
+        cfg.with_suffix(".toml.bak-cv").write_text(text, encoding="utf-8")  # 备份
     py, args = _mcp_cmd_parts(vault)
-    toml = ("\n[mcp_servers.context-vault]\n"
-            f'command = "{py}"\n'
-            "args = [" + ", ".join(f'"{a}"' for a in args) + "]\n")
-    with cfg.open("a", encoding="utf-8") as fh:
-        fh.write(toml)
-    return "已追加到 ~/.codex/config.toml (备份 .bak-cv)"
+    sep = "" if not text else (("\n" if not text.endswith("\n") else "") + ("\n" if text.strip() else ""))
+    toml = (f"{sep}[mcp_servers.context-vault]\n"
+            f'command = {json.dumps(str(py), ensure_ascii=False)}\n'
+            "args = [" + ", ".join(json.dumps(str(a), ensure_ascii=False) for a in args) + "]\n")
+    atomic_write_text(cfg, text + toml)
+    return "已追加到 ~/.codex/config.toml (备份 .bak-cv)" if had_cfg else "已写入 ~/.codex/config.toml"
 
 
 def _install_mcp_cursor(vault: Path) -> str:
-    cfg = Path.home() / ".cursor" / "mcp.json"
+    cfg = HOME / ".cursor" / "mcp.json"
     if not cfg.parent.exists():
-        return "未找到 ~/.cursor (cursor 未安装)"
-    data = {}
-    if cfg.exists():
-        data = json.loads(cfg.read_text(encoding="utf-8"))
+        if _detect_mcp_client_app("cursor"):
+            cfg.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            return "未找到 ~/.cursor (cursor 未安装)"
+    raw = cfg.read_text(encoding="utf-8", errors="replace").strip() if cfg.exists() else ""
+    data = json.loads(raw) if raw else {}
+    if raw:
         cfg.with_suffix(".json.bak-cv").write_text(json.dumps(data, indent=2), encoding="utf-8")
     servers = data.setdefault("mcpServers", {})
     if "context-vault" in servers:
         return "已安装 (跳过)"
     py, args = _mcp_cmd_parts(vault)
     servers["context-vault"] = {"command": py, "args": args}
-    cfg.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    atomic_write_text(cfg, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
     return "已写入 ~/.cursor/mcp.json"
 
 
 def _install_mcp_antigravity(vault: Path) -> str:
     gemini_dir = HOME / ".gemini"
     if not gemini_dir.exists():
-        return "未找到 ~/.gemini (antigravity 未安装)"
+        if _detect_mcp_client_app("antigravity"):
+            gemini_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            return "未找到 ~/.gemini (antigravity 未安装)"
     cfg = gemini_dir / "config" / "mcp_config.json"
     cfg.parent.mkdir(parents=True, exist_ok=True)
     data = {}
@@ -2388,12 +2504,179 @@ def _install_mcp_antigravity(vault: Path) -> str:
         return "已安装 (跳过)"
     py, args = _mcp_cmd_parts(vault)
     servers["context-vault"] = {"command": py, "args": args}
-    cfg.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    atomic_write_text(cfg, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
     return "已写入 ~/.gemini/config/mcp_config.json"
 
 
-def mcp_status_api(vault: Path) -> dict:
-    """结构化检测各客户端 MCP 接入状态 (免 spawn 慢 CLI 优先读配置, 控制台设置页用)。"""
+def _uninstall_mcp_json_file(cfg: Path) -> bool:
+    """安全移除 JSON `mcpServers['context-vault']` 并保留其余配置与 `.json.bak-cv` 备份。"""
+    if not cfg.is_file():
+        return False
+    raw = cfg.read_text(encoding="utf-8", errors="replace")
+    if "context-vault" not in raw or not raw.strip():
+        return False
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    servers = data.get("mcpServers") if isinstance(data, dict) else None
+    if not isinstance(servers, dict) or "context-vault" not in servers:
+        return False
+    cfg.with_suffix(".json.bak-cv").write_text(raw, encoding="utf-8")
+    servers.pop("context-vault", None)
+    atomic_write_text(cfg, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    return True
+
+
+def _uninstall_mcp_claude(vault: Path) -> str:
+    cli_removed = False
+    exe = _claude_exe()
+    if exe:
+        try:
+            r = subprocess.run([exe, "mcp", "remove", "context-vault", "-s", "user"],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace",
+                               timeout=10, creationflags=NO_WINDOW)
+            cli_removed = (r.returncode == 0)
+        except Exception:
+            pass
+    if _uninstall_mcp_json_file(HOME / ".claude.json"):
+        return "已从 ~/.claude.json 移除 context-vault (备份 .json.bak-cv)"
+    if cli_removed:
+        return "已通过 claude CLI 移除 context-vault"
+    return "未安装 (无需移除)"
+
+
+def _parse_toml_table_header(line: str) -> list[str] | None:
+    """若为 TOML 表头 (`[...]` 或 `[[...]]`) 返回点分段落名, 否则返回 None。"""
+    s = line.strip()
+    if not s.startswith("["):
+        return None
+    if s.startswith("[["):
+        end = s.find("]]")
+        if end < 0:
+            return None
+        rest = s[end + 2:].strip()
+        if rest and not rest.startswith("#"):
+            return None
+        inner = s[2:end]
+    else:
+        in_dq = False
+        in_sq = False
+        esc = False
+        end = -1
+        for i, ch in enumerate(s[1:], 1):
+            if esc:
+                esc = False
+                continue
+            if in_dq:
+                if ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_dq = False
+            elif in_sq:
+                if ch == "'":
+                    in_sq = False
+            else:
+                if ch == '"':
+                    in_dq = True
+                elif ch == "'":
+                    in_sq = True
+                elif ch == "]":
+                    end = i
+                    break
+        if end < 0:
+            return None
+        rest = s[end + 1:].strip()
+        if rest and not rest.startswith("#"):
+            return None
+        inner = s[1:end]
+    parts: list[str] = []
+    buf: list[str] = []
+    in_dq = False
+    in_sq = False
+    esc = False
+    for ch in inner:
+        if esc:
+            buf.append(ch)
+            esc = False
+            continue
+        if in_dq:
+            if ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_dq = False
+            else:
+                buf.append(ch)
+        elif in_sq:
+            if ch == "'":
+                in_sq = False
+            else:
+                buf.append(ch)
+        else:
+            if ch == '"':
+                in_dq = True
+            elif ch == "'":
+                in_sq = True
+            elif ch == ".":
+                parts.append("".join(buf).strip())
+                buf.clear()
+            else:
+                buf.append(ch)
+    parts.append("".join(buf).strip())
+    return parts
+
+
+def _uninstall_mcp_codex(vault: Path) -> str:
+    cfg = HOME / ".codex" / "config.toml"
+    if not cfg.is_file():
+        return "未安装 (无需移除)"
+    raw = cfg.read_text(encoding="utf-8", errors="replace")
+    if "context-vault" not in raw:
+        return "未安装 (无需移除)"
+    norm = raw.replace("\r\n", "\n").replace("\r", "\n")
+    out: list[str] = []
+    skipping = False
+    removed = False
+    for ln in norm.splitlines():
+        parts = _parse_toml_table_header(ln)
+        if parts is not None:
+            if len(parts) >= 2 and parts[0] == "mcp_servers" and parts[1] == "context-vault":
+                skipping = True
+                removed = True
+                continue
+            skipping = False
+        if skipping:
+            continue
+        out.append(ln)
+    if not removed:
+        return "未安装 (无需移除)"
+    cfg.with_suffix(".toml.bak-cv").write_text(raw, encoding="utf-8")
+    body = re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip("\n")
+    atomic_write_text(cfg, (body + "\n") if body else "")
+    return "已从 ~/.codex/config.toml 移除 context-vault (备份 .toml.bak-cv)"
+
+
+def _uninstall_mcp_cursor(vault: Path) -> str:
+    if _uninstall_mcp_json_file(HOME / ".cursor" / "mcp.json"):
+        return "已从 ~/.cursor/mcp.json 移除 context-vault (备份 .json.bak-cv)"
+    return "未安装 (无需移除)"
+
+
+def _uninstall_mcp_antigravity(vault: Path) -> str:
+    removed = []
+    for cfg, lbl in (
+        (HOME / ".gemini" / "config" / "mcp_config.json", "~/.gemini/config/mcp_config.json"),
+        (HOME / ".gemini" / "antigravity" / "mcp_config.json", "~/.gemini/antigravity/mcp_config.json"),
+    ):
+        if _uninstall_mcp_json_file(cfg):
+            removed.append(lbl)
+    if removed:
+        return f"已从 {'、'.join(removed)} 移除 context-vault (备份 .json.bak-cv)"
+    return "未安装 (无需移除)"
+
+
+def mcp_status_api(vault: Path, probe_cli: bool = True) -> dict:
+    """结构化检测各客户端 MCP 接入状态 (区分真实主程序与卸载残留目录, probe_cli=False 时仅快速读配置)。"""
     py, args_ = _mcp_cmd_parts(vault)
 
     def _has_cv(p: Path) -> bool:
@@ -2403,53 +2686,122 @@ def mcp_status_api(vault: Path) -> dict:
             return False
 
     claude_cfg = HOME / ".claude.json"
+    claude_app = _detect_mcp_client_app("claude")
     claude_exe = _claude_exe()
     claude_on = _has_cv(claude_cfg)
-    if not claude_on and claude_exe:
+    if not claude_on and probe_cli and claude_app and claude_exe:
         try:
             out = subprocess.run([claude_exe, "mcp", "list"], capture_output=True, text=True,
-                                 timeout=5, creationflags=NO_WINDOW).stdout or ""
+                                 encoding="utf-8", errors="replace", timeout=5,
+                                 creationflags=NO_WINDOW).stdout or ""
             claude_on = "context-vault" in out
         except Exception:
             pass
     codex_dir = HOME / ".codex"
     codex_cfg = codex_dir / "config.toml"
-    cursor_dir = Path.home() / ".cursor"
+    codex_app = _detect_mcp_client_app("codex")
+    cursor_dir = HOME / ".cursor"
     cursor_cfg = cursor_dir / "mcp.json"
+    cursor_app = _detect_mcp_client_app("cursor")
     gemini_dir = HOME / ".gemini"
     agy_cfg1 = gemini_dir / "config" / "mcp_config.json"
     agy_cfg2 = gemini_dir / "antigravity" / "mcp_config.json"
+    agy_app = _detect_mcp_client_app("antigravity")
+
+    def _entry(cid: str, name: str, detected: bool, app_detected: bool, installed: bool, cfg: Path) -> dict:
+        return {
+            "id": cid, "name": name,
+            "detected": bool(detected),
+            "app_detected": bool(app_detected),
+            "residual": bool(detected and not app_detected),
+            "installed": bool(installed),
+            "config": str(cfg),
+        }
 
     clients = [
-        {"id": "claude", "name": "Claude Code", "detected": bool(claude_exe or claude_cfg.exists()),
-         "installed": claude_on, "config": str(claude_cfg)},
-        {"id": "codex", "name": "Codex", "detected": codex_dir.exists(),
-         "installed": _has_cv(codex_cfg), "config": str(codex_cfg)},
-        {"id": "cursor", "name": "Cursor", "detected": cursor_dir.exists(),
-         "installed": _has_cv(cursor_cfg), "config": str(cursor_cfg)},
-        {"id": "antigravity", "name": "Antigravity", "detected": gemini_dir.exists(),
-         "installed": _has_cv(agy_cfg1) or _has_cv(agy_cfg2),
-         "config": str(agy_cfg2 if _has_cv(agy_cfg2) else agy_cfg1)},
+        _entry("claude", "Claude Code", claude_app or claude_cfg.exists(), claude_app, claude_on, claude_cfg),
+        _entry("codex", "Codex", codex_dir.exists() or codex_app, codex_app, _has_cv(codex_cfg), codex_cfg),
+        _entry("cursor", "Cursor", cursor_dir.exists() or cursor_app, cursor_app, _has_cv(cursor_cfg), cursor_cfg),
+        _entry("antigravity", "Antigravity", gemini_dir.exists() or agy_app, agy_app,
+               _has_cv(agy_cfg1) or _has_cv(agy_cfg2),
+               agy_cfg2 if _has_cv(agy_cfg2) else agy_cfg1),
     ]
-    return {"server_cmd": f"{py} {' '.join(args_)}", "clients": clients,
-            "installed_count": sum(1 for c in clients if c["installed"]),
-            "detected_count": sum(1 for c in clients if c["detected"])}
+    import cv_dsh
+    clients.append(cv_dsh.dsh_mcp_status())
+    return {
+        "server_cmd": f"{py} {' '.join(args_)}",
+        "clients": clients,
+        "installed_count": sum(1 for c in clients if c["installed"]),
+        "detected_count": sum(1 for c in clients if c["detected"]),
+        "app_detected_count": sum(1 for c in clients if c.get("app_detected")),
+    }
 
 
-def mcp_install_api(vault: Path, client: str = "all") -> dict:
-    """结构化执行 MCP 写入并返回各客户端结果与最新状态。"""
+def _resolve_mcp_targets(valid_ids: dict, client: str | None = None,
+                         clients: list[str] | None = None, *, empty_msg: str) -> tuple:
+    """解析单目标 / 多选列表 (去重保序并校验 ID); 返回 (targets, is_all_mode)。"""
+    if clients is not None:
+        if not isinstance(clients, list):
+            raise ValueError("clients 必须为数组")
+        seen: list[str] = []
+        for raw in clients:
+            cid = str(raw or "").strip()
+            if not cid:
+                continue
+            if cid not in valid_ids:
+                raise ValueError(f"未知客户端: {cid}")
+            if cid not in seen:
+                seen.append(cid)
+        if not seen:
+            raise ValueError(empty_msg)
+        return seen, False
+    cid = (client or "all").strip()
+    if cid == "all":
+        return list(valid_ids), True
+    if cid not in valid_ids:
+        raise ValueError(f"未知客户端: {cid}")
+    return [cid], False
+
+
+def mcp_install_api(vault: Path, client: str | None = "all", clients: list[str] | None = None) -> dict:
+    """结构化执行 MCP 写入 (支持多选列表; client='all' 自动跳过卸载残留目录) 并返回最新状态。"""
+    import cv_dsh
     installers = {"claude": _install_mcp_claude, "codex": _install_mcp_codex,
-                  "cursor": _install_mcp_cursor, "antigravity": _install_mcp_antigravity}
-    if client == "all":
-        targets = list(installers)
-    elif client in installers:
-        targets = [client]
-    else:
-        raise ValueError(f"未知客户端: {client}")
+                  "cursor": _install_mcp_cursor, "antigravity": _install_mcp_antigravity,
+                  "dsh": cv_dsh.install_mcp_dsh}
+    targets, is_all = _resolve_mcp_targets(installers, client, clients, empty_msg="请至少选择一个要接入的客户端")
+    pre_status = {c["id"]: c for c in mcp_status_api(vault)["clients"]} if is_all else {}
+    results = []
+    for c in targets:
+        if is_all:
+            st = pre_status.get(c, {})
+            if st.get("residual"):
+                results.append({"client": c, "message": "未检测到主程序，仅存在残留配置目录 (已跳过; 如确需接入请显式指定)"})
+                continue
+            if not st.get("app_detected"):
+                results.append({"client": c, "message": f"未检测到 {st.get('name', c)} (跳过)"})
+                continue
+        try:
+            msg = installers[c](vault)
+        except Exception as e:
+            msg = f"失败: {e}"
+        results.append({"client": c, "message": msg})
+    return {"results": results, "status": mcp_status_api(vault)}
+
+
+def mcp_uninstall_api(vault: Path, client: str | None = None, clients: list[str] | None = None) -> dict:
+    """结构化移除指定客户端配置中的 context-vault 条目并返回最新状态。"""
+    import cv_dsh
+    uninstallers = {"claude": _uninstall_mcp_claude, "codex": _uninstall_mcp_codex,
+                    "cursor": _uninstall_mcp_cursor, "antigravity": _uninstall_mcp_antigravity,
+                    "dsh": cv_dsh.uninstall_mcp_dsh}
+    if clients is None and not (client and str(client).strip()):
+        raise ValueError("请指定要移除的客户端")
+    targets, _ = _resolve_mcp_targets(uninstallers, client, clients, empty_msg="请至少选择一个要移除的客户端")
     results = []
     for c in targets:
         try:
-            msg = installers[c](vault)
+            msg = uninstallers[c](vault)
         except Exception as e:
             msg = f"失败: {e}"
         results.append({"client": c, "message": msg})
@@ -2499,24 +2851,31 @@ def backup_vault_api(vault: Path, keep: int = 10) -> dict:
 
 def cmd_mcp(args):
     vault = vault_dir(args)
-    clients = {"claude": _install_mcp_claude, "codex": _install_mcp_codex,
-               "cursor": _install_mcp_cursor, "antigravity": _install_mcp_antigravity}
     if args.mcp_cmd == "install":
-        targets = list(clients) if args.all else [args.client]
-        for c in targets:
-            print(f"[{c}] {clients[c](vault)}")
+        target = "all" if getattr(args, "all", False) else args.client
+        res = mcp_install_api(vault, client=target)
+        for item in res["results"]:
+            print(f"[{item['client']}] {item['message']}")
+    elif args.mcp_cmd == "uninstall":
+        target = "all" if getattr(args, "all", False) else args.client
+        res = mcp_uninstall_api(vault, client=target)
+        for item in res["results"]:
+            print(f"[{item['client']}] {item['message']}")
     elif args.mcp_cmd == "status":
-        py, args_ = _mcp_cmd_parts(vault)
-        print(f"server: {py} {' '.join(args_)}")
-        exe = _claude_exe()
-        out = subprocess.run([exe, "mcp", "list"], capture_output=True, text=True, creationflags=NO_WINDOW).stdout if exe else ""
-        print(f"[claude] {'✓ 已连接' if 'context-vault' in (out or '') else ('✗ 未安装' if exe else '✗ claude CLI 未找到')}")
-        codex_cfg = HOME / ".codex" / "config.toml"
-        print(f"[codex]  {'✓ 已配置' if codex_cfg.exists() and 'context-vault' in codex_cfg.read_text(encoding='utf-8') else '✗ 未安装'}")
-        cur = Path.home() / ".cursor" / "mcp.json"
-        print(f"[cursor] {'✓ 已配置' if cur.exists() and 'context-vault' in cur.read_text(encoding='utf-8') else '✗ 未安装'}")
-        agy = HOME / ".gemini" / "config" / "mcp_config.json"
-        print(f"[antigravity] {'✓ 已配置' if agy.exists() and 'context-vault' in agy.read_text(encoding='utf-8') else '✗ 未安装'}")
+        st = mcp_status_api(vault)
+        print(f"server: {st['server_cmd']}")
+        for c in st["clients"]:
+            if c["installed"] and c.get("residual"):
+                tag = "✓ 已接入 (未检测到主程序)"
+            elif c["installed"]:
+                tag = "✓ 已配置"
+            elif c.get("residual"):
+                tag = "· 仅残留配置目录"
+            elif c["detected"]:
+                tag = "✗ 未接入 (已检测到主程序)"
+            else:
+                tag = "✗ 未检测到"
+            print(f"[{c['id']:<11}] {tag}  ({c['config']})")
 
 
 # ---- 已拆解至 tools/cv_antigravity.py (全量 re-export 保持向后兼容) ----
@@ -2652,12 +3011,14 @@ def cmd_doctor(args):
           + (f"运行中 http://127.0.0.1:{svc_port}" if svc_ok else "未启动 (按需运行 cv serve; MCP 自动冷回退)"))
 
     print("\n[2/3] 本地会话源 (发现任一即可同步)")
+    import cv_dsh
     sources = [
         ("ZCode 主库", ZCODE_DB.exists(), str(ZCODE_DB)),
         ("Codex 会话", CODEX_SESSIONS.exists(), str(CODEX_SESSIONS)),
         ("Claude Projects", CLAUDE_PROJECTS.exists(), str(CLAUDE_PROJECTS)),
         ("Claude 转录", (HOME / ".claude" / "transcripts").exists(), str(HOME / ".claude/transcripts")),
         ("Antigravity", ANTIGRAVITY_CONV_DIR.exists(), str(ANTIGRAVITY_CONV_DIR)),
+        ("DeepSeek Harness", cv_dsh.dsh_sessions_root().exists(), str(cv_dsh.dsh_sessions_root())),
     ]
     any_src = False
     for name, good, detail in sources:
@@ -2693,7 +3054,7 @@ def cmd_setup(args):
     print(f"  同步完成: 新增 {sres.get('new', 0)} · 更新 {sres.get('updated', 0)} · 累计 {sres.get('total', 0)} 快照")
 
     if not getattr(args, "no_ledger", False):
-        print("[3/4] 同步多端 token 账本 (Claude/Codex/ZCode/Antigravity)...")
+        print("[3/4] 同步多端 token 账本 (Claude/Codex/ZCode/Antigravity/DSH)...")
         try:
             import cv_ledger as _cl
             lres = _cl.sync_usage_events(vault)
@@ -2831,7 +3192,7 @@ def main(argv=None):
 
     i = sub.add_parser("import", help="快照 → 目标 agent 会话文件")
     i.add_argument("snapshot_id", nargs="?")
-    i.add_argument("--target", choices=["codex", "claude", "markdown", "antigravity", "zcode"], required=True)
+    i.add_argument("--target", choices=["codex", "claude", "markdown", "antigravity", "zcode", "dsh"], required=True)
     i.add_argument("--project", help="按项目名或路径批量导入顶层主对话")
     i.add_argument("--agent", help="严格按来源 agent 过滤导入 (如 zcode；不带入 codex 等其他来源)")
     i.add_argument("--limit", type=int, default=0, help="按项目导入时的最多会话数 (0=全部)")
@@ -2845,7 +3206,7 @@ def main(argv=None):
 
     m = sub.add_parser("migrate", help="一键: 导出→预览→导入")
     m.add_argument("source")
-    m.add_argument("--target", choices=["codex", "claude", "markdown", "antigravity", "zcode"], required=True)
+    m.add_argument("--target", choices=["codex", "claude", "markdown", "antigravity", "zcode", "dsh"], required=True)
     m.add_argument("--apply", action="store_true")
     m.add_argument("--yes", action="store_true")
     m.add_argument("--strip-thinking", action="store_true")
@@ -2908,12 +3269,16 @@ def main(argv=None):
     mdd = msub.add_parser("dedup", help="合并 (kind, content) 完全相同的跨快照重复摘录")
     mdd.set_defaults(func=cmd_memory)
 
-    mc = sub.add_parser("mcp", help="MCP 记忆后端一键接入客户端")
+    mc = sub.add_parser("mcp", help="MCP 记忆后端按需接入与管理")
     msub = mc.add_subparsers(dest="mcp_cmd", required=True)
     mi = msub.add_parser("install")
-    mi.add_argument("--client", choices=["claude", "codex", "cursor", "antigravity"], default="claude")
-    mi.add_argument("--all", action="store_true", help="接入全部已安装的客户端")
+    mi.add_argument("--client", choices=["claude", "codex", "cursor", "antigravity", "dsh"], default="claude")
+    mi.add_argument("--all", action="store_true", help="接入全部已检测到主程序的客户端 (跳过仅残留目录)")
     mi.set_defaults(func=cmd_mcp)
+    mu = msub.add_parser("uninstall")
+    mu.add_argument("--client", choices=["claude", "codex", "cursor", "antigravity", "dsh"], default="cursor")
+    mu.add_argument("--all", action="store_true", help="从全部客户端配置中移除 context-vault")
+    mu.set_defaults(func=cmd_mcp)
     msub.add_parser("status").set_defaults(func=cmd_mcp)
 
     ig = sub.add_parser("ingest", help="接入任意 harness 会话 (经 smigrate, 17+ 种)")
@@ -2941,9 +3306,9 @@ def main(argv=None):
     lr.add_argument("--days", type=int, default=30)
     lr.add_argument("--key")
     lr.set_defaults(func=cmd_ledger_import_relay)
-    lsy = lsub.add_parser("sync", help="多端直采入账: Claude/Codex/ZCode/Antigravity 本地日志 → usage_events (幂等, 脱离 headroom)")
+    lsy = lsub.add_parser("sync", help="多端直采入账: Claude/Codex/ZCode/Antigravity/DSH 本地日志 → usage_events (幂等, 脱离 headroom)")
     lsy.add_argument("--sources", default="all",
-                     help="all|claude|codex|zcode|antigravity (可逗号组合, 默认 all)")
+                     help="all|claude|codex|zcode|antigravity|dsh (可逗号组合, 默认 all)")
     lsy.add_argument("--from-agm",
                      help="可选外部管理器统计快照 URL (如本机 Antigravity-Manager; 尽力而为, 失败静默跳过)")
     lsy.add_argument("--recompute", action="store_true",
@@ -3049,13 +3414,13 @@ def main(argv=None):
     sem_tt.add_argument("--heuristic-only", action="store_true", help="仅用本地零依赖启发式清洗, 不调用 LLM")
     sem_tt.set_defaults(func=cmd_semantic)
 
-    sk = sub.add_parser("skills", help="跨工具 Skill 技能盘点与批量迁移 (ZCode/Claude/Codex/Antigravity/Cursor)")
+    sk = sub.add_parser("skills", help="跨工具 Skill 技能盘点与批量迁移 (ZCode/Claude/Codex/Antigravity/Cursor/DSH)")
     sksub = sk.add_subparsers(dest="skills_cmd", required=True)
     sk_ls = sksub.add_parser("list", help="盘点各端本地 Skill 数量、预估 Prompt Token 与目标冲突状态")
-    sk_ls.add_argument("--source", default="zcode", choices=["zcode", "claude", "codex", "antigravity", "cursor", "all"],
+    sk_ls.add_argument("--source", default="zcode", choices=["zcode", "claude", "codex", "antigravity", "cursor", "dsh", "all"],
                        help="来源工具 (默认 zcode)")
     sk_ls.add_argument("--target", default="antigravity",
-                       choices=["antigravity", "claude", "codex", "cursor", "zcode", "workspace"],
+                       choices=["antigravity", "claude", "codex", "cursor", "zcode", "dsh", "workspace"],
                        help="对比目标 (默认 antigravity)")
     sk_ls.add_argument("--agy-mode", default="skills", choices=["skills", "plugin"],
                        help="Antigravity 落盘模式: skills=全局目录 | plugin=独立插件包")
@@ -3066,10 +3431,10 @@ def main(argv=None):
 
     sk_mg = sksub.add_parser("migrate", help="批量迁移 Skill (默认 dry-run 预演, 加 --apply 才写入)")
     sk_mg.add_argument("--from", dest="source", default="zcode",
-                       choices=["zcode", "claude", "codex", "antigravity", "cursor", "all"],
+                       choices=["zcode", "claude", "codex", "antigravity", "cursor", "dsh", "all"],
                        help="来源工具 (默认 zcode)")
     sk_mg.add_argument("--to", dest="target", default="antigravity",
-                       choices=["antigravity", "claude", "codex", "cursor", "zcode", "workspace"],
+                       choices=["antigravity", "claude", "codex", "cursor", "zcode", "dsh", "workspace"],
                        help="目标工具 (默认 antigravity)")
     sk_mg.add_argument("--only", help="仅迁移指定 Skill (逗号分隔 slug 或 id)")
     sk_mg.add_argument("--include-plugins", action="store_true", help="同时包含插件缓存目录内的 Skill")
@@ -3094,4 +3459,5 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    sys.modules.setdefault("cv", sys.modules[__name__])
     main()

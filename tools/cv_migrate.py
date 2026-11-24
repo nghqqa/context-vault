@@ -1,4 +1,4 @@
-"""迁移保真度预览、跨端导入 (Codex/Claude/Antigravity/ZCode/Markdown) 与五槽位交接压缩简报。"""
+"""迁移保真度预览、跨端导入 (Codex/Claude/Antigravity/ZCode/DSH/Markdown) 与五槽位交接压缩简报。"""
 from __future__ import annotations
 
 import datetime as dt
@@ -647,6 +647,12 @@ def blocks_to_brief(env: dict, max_chars: int = 48 * 1024, budget_tokens: int | 
     return brief
 
 
+def blocks_to_dsh(env: dict, strip_thinking: bool = False, session_id: str | None = None) -> tuple:
+    """生成 DeepSeek Harness V4 会话 (header, events, dropped, dsh_sid, cwd), 实现位于 cv_dsh。"""
+    import cv_dsh
+    return cv_dsh.blocks_to_dsh(env, strip_thinking=strip_thinking, session_id=session_id)
+
+
 def _record_migration(vault: Path, dest: Path, sid: str, baseline=None):
     with (vault / "migrations.jsonl").open("a", encoding="utf-8") as fh:
         fh.write(json.dumps({"dest": _cv()._norm_path(dest), "source": sid, "baseline": baseline,
@@ -659,9 +665,9 @@ def do_import(vault: Path, sid: str, target: str, apply: bool, strip_thinking=Fa
     session_id 缺省按源会话 (agent+session_ref) 确定性派生: 同一会话重复导出/演进后重导出
     在目标端同名覆盖 (原位更新), 不再产生并排副本。antigravity apply 同时登记
     conversation_summaries 索引行 (只落 .db 不建索引 = 永不可见)。"""
-    if target not in ("markdown", "codex", "claude", "antigravity", "zcode") \
+    if target not in ("markdown", "codex", "claude", "antigravity", "zcode", "dsh") \
             and target not in _cv().SMIGRATE_TARGETS:
-        raise _cv().BadMigrateTarget(f"未知迁移目标: {target!r} (可选 {'|'.join(_cv().SMIGRATE_TARGETS)}|markdown|zcode)")
+        raise _cv().BadMigrateTarget(f"未知迁移目标: {target!r} (可选 {'|'.join(_cv().SMIGRATE_TARGETS)}|markdown|zcode|dsh)")
     env = _cv().load_snapshot(vault, sid)
     if session_id is None:
         session_id = _deterministic_session_id(env)
@@ -690,6 +696,32 @@ def do_import(vault: Path, sid: str, target: str, apply: bool, strip_thinking=Fa
                 "new_sid": agy_sid, "applied": apply}
     if target == "zcode":
         return do_import_zcode(vault, env, sid, apply)
+    if target == "dsh":
+        import cv_dsh
+        header, events, dropped, dsh_sid, canonical_cwd = cv_dsh.blocks_to_dsh(
+            env, strip_thinking, session_id=session_id,
+        )
+        if not apply:
+            (vault / "outbox").mkdir(parents=True, exist_ok=True)
+            dest = vault / "outbox" / f"dsh-{sid}-{dsh_sid}.v4.jsonl"
+            cv_dsh.write_dsh_session(dest, header, events, compression="none")
+            return {"lines": 1 + len(events), "dropped": dropped, "dest": str(dest),
+                    "new_sid": dsh_sid, "applied": False}
+        sessions_root = cv_dsh.dsh_sessions_root()
+        comp = cv_dsh.detect_root_compression(sessions_root)
+        if comp == "zstd" and cv_dsh.zstd_backend() is None:
+            raise _cv().BadMigrateTarget(
+                "目标 ~/.dsh/sessions/ 使用 zstd 编码，但本机无可用 zstd 编码器 "
+                "(需 Node 22.18+ / Python 3.14+ / zstandard / zstd CLI)；已阻止破坏性写入，请先用 dry-run 导出纯文本到 outbox"
+            )
+        fname = "session.v4.jsonl.zstd" if comp == "zstd" else "session.v4.jsonl"
+        dest = sessions_root / cv_dsh.project_key(canonical_cwd) / cv_dsh.encode_segment(dsh_sid) / fname
+        cv_dsh.write_dsh_session(dest, header, events, compression=comp)
+        cv_dsh.invalidate_dsh_projcache(dsh_sid)
+        ws_reg = cv_dsh.register_dsh_workspace(dsh_sid, canonical_cwd)
+        _record_migration(vault, dest, sid, baseline=None)
+        return {"lines": 1 + len(events), "dropped": dropped, "dest": str(dest),
+                "new_sid": dsh_sid, "applied": True, "workspace_registered": ws_reg}
     if target not in ("markdown", "codex", "claude"):
         # 其余 15 个 harness 目标: outbox 档 (写入各家私有目录属平台安装器职责, 不自动落盘)
         exe = _cv().find_smigrate()
@@ -752,6 +784,8 @@ def _print_import_result(r: dict, target: str):
         print("  验证: claude --resume (会话列表应出现迁移会话)")
     if target == "antigravity" and r["applied"]:
         print("  验证: 完全关闭并重启 Antigravity 后在对应项目下查看导入会话")
+    if target == "dsh" and r["applied"]:
+        print("  验证: 打开或重启 DeepSeek Harness，在对应工作区会话列表查看导入会话")
 
 
 def _check_single_sid_agent(vault: Path, sid: str, agent: str | None):

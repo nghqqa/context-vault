@@ -430,7 +430,7 @@ class TestProjectImprovements(unittest.TestCase):
             self.assertEqual(st["version"], cv.VERSION)
             code, mcp = _j("GET", "/ops/mcp")
             self.assertEqual(code, 200)
-            self.assertEqual(len(mcp["clients"]), 4)
+            self.assertEqual(len(mcp["clients"]), 5)
             code, bk = _j("POST", "/ops/backup", {"keep": 5})
             self.assertEqual(code, 200)
             self.assertTrue(bk["ok"] and bk["name"].endswith(".zip"))
@@ -484,6 +484,174 @@ class TestProjectImprovements(unittest.TestCase):
             srv.shutdown()
             srv.server_close()
             idx._close()
+
+    def test_mcp_selective_install_residual_and_uninstall(self):
+        """验证真实主程序探测、卸载残留跳过、自选接入与 5 端安全移除 (含 HTTP API)。"""
+        from unittest import mock
+
+        fake_home = self.tmp / "home"
+        fake_home.mkdir()
+        vault = self.tmp / "vault"
+        vault.mkdir()
+
+        # Cursor 仅有卸载残留目录 (~/.cursor/mcp.json), 无 Cursor 主程序; Codex 有真实 CLI, 尚无 ~/.codex
+        cur_cfg = fake_home / ".cursor" / "mcp.json"
+        cur_cfg.parent.mkdir(parents=True)
+        cur_cfg.write_text(json.dumps({
+            "mcpServers": {
+                "other-mcp": {"command": "npx", "args": ["other"]},
+                "context-vault": {"command": "python", "args": ["old.py"]},
+            }
+        }, indent=2), encoding="utf-8")
+
+        codex_bin = fake_home / ".local" / "bin" / ("codex.exe" if sys.platform.startswith("win") else "codex")
+        codex_bin.parent.mkdir(parents=True)
+        codex_bin.write_text("", encoding="utf-8")
+
+        with mock.patch.object(cv, "HOME", fake_home):
+            st = cv.mcp_status_api(vault)
+            by_id = {c["id"]: c for c in st["clients"]}
+            self.assertTrue(by_id["cursor"]["detected"])
+            self.assertFalse(by_id["cursor"]["app_detected"])
+            self.assertTrue(by_id["cursor"]["residual"])
+            self.assertTrue(by_id["cursor"]["installed"])
+            self.assertTrue(by_id["codex"]["detected"])
+            self.assertTrue(by_id["codex"]["app_detected"])
+            self.assertFalse(by_id["codex"]["residual"])
+            self.assertFalse(by_id["claude"]["detected"])
+
+            # client='all' 自动跳过残留目录, 只为真实检测到的 codex 创建 config.toml 并写入
+            res_all = cv.mcp_install_api(vault, client="all")
+            msg_map = {x["client"]: x["message"] for x in res_all["results"]}
+            self.assertIn("已跳过", msg_map["cursor"])
+            self.assertIn("~/.codex/config.toml", msg_map["codex"])
+            self.assertTrue((fake_home / ".codex" / "config.toml").is_file())
+
+            # 安全移除 cursor 中的 context-vault, 保留 other-mcp 并生成 .json.bak-cv
+            res_un = cv.mcp_uninstall_api(vault, client="cursor")
+            self.assertIn("移除 context-vault", res_un["results"][0]["message"])
+            cur_after = json.loads(cur_cfg.read_text(encoding="utf-8"))
+            self.assertIn("other-mcp", cur_after["mcpServers"])
+            self.assertNotIn("context-vault", cur_after["mcpServers"])
+            self.assertTrue(cur_cfg.with_suffix(".json.bak-cv").is_file())
+
+            # Codex / Antigravity / Claude 卸载往返 (保留同文件其他服务器与表段)
+            codex_cfg = fake_home / ".codex" / "config.toml"
+            codex_cfg.write_text(
+                'model = "gpt-5"\n\n'
+                '[mcp_servers.other]\ncommand = "npx"\nargs = ["x"]\n\n'
+                '[mcp_servers.context-vault]\ncommand = "python"\nargs = ["mcp_server.py"]\n\n'
+                '[mcp_servers.context-vault.env]\nFOO = "1"\n\n'
+                '[projects."D:\\\\proj"]\ntrust_level = "trusted"\n',
+                encoding="utf-8",
+            )
+            cv.mcp_uninstall_api(vault, client="codex")
+            codex_after = codex_cfg.read_text(encoding="utf-8")
+            self.assertIn("[mcp_servers.other]", codex_after)
+            self.assertIn('[projects."D:\\\\proj"]', codex_after)
+            self.assertNotIn("context-vault", codex_after)
+
+            for sub in ("config", "antigravity"):
+                ap = fake_home / ".gemini" / sub / "mcp_config.json"
+                ap.parent.mkdir(parents=True, exist_ok=True)
+                ap.write_text(json.dumps({
+                    "mcpServers": {"keep": {"command": "k"}, "context-vault": {"command": "py"}}
+                }), encoding="utf-8")
+            cv.mcp_uninstall_api(vault, client="antigravity")
+            for sub in ("config", "antigravity"):
+                ap = fake_home / ".gemini" / sub / "mcp_config.json"
+                d = json.loads(ap.read_text(encoding="utf-8"))
+                self.assertIn("keep", d["mcpServers"])
+                self.assertNotIn("context-vault", d["mcpServers"])
+
+            cl_cfg = fake_home / ".claude.json"
+            cl_cfg.write_text(json.dumps({"mcpServers": {"k": {}, "context-vault": {}}}), encoding="utf-8")
+            cv.mcp_uninstall_api(vault, client="claude")
+            self.assertNotIn("context-vault", json.loads(cl_cfg.read_text(encoding="utf-8"))["mcpServers"])
+            self.assertIn("k", json.loads(cl_cfg.read_text(encoding="utf-8"))["mcpServers"])
+
+            # 验证 cv_skills.source_summary 同步返回 app_detected, 供前端隐藏 0 Skill 未安装源
+            import cv_skills
+            with mock.patch.dict("os.environ", {"DSH_HOME": str(fake_home / ".dsh")}):
+                sk_sum = {x["agent"]: x for x in cv_skills.source_summary(use_cache=False)}
+            self.assertIs(sk_sum["cursor"]["app_detected"], False)
+            self.assertIs(sk_sum["codex"]["app_detected"], True)
+
+            # HTTP 路由 /ops/mcp/install (clients 数组 + 空数组 400) 与 /ops/mcp/uninstall (缺参 400 + 正常移除)
+            (vault / "snapshots").mkdir(exist_ok=True)
+            srv, idx = cv.build_vault_server(vault, 0)
+            port = srv.server_address[1]
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            try:
+                def _post(path, body):
+                    cc = HTTPConnection("127.0.0.1", port, timeout=5)
+                    cc.request("POST", path, body=json.dumps(body).encode("utf-8"),
+                               headers={"Content-Type": "application/json"})
+                    rr = cc.getresponse()
+                    txt = rr.read().decode("utf-8")
+                    cc.close()
+                    return rr.status, json.loads(txt)
+
+                c_err, _ = _post("/ops/mcp/install", {"clients": []})
+                self.assertEqual(c_err, 400)
+                c_ok, r_ok = _post("/ops/mcp/install", {"clients": ["cursor"]})
+                self.assertEqual(c_ok, 200)
+                self.assertTrue(next(x for x in r_ok["status"]["clients"] if x["id"] == "cursor")["installed"])
+
+                u_err, _ = _post("/ops/mcp/uninstall", {})
+                self.assertEqual(u_err, 400)
+                u_ok, r_un = _post("/ops/mcp/uninstall", {"client": "cursor"})
+                self.assertEqual(u_ok, 200)
+                self.assertFalse(next(x for x in r_un["status"]["clients"] if x["id"] == "cursor")["installed"])
+
+                # Skill 盘点/迁移与已接入 MCP 后端对齐 (connected_only=1 过滤未接入与 0 Skill 源)
+                def _get(path):
+                    cc = HTTPConnection("127.0.0.1", port, timeout=5)
+                    cc.request("GET", path)
+                    rr = cc.getresponse()
+                    txt = rr.read().decode("utf-8")
+                    cc.close()
+                    return rr.status, json.loads(txt)
+
+                (fake_home / ".cursor" / "skills" / "cur-sk").mkdir(parents=True)
+                (fake_home / ".cursor" / "skills" / "cur-sk" / "SKILL.md").write_text(
+                    "---\nname: cur-sk\ndescription: c\n---\nhi\n", encoding="utf-8"
+                )
+                dsh_sk = fake_home / ".dsh" / "skills" / "dsh-sk" / "SKILL.md"
+                dsh_sk.parent.mkdir(parents=True)
+                dsh_sk.write_text("---\nname: dsh-sk\ndescription: d\n---\nhi\n", encoding="utf-8")
+                with mock.patch.dict("os.environ", {"DSH_HOME": str(fake_home / ".dsh")}):
+                    # codex 在上面卸载测试中被摘除, 此处重新接入 codex (0 Skill) 与 dsh (1 Skill), cursor 保持未接入
+                    _post("/ops/mcp/install", {"clients": ["codex", "dsh"]})
+                    cv_skills.clear_cache()
+                    sc, skl = _get("/skills/list?source=cursor&target=cursor&connected_only=1&refresh=1")
+                    self.assertEqual(sc, 200)
+                    self.assertIn("dsh", skl["connected_agents"])
+                    self.assertIn("codex", skl["connected_agents"])
+                    self.assertNotIn("cursor", skl["connected_agents"])
+                    src_ids = [x["agent"] for x in skl["sources"]]
+                    self.assertEqual(src_ids, ["dsh"])  # codex 0 Skill 不显示, cursor 未接入不显示
+                    self.assertEqual(skl["source"], "dsh")
+                    self.assertNotEqual(skl["target"], "cursor")
+
+                    bad_src, _ = _post("/skills/migrate", {"source": "cursor", "target": "dsh", "apply": False, "connected_only": True})
+                    self.assertEqual(bad_src, 400)
+                    bad_tgt, _ = _post("/skills/migrate", {"source": "dsh", "target": "cursor", "apply": False, "connected_only": True})
+                    self.assertEqual(bad_tgt, 400)
+                    ok_mig, r_mig = _post("/skills/migrate", {"source": "dsh", "target": "codex", "apply": False, "connected_only": True})
+                    self.assertEqual(ok_mig, 200)
+                    self.assertEqual(r_mig["counts"]["selected"], 1)
+
+                    _post("/ops/mcp/uninstall", {"client": "dsh"})
+                    sc2, skl2 = _get("/skills/list?source=dsh&target=codex&connected_only=1&refresh=1")
+                    self.assertEqual(sc2, 200)
+                    self.assertNotIn("dsh", skl2["connected_agents"])
+                    self.assertEqual(skl2["sources"], [])
+                    self.assertEqual(skl2["total"], 0)
+            finally:
+                srv.shutdown()
+                srv.server_close()
+                idx._close()
 
 
 if __name__ == "__main__":

@@ -23,8 +23,8 @@ from pathlib import Path
 
 from cv_core import cv_mod as _cv, vault_dir as _vault_dir
 
-ALL_AGENTS = ("zcode", "claude", "codex", "antigravity", "cursor")
-VALID_TARGETS = ("antigravity", "claude", "codex", "cursor", "zcode", "workspace")
+ALL_AGENTS = ("zcode", "claude", "codex", "antigravity", "cursor", "dsh")
+VALID_TARGETS = ("antigravity", "claude", "codex", "cursor", "zcode", "dsh", "workspace")
 VALID_CONFLICTS = ("skip", "overwrite", "rename")
 VALID_AGY_MODES = ("skills", "plugin")
 
@@ -57,6 +57,7 @@ _HARDCODE_PATTERNS = [
     (re.compile(r"~[/\\]\.codex\b|\.codex[/\\]", re.I), "引用了 ~/.codex 路径"),
     (re.compile(r"\$\{?CLAUDE_PLUGIN_ROOT\}?", re.I), "引用了 ${CLAUDE_PLUGIN_ROOT} 变量"),
     (re.compile(r"~[/\\]\.cursor\b|\.cursor[/\\]", re.I), "引用了 ~/.cursor 路径"),
+    (re.compile(r"~[/\\]\.dsh\b|\.dsh[/\\]", re.I), "引用了 ~/.dsh 路径"),
 ]
 
 
@@ -397,6 +398,9 @@ def _source_roots(agent: str, include_plugins: bool = False) -> list[tuple[str, 
             out.append(("plugin", h / ".gemini" / "config" / "plugins"))
     elif agent == "cursor":
         out.append(("standalone", h / ".cursor" / "skills"))
+    elif agent == "dsh":
+        import cv_dsh
+        out.append(("standalone", cv_dsh.dsh_skills_dir()))
     return out
 
 
@@ -428,6 +432,9 @@ def resolve_target_root(
         return h / ".cursor" / "skills", None, ""
     if target == "zcode":
         return h / ".zcode" / "skills", None, ""
+    if target == "dsh":
+        import cv_dsh
+        return cv_dsh.dsh_skills_dir(), None, ""
     ws = Path(workspace_dir).expanduser().resolve() if workspace_dir else Path.cwd().resolve()
     return ws / ".agents" / "skills", None, ""
 
@@ -618,16 +625,44 @@ def _roots_stamp() -> tuple:
     return tuple(stamps)
 
 
-def source_summary(use_cache: bool = True) -> list[dict]:
-    """统计各端 Skill 数量 (默认带根目录 mtime 自失效与 30s 缓存, 避免重复扫插件缓存树)。"""
-    hkey = os.path.normcase(str(_home().resolve()))
+def _skill_agent_app_detected(ag: str) -> bool:
+    """判断 Skill 源对应客户端主程序/目录是否在本机真实存在 (保持测试 HOME 隔离)。"""
+    c = _cv()
+    if ag == "zcode":
+        if (_home() / ".zcode").exists():
+            return True
+        return bool(c._is_real_home_dir() and shutil.which("zcode"))
+    return bool(c._detect_mcp_client_app(ag))
+
+
+def _connected_skill_agents(vault: Path | None = None) -> dict[str, bool]:
+    """读取「设置与运维」MCP 接入状态，映射到各 Skill 源/目标是否允许展示与迁移。"""
+    c = _cv()
+    vdir = vault if vault is not None else _vault_dir(None)
+    st = c.mcp_status_api(vdir, probe_cli=False)
+    by_id = {row["id"]: row for row in st.get("clients", [])}
+    res = {ag: bool(by_id.get(ag, {}).get("installed")) for ag in ALL_AGENTS if ag != "zcode"}
+    # ZCode 无独立 MCP 配置文件，复用已安装的 Claude Code / Codex 后端连接状态
+    res["zcode"] = bool(_skill_agent_app_detected("zcode") and (res.get("claude") or res.get("codex")))
+    return res
+
+
+def source_summary(use_cache: bool = True, vault: Path | None = None) -> list[dict]:
+    """统计各端 Skill 数量 (默认带根目录 mtime 自失效与 30s 缓存, 实时附加主程序探测与 MCP 接入状态)。"""
+    import cv_dsh
+    hkey = os.path.normcase(str(_home().resolve())) + "|" + os.path.normcase(str(cv_dsh.dsh_skills_dir().resolve()))
     rstamp = _roots_stamp()
     now = time.monotonic()
+    conn_map = _connected_skill_agents(vault)
     if use_cache:
         with _CACHE_LOCK:
             ent = _SUMMARY_CACHE.get(hkey)
             if ent is not None and ent[1] == rstamp and (now - ent[0]) < _SUMMARY_TTL:
-                return [dict(x) for x in ent[2]]
+                return [
+                    {**x, "app_detected": _skill_agent_app_detected(x["agent"]),
+                     "mcp_connected": bool(conn_map.get(x["agent"], False))}
+                    for x in ent[2]
+                ]
     out = []
     for ag in ALL_AGENTS:
         st_roots = _source_roots(ag, include_plugins=False)
@@ -640,6 +675,8 @@ def source_summary(use_cache: bool = True) -> list[dict]:
             "plugins": n_pl,
             "total": n_st + n_pl,
             "exists": any(r.is_dir() for _, r in st_roots + pl_roots),
+            "app_detected": _skill_agent_app_detected(ag),
+            "mcp_connected": bool(conn_map.get(ag, False)),
         })
     with _CACHE_LOCK:
         _SUMMARY_CACHE[hkey] = (now, rstamp, [dict(x) for x in out])
@@ -703,16 +740,66 @@ def list_skills_api(
     plugin_name: str = "",
     workspace_dir: Path | None = None,
     refresh: bool = False,
+    vault: Path | None = None,
+    connected_only: bool = False,
 ) -> dict:
-    """供 Web 控制台与 CLI 使用的盘点接口: 返回源 Skill 列表 + 相对目标的状态 (new / identical / conflict)。"""
+    """供 Web 控制台与 CLI 使用的盘点接口: 返回源 Skill 列表 + 相对目标的状态。
+    connected_only=True 时仅保留「设置与运维」已接入后端的客户端 (且源端排除 0 Skill 工具)。"""
     if refresh:
         clear_cache()
     with ThreadPoolExecutor(max_workers=2) as pool:
-        sum_fut = pool.submit(source_summary, not refresh)
-        skills = _discover_skills_internal(source, include_plugins=include_plugins)
-        dest_root, plugin_dir, resolved_pname = resolve_target_root(
-            target, agy_mode=agy_mode, plugin_name=plugin_name, source_hint=source, workspace_dir=workspace_dir
-        )
+        sum_fut = pool.submit(source_summary, not refresh, vault)
+        all_sources = sum_fut.result()
+        connected_agents = [s["agent"] for s in all_sources if s.get("mcp_connected")]
+        if connected_only:
+            sources = [s for s in all_sources if s.get("mcp_connected") and int(s.get("total") or 0) > 0]
+            if not connected_agents:
+                return {
+                    "source": "",
+                    "include_plugins": bool(include_plugins),
+                    "target": "",
+                    "agy_mode": None,
+                    "plugin_name": "",
+                    "dest_root": "",
+                    "plugin_dir": None,
+                    "sources": [],
+                    "connected_agents": [],
+                    "total": 0,
+                    "skills": [],
+                }
+            valid_src = {s["agent"] for s in sources}
+            if source != "all" and source not in valid_src:
+                source = sources[0]["agent"] if sources else ""
+            if target != "workspace" and target not in connected_agents:
+                target = next((a for a in connected_agents if a != source), connected_agents[0])
+            dest_root, plugin_dir, resolved_pname = resolve_target_root(
+                target, agy_mode=agy_mode, plugin_name=plugin_name,
+                source_hint=(source or connected_agents[0]), workspace_dir=workspace_dir,
+            )
+            if not sources:
+                return {
+                    "source": "",
+                    "include_plugins": bool(include_plugins),
+                    "target": target,
+                    "agy_mode": agy_mode if target == "antigravity" else None,
+                    "plugin_name": resolved_pname,
+                    "dest_root": str(dest_root),
+                    "plugin_dir": str(plugin_dir) if plugin_dir else None,
+                    "sources": [],
+                    "connected_agents": connected_agents,
+                    "total": 0,
+                    "skills": [],
+                }
+            skills = _discover_skills_internal(source, include_plugins=include_plugins)
+            if source == "all":
+                skills = [s for s in skills if s.get("source") in valid_src]
+        else:
+            sources = all_sources
+            skills = _discover_skills_internal(source, include_plugins=include_plugins)
+            dest_root, plugin_dir, resolved_pname = resolve_target_root(
+                target, agy_mode=agy_mode, plugin_name=plugin_name, source_hint=source, workspace_dir=workspace_dir
+            )
+
         existing_names = _target_existing_names(dest_root)
         to_check = [sk for sk in skills if sk["slug"] in existing_names]
         if len(to_check) >= 12:
@@ -731,7 +818,6 @@ def list_skills_api(
                     sk["target_status"] = "identical"
                 else:
                     sk["target_status"] = "conflict"
-        sources = sum_fut.result()
     return {
         "source": source,
         "include_plugins": bool(include_plugins),
@@ -741,6 +827,7 @@ def list_skills_api(
         "dest_root": str(dest_root),
         "plugin_dir": str(plugin_dir) if plugin_dir else None,
         "sources": sources,
+        "connected_agents": connected_agents,
         "total": len(skills),
         "skills": _strip_internal_fields(skills),
     }
@@ -800,11 +887,20 @@ def migrate_skills(
     workspace_dir: Path | None = None,
     apply: bool = False,
     vault: Path | None = None,
+    connected_only: bool = False,
 ) -> dict:
     """批量迁移 Skill (默认 dry-run; apply=True 才写入目标目录)。"""
     if conflict not in VALID_CONFLICTS:
         raise ValueError(f"不支持的冲突策略: {conflict} (可选: {', '.join(VALID_CONFLICTS)})")
+    conn_map = _connected_skill_agents(vault) if connected_only else None
+    if connected_only and conn_map is not None:
+        if source != "all" and not conn_map.get(source, False):
+            raise ValueError(f"源客户端 {source} 尚未在「设置与运维」中接入后端，无法迁移 Skill")
+        if target != "workspace" and not conn_map.get(target, False):
+            raise ValueError(f"目标客户端 {target} 尚未在「设置与运维」中接入后端，无法迁移 Skill")
     all_skills = _discover_skills_internal(source, include_plugins=include_plugins)
+    if connected_only and source == "all" and conn_map is not None:
+        all_skills = [s for s in all_skills if conn_map.get(s.get("source"), False)]
     if selected is not None:
         want = {str(x).strip() for x in selected if str(x).strip()}
         chosen = [s for s in all_skills if s["id"] in want or s["slug"] in want or s["rel_path"] in want]

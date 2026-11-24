@@ -147,6 +147,7 @@ function setTab(t){
   if(window.scrollTo)window.scrollTo(0,0);
   if(t==="snap"&&booted&&!snapsLoaded){snapsLoaded=true;refreshSnaps();}
   if(t==="mig"&&!$("#mig-sid").dataset.filled)fillMig();
+  if(t==="mig"&&typeof migMode!=="undefined"&&migMode==="skills"&&!skData)loadSkills({refresh:true});
   if(t==="ops"&&!$("#ops-mcp-box").dataset.loaded)loadOps(false);
   if(window.history)history.replaceState(null,"","#"+t);
 }

@@ -6,10 +6,10 @@
 
 ## 0. 3 分钟快速上手（90% 用户只需要这 3 步）
 
-> **路径 A · Windows 绿色托盘版（免装 Python，14 MB 单文件双击即用）**
-> 1. 前往 [GitHub Releases (v0.10.3)](https://github.com/nghqqa/context-vault/releases/tag/v0.10.3) 下载 [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.10.3/ContextVault.exe)（可用同页 `SHA256SUMS.txt` 校验：`certutil -hashfile ContextVault.exe SHA256`）。
+> **路径 A · Windows 绿色托盘版（免装 Python，14.4 MB 单文件双击即用）**
+> 1. 前往 [GitHub Releases (v0.11.0)](https://github.com/nghqqa/context-vault/releases/tag/v0.11.0) 下载 [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.11.0/ContextVault.exe)（可用同页 `SHA256SUMS.txt` 校验：`certutil -hashfile ContextVault.exe SHA256`）。
 > 2. 双击启动：如首次触发 Windows SmartScreen 未知发布者提示，点击「更多信息 → 仍要运行」即可。托盘图标出现在右下角系统托盘，双击图标打开 Web 控制台 `http://127.0.0.1:8791/`。
-> 3. **免命令行用满全部功能**：首次空库会在概览顶部显示 **3 步引导卡**——点击即可完成全端会话同步、账本同步，并在「设置与运维」页一键将 `ContextVault.exe --mcp` 接入 Claude Code / Codex / Cursor / Antigravity（全程无需安装 Python）。
+> 3. **免命令行用满全部功能**：首次空库会在概览顶部显示 **3 步引导卡**——点击即可完成全端会话同步、账本同步，并在「设置与运维」页按需勾选将 `ContextVault.exe --mcp` 接入 Claude Code / Codex / Cursor / Antigravity / DeepSeek Harness（全程无需安装 Python）。
 > 4. **数据存放在哪 / 如何卸载**：首次在独立目录运行时自动初始化到 `~/.context-vault/vault`，并在 `~/.context-vault/config.json` 记录正本路径（移动 exe 位置也不丢数据）；右键托盘菜单提供「立即同步」「立即备份」「检查新版本」「开机自启」。如需彻底卸载：先取消勾选「开机自启」→ 退出托盘 → 删除 exe 及 `~/.context-vault/` 即可。
 
 ### 路径 B · 命令行安装（Windows / Linux / macOS，Python 3.9+ 零依赖）
@@ -26,7 +26,7 @@ pip install -e .        # 注册全局命令 cv / cv-mcp / cv-aml（不装任何
 ```bash
 cv setup --mcp
 ```
-这一条命令会自动完成：**建库 → 扫描同步本机全部会话（Claude Code / Codex / ZCode / Antigravity）→ 同步多端 token 账本 → 提取跨会话长期记忆 → 自动将 MCP 记忆后端写入已安装的客户端**。
+这一条命令会自动完成：**建库 → 扫描同步本机全部会话（Claude Code / Codex / ZCode / Antigravity / DeepSeek Harness）→ 同步多端 token 账本 → 提取跨会话长期记忆 → 自动将 MCP 记忆后端写入已检测到主程序的客户端（跳过卸载残留目录）**。
 
 ### 第三步：启动本地控制台（自动打开浏览器）
 ```bash
@@ -40,8 +40,9 @@ cv serve --open
 | 我想做什么 | 最短入口 | 详细章节 |
 |---|---|---|
 | 在浏览器里浏览、检索、管理所有历史会话与配额 | `cv serve --open`（`Ctrl/Cmd+K` 全局联想） | [§2 Web 控制台速查](#2-web-控制台速查) |
-| 把 Claude / Codex / ZCode / Antigravity 会话互转 | 控制台「迁移」页 或 `cv migrate <文件> --target codex` | [§4 跨工具迁移与交接简报](#4-跨工具迁移与交接简报) |
-| 让 Agent 记住我的决策、踩坑与架构红线 | `cv mcp install --all` + 控制台记忆库手动置顶 | [§5 跨会话记忆与 MCP 接入](#5-跨会话记忆与-mcp-接入) |
+| 把 Claude / Codex / ZCode / Antigravity / DSH 会话互转 | 控制台「迁移」页 或 `cv migrate <文件> --target codex` | [§4 跨工具迁移与交接简报](#4-跨工具迁移与交接简报) |
+| 在各端间批量同步 `SKILL.md` 技能包 | 控制台「迁移 → Skill 技能迁移」或 `cv skills list` | [§4.5 跨工具 Skill 技能迁移](#45-跨工具-skill-技能迁移) |
+| 让 Agent 记住我的决策、踩坑与架构红线 | `cv mcp install --all` / `--client <名>` + 记忆置顶 | [§5 跨会话记忆与 MCP 接入](#5-跨会话记忆与-mcp-接入) |
 | 看 5h 额度窗口、冷却倒计时与各模型真实消耗 | 控制台「概览 → 用量与配额窗口」或 `cv ledger quota` | [§6 本地 Token 账本与额度监控](#6-本地-token-账本与额度监控) |
 | 给第三方 Agent / 评测框架提供标准 Add/Search 接口 | `cv serve` 内置 `/aml/add` `/aml/search` 或 `cv-aml --serve` | [§7 AML 标准接口与容器部署](#7-aml-标准接口与容器部署) |
 | 接入本地 Ollama 做语义向量重排 / LLM 记忆精炼 | `cv semantic setup --ollama` | [§8 可选语义增强层](#8-可选语义增强层ollama--本地-llm) |
@@ -51,8 +52,8 @@ cv serve --open
 ## 1. 环境准备与两条安全铁律
 
 ### 1.1 前置要求
-- **核心功能**：Python **3.9+**，**纯标准库零第三方依赖**（`setup` / `sync` / `migrate` / `memory` / `ledger` / `serve` / `mcp` / `semantic` / `aml` / `backup` 全部开箱即用）。
-- **Antigravity 原生读取**：已内置零依赖 SQLite + Protobuf 直读器（支持 WAL 模式实时同步与精准工作区路径提取），**无需**安装任何外部工具即可同步 Antigravity 会话。
+- **核心功能**：Python **3.9+**，**纯标准库零第三方依赖**（`setup` / `sync` / `migrate` / `skills` / `memory` / `ledger` / `serve` / `mcp` / `semantic` / `aml` / `backup` 全部开箱即用）。
+- **Antigravity 与 DeepSeek Harness 原生读取**：内置零依赖 SQLite + Protobuf 直读器（支持 WAL 实时同步）；DeepSeek Harness (`~/.dsh/sessions`) 原生兼容 V4/V3/V2 `.jsonl` 及拼接式 `.jsonl.zstd`（通过 stdlib / PyPI / `node:zlib` / `zstd` 五级兜底链无缝编解码）。
 - **18 种外部 harness 桥接**（仅 `ingest` 与 `export-harness` 需要）：安装 `session-migrate`（Python ≥ 3.11）：
   ```bash
   uv tool install session-migrate
@@ -85,11 +86,11 @@ cv init          # 如需显式初始化空 vault（setup / sync 也会按需自
 ### 核心视图亮点
 1. **概览页**：空库时自动呈现 3 步新手向导；4 格核心资产台账 + 最近入库会话 + 多端资产分布 + 最新记忆摘要 + **新版高密度「用量与配额窗口」**（5h/24h/7d/30d 切换、4 列 KPI 带、智谱与 Antigravity IDE 实时配额胶囊条、5h 冷却倒计时 ETA、多维排行）。
 2. **快照资产页**：
-   - **最近列表**：新增 **按来源胶囊筛选**（全部 / Antigravity / ZCode / Codex / Claude Code），支持按时间/相关性排序、切换「仅最新版本 / 全部历史版本」、点击任意行打开右侧详情抽屉（代码块复制、工具调用折叠、会话内搜索高亮、不可变分叉与「迁移此快照 →」直达）。
-   - **项目树**：按项目文件夹折叠主对话，来源筛选支持 `ZCode` / `Antigravity` / `Claude Code` / `Codex` 及库内动态发现的其他来源，支持整项或单条一键迁移，以及 Antigravity 免命令行双向清理/补齐。
+   - **最近列表**：按来源胶囊筛选（全部 / Antigravity / ZCode / Codex / Claude Code / DeepSeek Harness），支持按时间/相关性排序、切换「仅最新版本 / 全部历史版本」、点击任意行打开右侧详情抽屉（代码块复制、工具调用折叠、会话内搜索高亮、不可变分叉与「迁移此快照 →」直达）。
+   - **项目树**：按项目文件夹折叠主对话，来源筛选支持 `ZCode` / `Antigravity` / `Claude Code` / `Codex` / `DeepSeek Harness` 及库内动态发现的其他来源，支持整项或单条一键迁移，以及 Antigravity 免命令行双向清理/补齐。
    - **记忆库**：按「决策 / 偏好 / 踩坑 / 红线 / 压缩摘要」筛选；支持 **「+ 手动记一条」** 直接录入个人红线、**置顶优先**、**删除**、**增量提取** 与 **去重合并**。
-3. **迁移工作台**：顶部可切换 **「会话迁移」** 与 **「Skill 技能迁移」**。会话迁移支持 Codex / Claude Code / Antigravity / ZCode / Markdown 交接简报（可选 Token 预算档位与一键复制正文）；Skill 迁移支持从 ZCode / Claude / Codex / Antigravity / Cursor 批量筛选并迁移 `SKILL.md` 技能包（实时估算 System Prompt Token 开销、检测冲突与源路径引用），迁往 Antigravity 时可自由切换 **直写全局目录** 或 **打包为可一键开关的独立插件**。
-4. **设置与运维页（`4`）**：免命令行管理 **MCP 客户端一键检测与接入**、**本地 Ollama 语义重排与 LLM 记忆精炼/自动标题**、**智谱 Coding Plan Token 配置与多端账本同步**、**一键一致性 zip 备份与中间版本裁剪（dry-run / 自动先备份后执行）**。
+3. **迁移工作台**：顶部可切换 **「会话迁移」** 与 **「Skill 技能迁移」**。会话迁移支持 Codex / Claude Code / Antigravity / DeepSeek Harness (`dsh`) / ZCode / Markdown 交接简报（可选 Token 预算档位与一键复制正文）；Skill 迁移与「设置与运维」已接入 MCP 后端强一致——仅展示已接入且非零 Skill 的源端和已接入的目标端（自动隐藏 0 Skill 与未接入工具），实时估算 System Prompt Token 开销、检测冲突与源路径引用，迁往 Antigravity 时可自由切换 **直写全局目录** 或 **打包为可一键开关的独立插件**。
+4. **设置与运维页（`4`）**：免命令行管理 **MCP 客户端按需勾选与单项安全移除**（精确探测真实主程序并识别卸载残留目录，默认折叠未检测到/未接入客户端，移除时仅删除 `context-vault` 条目并自动备份 `.bak-cv`）、**本地 Ollama 语义重排与 LLM 记忆精炼/自动标题**、**智谱 Coding Plan Token 配置与多端账本同步**、**一键一致性 zip 备份与中间版本裁剪（dry-run / 自动先备份后执行）**。
 
 ![Context Vault 设置与运维工作台](assets/console-ops-dark.png)
 
@@ -99,7 +100,7 @@ cv init          # 如需显式初始化空 vault（setup / sync 也会按需自
 
 ### 3.1 增量扫描全部本地会话
 ```bash
-# 扫描本机全部已支持的会话源（Claude / Codex / ZCode / Antigravity，含 WAL 实时检测与自动 lineage）
+# 扫描本机全部已支持的会话源（Claude / Codex / ZCode / Antigravity / DeepSeek Harness，含 WAL 与 V4 Zstd 崩溃截断恢复）
 cv sync
 
 # 额外指定自定义扫描目录（可多次传入）
@@ -135,7 +136,7 @@ cv show cv_xxxxxxxx                                    # 打印单条快照详�
 
 ## 4. 跨工具迁移与交接简报
 
-### 4.1 原生迁移（支持 `codex` / `claude` / `antigravity` / `zcode` / `markdown`）
+### 4.1 原生迁移（支持 `codex` / `claude` / `antigravity` / `dsh` / `zcode` / `markdown`）
 推荐流程：**先 `list --top` 找快照 → `diff` 预检损益 → `import` dry-run → `--apply` 落盘**（或在控制台「迁移」页可视化完成）：
 
 ```bash
@@ -143,6 +144,7 @@ cv list --top                                          # 1. 找到要迁移的�
 cv diff cv_xxxxxxxx                                    # 2. 预检保留项与不可迁移项
 cv import cv_xxxxxxxx --target codex                   # 3. dry-run（产物落 vault/outbox/，零副作用）
 cv import cv_xxxxxxxx --target codex --apply           # 4. 确认后写入目标真实会话目录
+cv import cv_xxxxxxxx --target dsh --apply             # 或写为 DeepSeek Harness V4 .jsonl.zstd 并登记工作区
 ```
 
 常用选项：
@@ -178,6 +180,14 @@ cv export-harness cv_xxxxxxxx --to opencode
 cv export-harness --project context-vault --to cursor --limit 5
 ```
 
+### 4.5 跨工具 Skill 技能迁移（`SKILL.md` 包）
+支持 `zcode`、`claude`、`codex`、`antigravity`、`cursor`、`dsh` 六端（Web 控制台会自动与「设置与运维 → MCP 接入」保持一致，隐藏未接入与 0 Skill 工具）：
+```bash
+cv skills list --source zcode                                                    # 盘点本地 Skill 与 System Prompt Token 开销
+cv skills migrate --from zcode --to dsh                                          # dry-run 迁移报告（零改动磁盘）
+cv skills migrate --from zcode --to antigravity --agy-mode plugin --apply        # 打包为可一键停用的 Antigravity 独立插件
+```
+
 ---
 
 ## 5. 跨会话记忆与 MCP 接入
@@ -194,12 +204,13 @@ cv memory dedup                                        # 合并跨快照重复�
 ```
 > 提示：可在 Web 控制台「快照资产 → 记忆库」中直接**手动新增、置顶优先或删除**单条记忆（立即对 MCP `vault_remember` 生效）。
 
-### 5.2 一键接入 MCP 客户端
-支持 `claude`、`codex`、`cursor`、`antigravity`：
+### 5.2 按需接入与安全移除 MCP 客户端
+支持 `claude`、`codex`、`cursor`、`antigravity`、`dsh`（DeepSeek Harness 注入 `$DSH_HOME/cordis.patch.yml`，全局跨 profile 生效）：
 ```bash
-cv mcp status                        # 查看各客户端当前接入状态
-cv mcp install --all                 # 一键接入全部已安装客户端
-cv mcp install --client antigravity  # 或仅接入指定客户端
+cv mcp status                        # 查看各客户端安装态与卸载残留识别
+cv mcp install --all                 # 接入已检测到主程序的客户端（自动跳过仅残留配置目录）
+cv mcp install --client dsh          # 或按需显式指定客户端接入
+cv mcp uninstall --client cursor     # 安全摘除 context-vault 条目（保留原配置并生成 .bak-cv 备份）
 ```
 
 接入后 Agent 获得 6 个纯本地 MCP 工具（其中检索类工具均支持可选 `budget_tokens` 预算上限，超出自动从尾部精确裁剪）：
@@ -216,9 +227,9 @@ cv mcp install --client antigravity  # 或仅接入指定客户端
 
 ### 6.1 多端直采与 5h 窗口查询（纯离线，无需 headroom）
 ```bash
-cv ledger sync                                         # 从 Claude/Codex/ZCode/Antigravity 本地日志增量采集
-cv ledger sync --sources claude,codex                  # 仅采集指定端
-cv ledger sync --recompute                             # 修改 pricing.json / accounts.json 后重算存量事件
+cv ledger sync                                         # 从 Claude/Codex/ZCode/Antigravity/DeepSeek Harness 日志增量采集
+cv ledger sync --sources claude,dsh                    # 仅采集指定端
+cv ledger sync --recompute                             # 修改 pricing.json / accounts.json 后重算存量事件（含 DeepSeek V4/Flash 费率）
 cv ledger quota                                        # 查看 5h 滚动窗口、恢复 ETA、跑道与排行
 cv ledger quota --window 7d --account my-pro --json    # 切换窗口 (5h|24h|7d|30d) 或输出 JSON
 ```
@@ -332,6 +343,7 @@ cv repair                 # 一次性 lineage 与历史用量回填（幂等）
 | `CV_PLAN_TOKEN` | 智谱 Coding Plan 用户 Token | 也可通过 `cv ledger plan-token` 持久化 |
 | `CV_RELAY_PROFILES` | 无 headroom 时的 relay 配置 | JSON 数组，见 README 依赖边界说明 |
 | `CV_RELAY_KEY` | `probe` / `warm` / `import-relay` API Key | 优先级高于 `--key` |
+| `DSH_HOME` | DeepSeek Harness 主目录覆盖 | 默认 `~/.dsh`；同时影响会话、Skill 与 `cordis.patch.yml` |
 
 ---
 
@@ -339,10 +351,11 @@ cv repair                 # 一次性 lineage 与历史用量回填（幂等）
 
 1. **`ingest` / `export-harness` 提示缺少 `smigrate` / `session-migrate`**
    - 运行 `uv tool install session-migrate`（需 Python ≥ 3.11），再用 `cv doctor` 验证。
-   - 注：同步本机 Antigravity / Claude / Codex / ZCode 会话均为**纯 Python 原生实现**，不依赖 `smigrate`。
-2. **执行 `import` 或 `migrate` 后目标客户端里看不到新会话**
+   - 注：同步本机 Antigravity / Claude / Codex / ZCode / DeepSeek Harness 会话均为**纯 Python 原生实现**，不依赖 `smigrate`。
+2. **执行 `import` 或 `migrate` 后目标客户端里看不到新会话（或接入 MCP 后工具未出现）**
    - 检查是否漏加 `--apply`（不加 `--apply` 只写 `vault/outbox/` 而不写真实目录）。
-   - 若导入目标为 **Antigravity**，执行 `import --apply` 或 `sync-antigravity --apply` 前请先完全退出 Antigravity 客户端，避免内存状态覆盖磁盘索引。
+   - 若目标为 **Antigravity**，执行 `import --apply` 或 `sync-antigravity --apply` 前请先完全退出 Antigravity 客户端，避免内存状态覆盖磁盘索引。
+   - 若目标为 **DeepSeek Harness**，迁移会话与写入 `$DSH_HOME/cordis.patch.yml` 后**重启 DeepSeek Harness 桌面端**即可自动加载新会话与 `context-vault` MCP；若本机同时无 `zstandard` 与 `node` / `zstd`，`--apply` 写入 V4 `.jsonl.zstd` 时会明确提示安装其一。
 3. **`cv serve` 控制台打开返回 401 / 403**
    - 若启用了 `--token` / `CV_SERVE_TOKEN`，首访请带 `?token=...`；另 `serve` 仅允许本机回环 Host/Origin，请通过 `http://127.0.0.1:8791` 访问。
 4. **本地端口 `8791` 被系统保留导致无法绑定**

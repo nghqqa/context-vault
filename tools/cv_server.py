@@ -380,6 +380,8 @@ def _get_skills_list(h, ctx: _ServerCtx, q: dict):
             plugin_name=q.get("plugin_name") or "",
             workspace_dir=ws,
             refresh=(q.get("refresh") == "1"),
+            vault=ctx.vault,
+            connected_only=(q.get("connected_only") == "1"),
         ))
     except ValueError as e:
         h._json({"error": str(e)}, 400)
@@ -725,7 +727,7 @@ def _post_migrate_project(h, ctx: _ServerCtx, body: dict):
     )
     if not items:
         return h._json({"error": f"未找到项目的顶层主对话: {proj}"}, 404)
-    apply_flag = bool(body.get("apply")) and target in ("codex", "claude", "antigravity", "zcode")
+    apply_flag = bool(body.get("apply")) and target in ("codex", "claude", "antigravity", "zcode", "dsh")
     results = []
     try:
         for it in items:
@@ -922,11 +924,26 @@ def _post_semantic_titles(h, ctx: _ServerCtx, body: dict):
     ))
 
 
-def _post_ops_mcp_install(h, ctx: _ServerCtx, body: dict):
+def _dispatch_ops_mcp_action(h, ctx: _ServerCtx, body: dict, api_fn, default_client: str | None = None):
     try:
-        h._json(_cv().mcp_install_api(ctx.vault, str(body.get("client") or "all")))
+        if "clients" in body:
+            clients = body.get("clients")
+            if not isinstance(clients, list):
+                raise ValueError("clients 必须为数组")
+            h._json(api_fn(ctx.vault, client=None, clients=clients))
+        else:
+            cid = str(body.get("client") or default_client or "").strip()
+            h._json(api_fn(ctx.vault, client=cid))
     except ValueError as e:
         h._json({"error": str(e)}, 400)
+
+
+def _post_ops_mcp_install(h, ctx: _ServerCtx, body: dict):
+    _dispatch_ops_mcp_action(h, ctx, body, _cv().mcp_install_api, default_client="all")
+
+
+def _post_ops_mcp_uninstall(h, ctx: _ServerCtx, body: dict):
+    _dispatch_ops_mcp_action(h, ctx, body, _cv().mcp_uninstall_api, default_client=None)
 
 
 def _post_ops_backup(h, ctx: _ServerCtx, body: dict):
@@ -997,6 +1014,7 @@ def _post_skills_migrate(h, ctx: _ServerCtx, body: dict):
             workspace_dir=Path(ws_raw) if ws_raw else None,
             apply=bool(body.get("apply")),
             vault=ctx.vault,
+            connected_only=bool(body.get("connected_only")),
         )
         h._json(res)
     except ValueError as e:
@@ -1022,6 +1040,7 @@ POST_ROUTES = {
     "/semantic/refine": _post_semantic_refine,
     "/semantic/titles": _post_semantic_titles,
     "/ops/mcp/install": _post_ops_mcp_install,
+    "/ops/mcp/uninstall": _post_ops_mcp_uninstall,
     "/ops/backup": _post_ops_backup,
     "/ops/prune": _post_ops_prune,
     "/ops/plan_token": _post_ops_plan_token,

@@ -139,6 +139,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
         <button type="button" class="pill-btn" data-a="zcode" onclick="setSnapAgent('zcode')">ZCode</button>
         <button type="button" class="pill-btn" data-a="codex" onclick="setSnapAgent('codex')">Codex</button>
         <button type="button" class="pill-btn" data-a="claude" onclick="setSnapAgent('claude')">Claude Code</button>
+        <button type="button" class="pill-btn" data-a="dsh" onclick="setSnapAgent('dsh')">DeepSeek Harness</button>
       </div>
       <div class="meta-line" id="snap-meta"></div>
     </div>
@@ -186,7 +187,9 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
                 <span><span class="tt">Antigravity</span><br><span class="td">原生 .db（重启 app 生效）</span></span></label>
               <label class="tgt-card"><input type="radio" name="tgt" value="zcode" onchange="onMigTarget()">
                 <span><span class="tt">ZCode 写回</span><br><span class="td">实验性 · 先备份后写主库</span></span></label>
-              <label class="tgt-card wide"><input type="radio" name="tgt" value="markdown" onchange="onMigTarget()">
+              <label class="tgt-card"><input type="radio" name="tgt" value="dsh" onchange="onMigTarget()">
+                <span><span class="tt">DeepSeek Harness</span><br><span class="td">V4 会话 · ~/.dsh/sessions</span></span></label>
+              <label class="tgt-card"><input type="radio" name="tgt" value="markdown" onchange="onMigTarget()">
                 <span><span class="tt">Markdown 交接简报 · 任意 agent</span><br><span class="td">≤48KB 结构化交接简报（停点 / 最近动作 / 活上下文尾部）</span></span></label>
             </div>
             <div class="hint" id="mig-md-note" style="display:none;margin-top:8px">
@@ -263,20 +266,9 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
           <div class="mig-step">
             <div class="card-h"><span class="ch-l"><span class="stepno">2</span>目标工具与落盘选项</span><span class="sub">源目录严格只读</span></div>
             <div class="card-b">
-              <div class="tgt-cards" id="sk-tgt-cards" role="radiogroup" aria-label="Skill 迁移目标">
-                <label class="tgt-card on"><input type="radio" name="sk-tgt" value="antigravity" checked onchange="onSkillTargetChange()">
-                  <span><span class="tt">Antigravity</span><br><span class="td">全局目录或独立插件包</span></span></label>
-                <label class="tgt-card"><input type="radio" name="sk-tgt" value="claude" onchange="onSkillTargetChange()">
-                  <span><span class="tt">Claude Code</span><br><span class="td">~/.claude/skills/</span></span></label>
-                <label class="tgt-card"><input type="radio" name="sk-tgt" value="codex" onchange="onSkillTargetChange()">
-                  <span><span class="tt">Codex</span><br><span class="td">~/.codex/skills/</span></span></label>
-                <label class="tgt-card"><input type="radio" name="sk-tgt" value="cursor" onchange="onSkillTargetChange()">
-                  <span><span class="tt">Cursor</span><br><span class="td">~/.cursor/skills/</span></span></label>
-                <label class="tgt-card wide"><input type="radio" name="sk-tgt" value="zcode" onchange="onSkillTargetChange()">
-                  <span><span class="tt">ZCode</span><br><span class="td">~/.zcode/skills/（双向互迁）</span></span></label>
-              </div>
+              <div class="tgt-cards" id="sk-tgt-cards" role="radiogroup" aria-label="Skill 迁移目标"><div class="skel" style="width:65%"></div></div>
 
-              <div class="sk-agy-box" id="sk-agy-opts">
+              <div class="sk-agy-box" id="sk-agy-opts" style="display:none">
                 <div class="sk-agy-hd">Antigravity 落盘模式（可自由切换）</div>
                 <div class="sk-agy-modes" role="radiogroup" aria-label="Antigravity 落盘模式">
                   <label class="sk-mode-card on"><input type="radio" name="sk-agy-mode" value="skills" checked onchange="onSkillAgyModeChange()">
@@ -327,8 +319,11 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
     <div class="ops-grid">
       <div class="card">
         <div class="card-h">
-          <span class="ch-l">MCP 记忆后端一键接入</span>
-          <button class="btn sm primary" id="ops-mcp-all-btn" onclick="opsInstallMcp('all')">一键接入全部客户端</button>
+          <span class="ch-l">MCP 记忆后端按需接入</span>
+          <div class="ops-mcp-hd-acts">
+            <button class="btn sm" onclick="loadOps(false)">刷新</button>
+            <button class="btn sm primary" id="ops-mcp-apply-btn" onclick="opsInstallSelectedMcp()">接入已选 (0)</button>
+          </div>
         </div>
         <div class="card-b" id="ops-mcp-box"><div class="skel" style="width:65%"></div></div>
       </div>

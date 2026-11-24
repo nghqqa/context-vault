@@ -57,11 +57,11 @@ async function loadOv(){
           '<span class="hint">全部数据保留在本机 · 零外发</span></div>'+
           '<div class="onboard-steps">'+
           '<div class="onboard-step"><div class="os-t">① 同步本机全部会话</div>'+
-          '<div class="os-d">只读扫描 Claude Code / Codex / ZCode / Antigravity 历史会话与跨会话记忆。</div>'+
+          '<div class="os-d">只读扫描 Claude Code / Codex / ZCode / Antigravity / DeepSeek Harness 历史会话与跨会话记忆。</div>'+
           '<button class="btn sm primary" onclick="syncVaultNow()">立即同步入库</button></div>'+
           '<div class="onboard-step"><div class="os-t">② 接入 AI 客户端 MCP</div>'+
           '<div class="os-d">让你的 AI 编程工具在任意新对话里直接检索本机历史决策与踩坑记录。</div>'+
-          '<button class="btn sm" onclick="setTab(\'ops\')">一键接入 MCP →</button></div>'+
+          '<button class="btn sm" onclick="setTab(\'ops\')">选择接入 MCP →</button></div>'+
           '<div class="onboard-step"><div class="os-t">③ 同步多端 Token 账本</div>'+
           '<div class="os-d">离线统计 5h 滚动额度、冷却倒计时、缓存命中率与可选本地 Ollama 语义增强。</div>'+
           '<button class="btn sm" onclick="opsLedgerSync(true)">同步账本并查看 →</button></div>'+
@@ -77,8 +77,10 @@ async function loadOv(){
       agEl.innerHTML=ags.length?ags.map(a=>{
         const sess=a.sessions!=null?a.sessions:(a.snapshots||0);
         const sub=(a.snapshots!=null&&a.snapshots!==sess)?(num(sess)+" 会话 · "+num(a.snapshots)+" 版本"):(num(sess)+" 独立会话");
-        return '<div class="feed-row click" data-a="'+esc(String(a.agent||""))+'" onclick="openAgentSnaps(this.dataset.a)" title="查看该来源全部快照">'+
-          '<span class="feed-main">'+agentCell(a.agent)+'<span class="feed-txt">'+sub+'</span></span>'+
+        const agRaw=String(a.agent||"");
+        const agName=agRaw==="dsh"?"DeepSeek Harness":(agRaw||"未知");
+        return '<div class="feed-row click" data-a="'+esc(agRaw)+'" onclick="openAgentSnaps(this.dataset.a)" title="查看该来源全部快照">'+
+          '<span class="feed-main">'+agentCell(agName)+'<span class="feed-txt">'+sub+'</span></span>'+
           '<span class="feed-r">'+bn(a.tokens_in||0)+' tok</span></div>';
       }).join("")
         :'<div class="hint" style="padding:10px 14px">暂无多端会话 · 点击右上角「同步」采集本机会话</div>';
@@ -182,7 +184,7 @@ function renderQuota(u,ledger){
   usageLedger=ledger||usageLedger;
   const sumEl=$("#ov-quota-sum");
   if(!u||!u.events_total){
-    el.innerHTML='<div class="hint" style="padding:4px 0">usage_events 为空 — 运行 <code>cv ledger sync</code> 采集本地多端 (Claude/Codex/ZCode/Antigravity) 用量后, 这里展示 5 小时滚动窗口、冷却倒计时与多窗口排行。</div>';
+    el.innerHTML='<div class="hint" style="padding:4px 0">usage_events 为空 — 运行 <code>cv ledger sync</code> 采集本地多端 (Claude/Codex/ZCode/Antigravity/DSH) 用量后, 这里展示 5 小时滚动窗口、冷却倒计时与多窗口排行。</div>';
     if(sumEl)sumEl.textContent="（未采集 · 运行 cv ledger sync 后展示）";
     usageRankData=null;renderUsageRank();return}
   const t=u.totals||{};

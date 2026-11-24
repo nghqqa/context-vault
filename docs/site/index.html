@@ -7,7 +7,7 @@
 <script>try{document.querySelector('meta[name="color-scheme"]').content=localStorage.getItem('cv-color-scheme')??'light dark'}catch(e){}</script>
 <title>Context Vault — 本地优先的 AI 会话资产库</title>
 <link rel="canonical" href="https://vault.nghqqa.cn/">
-<meta name="description" content="把 Codex / Claude Code / ZCode / Antigravity 等会话导出为供应商中立快照：双向迁移、深度检索、token 账本、双时态记忆、MCP 后端。纯标准库零依赖，数据不出机器。">
+<meta name="description" content="把 Codex / Claude Code / DeepSeek Harness / ZCode / Antigravity 等会话与 Skill 导出为供应商中立快照：双向迁移、深度检索、token 账本、双时态记忆、按需 MCP 后端。纯标准库零依赖，数据不出机器。">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect x='2' y='2' width='16' height='16' fill='%23e1251b'/%3E%3Cpath d='M10 5v10M5 10h10' stroke='%23ffffff' stroke-width='2.6'/%3E%3C/svg%3E">
 <style>
 /* ============ Design Tokens — 与 tools/ui/console.css 同源 (Swiss International Style) ============ */
@@ -321,11 +321,11 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
   <!-- ============ Hero ============ -->
   <section class="hero" aria-label="简介">
     <div class="wrap">
-      <span class="badge"><span class="dot" aria-hidden="true"></span>v0.10.3 · 完全免费 · 会话 + Skill 毫秒级迁移 · 14 MB 精简托盘</span>
+      <span class="badge"><span class="dot" aria-hidden="true"></span>v0.11.0 · DeepSeek Harness 原生五合一 · 按需 MCP · 14.4 MB 免 Python 托盘</span>
       <h1>换模型、换工具，<br>会话上下文<em>不再清零</em></h1>
       <p class="lede">Context Vault 把 AI 编程会话导出为<b>你自己机器上的中立快照</b>：内容寻址、不可变、带谱系。双向迁移、深度检索、token 账本、双时态记忆、MCP 后端——agent 来来去去，vault 一直在。</p>
       <div class="cta">
-        <a class="btn primary" href="https://github.com/nghqqa/context-vault/releases/download/v0.10.3/ContextVault.exe">
+        <a class="btn primary" href="https://github.com/nghqqa/context-vault/releases/download/v0.11.0/ContextVault.exe">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19.5h14"/></svg>
           下载 Windows 托盘版 (.exe)
         </a>
@@ -338,7 +338,7 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
           GitHub 仓库
         </a>
       </div>
-      <p class="meta">v0.10.3 · Windows 精简单文件 (14.0 MB, 免配 Python · 内置原生 MCP) · 或 Python 3.9+ 纯标准库零依赖 · MIT 开源免费</p>
+      <p class="meta">v0.11.0 · Windows 精简单文件 (14.4 MB, 免配 Python · 内置原生 MCP) · 或 Python 3.9+ 纯标准库零依赖 · MIT 开源免费</p>
     </div>
   </section>
 
@@ -354,7 +354,7 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
         <article class="card">
           <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M8 4.5h11a1.8 1.8 0 0 1 1.8 1.8v7.4"/><path d="M7.5 7.4h10.7a1.8 1.8 0 0 1 1.8 1.8v7.4" opacity=".6"/><rect x="2.8" y="10.2" width="15" height="10" rx="2"/><path d="M5.8 13.8h5" stroke-linejoin="round"/></svg></div>
           <h3>快照资产库</h3>
-          <p><code>Codex</code> / <code>Claude Code</code> / <code>ZCode</code> / <code>Antigravity</code> 与 18 种桥接 harness 的会话，导出为供应商中立 context-snapshot 格式：内容寻址、不可变、幂等，自动 lineage 会话树与按天保留裁剪。</p>
+          <p><code>Codex</code> / <code>Claude Code</code> / <code>DeepSeek Harness</code> / <code>ZCode</code> / <code>Antigravity</code> 与 18 种桥接 harness 的会话，导出为供应商中立 context-snapshot 格式：内容寻址、不可变、幂等，自动 lineage 会话树与按天保留裁剪。</p>
         </article>
         <article class="card">
           <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/><path d="M8 10.5h5m-2.5-2.5v5"/></svg></div>
@@ -364,12 +364,12 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
         <article class="card">
           <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 8H19m0 0-3-3m3 3-3 3M19.5 16H5m0 0 3-3m-3 3 3 3"/></svg></div>
           <h3>会话 + Skill 双向迁移</h3>
-          <p><code>Codex ⇄ Claude Code</code> 双向真机验证、Antigravity 原生 <code>.db</code> 双向迁回，以及 <code>ZCode / Claude / Codex / Cursor / Antigravity</code> <b>Skill 技能批量迁移</b>（含 Antigravity 全局目录 / 独立插件双模式切换与规范化预警）；默认 dry-run，另可按 token 预算产出五槽位交接简报。</p>
+          <p><code>Codex ⇄ Claude Code</code>、Antigravity <code>.db</code> 双向迁回、DeepSeek Harness V4 <code>.jsonl.zstd</code> 原生迁入与工作区登记，以及跨端 <b>Skill 技能批量迁移</b>（与已接入 MCP 后端强一致，自动隐藏 0 Skill 与未接入工具）；默认 dry-run，另支持预算内五槽位 Markdown 简报。</p>
         </article>
         <article class="card">
           <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7.5h8M8 11h8M8 14.5h5"/></svg></div>
           <h3>多端账本与配额</h3>
-          <p>免代理只读直采 <code>Claude Code</code> / <code>Codex</code> / <code>ZCode</code> / <code>Antigravity</code>（含逐次精确模型账单与本机 IDE 实时额度），提供 5h 滚动窗口与冷却倒计时（ETA）、按模型 / 项目 / 客户端多维排行、真实缓存命中率与公开挂牌价等效折算。</p>
+          <p>免代理只读直采 <code>Claude Code</code> / <code>Codex</code> / <code>DeepSeek Harness</code> / <code>ZCode</code> / <code>Antigravity</code>（含 DeepSeek V4/Flash 费率与本机 IDE 实时额度），提供 5h 滚动窗口与冷却倒计时（ETA）、多维排行与真实缓存命中率。</p>
         </article>
         <article class="card">
           <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3.5h10A1.5 1.5 0 0 1 18.5 5v15.5L12 17l-6.5 3.5V5A1.5 1.5 0 0 1 7 3.5Z"/></svg></div>
@@ -379,12 +379,12 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
         <article class="card">
           <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 2.5v5m6-5v5M6.5 7.5h11v3.5a5.5 5.5 0 0 1-11 0V7.5ZM12 16.5V21"/></svg></div>
           <h3>MCP 与 AML 记忆后端</h3>
-          <p><code>vault_remember</code> 等 6 个 MCP 工具支持显式 <code>budget_tokens</code> 预算裁剪，一条命令接入 <code>Claude Code</code> / <code>Codex</code> / <code>Cursor</code> / <code>Antigravity</code>；另内置 AML <code>Add/Search</code> 适配与多租户隔离。</p>
+          <p><code>vault_remember</code> 等 6 个 MCP 工具支持 <code>budget_tokens</code> 预算裁剪；按需勾选接入 <code>Claude Code</code> / <code>Codex</code> / <code>Antigravity</code> / <code>DeepSeek Harness</code> / <code>Cursor</code>，精确识别卸载残留并支持 <code>.bak-cv</code> 备份后安全移除；另内置 AML 多租户适配。</p>
         </article>
         <article class="card">
           <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M3 9h18M6.5 6.8h.01M9.3 6.8h.01"/></svg></div>
           <h3>本地控制台与语义增强</h3>
-          <p><code>cv serve --open</code> 并发 SWR 首屏 &lt;100ms 秒开：<code>Ctrl+K</code> 命令面板、空库 3 步引导、记忆置顶、Markdown 简报一键复制、<strong>设置与运维工作台</strong>（一键 MCP / Ollama 语义重排 / 备份裁剪）。</p>
+          <p><code>cv serve --open</code> 并发 SWR 首屏 &lt;100ms 秒开：<code>Ctrl+K</code> 命令面板、空库 3 步引导、记忆置顶、Markdown 简报一键复制、<strong>设置与运维工作台</strong>（MCP 按需接入与移除 / Ollama 语义重排 / 备份裁剪）。</p>
         </article>
       </div>
     </div>
@@ -454,17 +454,17 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
       <div class="sec-head">
         <span class="kicker">03 · 实测</span>
         <h2>真机验证记录</h2>
-        <p class="sub">2026-10-27 ~ 11-18 本机实测；与 docs/BENCHMARK.md、benchmarks/results 同源，不挑选、不修饰。</p>
+        <p class="sub">2026-10-27 ~ 11-24 真机实测；与 docs/BENCHMARK.md、benchmarks/results 同源，不挑选、不修饰。</p>
       </div>
       <div class="stats">
-        <div class="stat"><span class="v">241</span><span class="k">自动化单测 · 含冷热等价、SWR、Skill 迁移与多视口探针</span></div>
+        <div class="stat"><span class="v">251</span><span class="k">自动化单测 · 含 DeepSeek Harness、按需 MCP 与 Skill 对齐</span></div>
         <div class="stat"><span class="v">-87<small>%</small></span><span class="k">千级快照索引体积（778.5 → 100.9 MiB）</span></div>
         <div class="stat"><span class="v">1.0</span><span class="k">Ours Recall@5（162 题金标 · P95 &lt;1ms）</span></div>
         <div class="stat"><span class="v">0.0</span><span class="k">过期记忆入侵率（双时态冲突覆盖）</span></div>
         <div class="stat"><span class="v">162</span><span class="k">金标评测题 · 五维度 + 抗噪 / 流式消融</span></div>
         <div class="stat"><span class="v">0</span><span class="k">第三方依赖 · 纯 Python 标准库</span></div>
       </div>
-      <p class="note">双向迁移在 Claude Code <code>2.1.181</code> 与 Codex <code>0.153.4</code> 真机 resume 续写验证；桥接读 / 写各覆盖 18 种 harness 格式。<strong>CodingVault-Bench</strong>：162 题五维度金标消融（v0 词集交集 → v2 全演进链对照）随仓库开源，<code>python benchmarks/run_bench.py</code> 一键复现，详见 <a href="https://github.com/nghqqa/context-vault/blob/main/docs/BENCHMARK.md">docs/BENCHMARK.md</a>。</p>
+      <p class="note">在 <strong>DeepSeek Harness Desktop</strong>（V4 <code>.jsonl.zstd</code> 迁移渲染 / Cordis MCP 工具调用 / `/tdd` Skill 识别）、<strong>Claude Code <code>2.1.181</code></strong> 与 <strong>Codex <code>0.153.4</code></strong> 完成真机实测；桥接读 / 写各覆盖 18 种 harness 格式。<strong>CodingVault-Bench</strong>：162 题五维度金标消融随仓库开源，<code>python benchmarks/run_bench.py</code> 一键复现，详见 <a href="https://github.com/nghqqa/context-vault/blob/main/docs/BENCHMARK.md">docs/BENCHMARK.md</a>。</p>
     </div>
   </section>
 
@@ -478,15 +478,15 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
       </div>
       <div class="dl-card">
         <div class="dl-info">
-          <div class="dl-head">Windows 绿色托盘版（免装 Python，双击即用）<span class="dl-tag">v0.10.3 · 14.0 MB</span></div>
-          <p class="dl-desc">体积减半的精简单文件，内置热索引服务（<code>127.0.0.1:8791</code>）、<strong>原生免 Python MCP 服务</strong>、跨端 Skill 迁移、Web 控制台设置页、自动同步与每日备份。</p>
+          <div class="dl-head">Windows 绿色托盘版（免装 Python，双击即用）<span class="dl-tag">v0.11.0 · 14.4 MB</span></div>
+          <p class="dl-desc">精简单文件可执行程序，内置热索引服务（<code>127.0.0.1:8791</code>）、<strong>原生免 Python MCP 服务</strong>、DeepSeek Harness / Antigravity 迁移、按需 MCP 管理、自动同步与每日备份。</p>
         </div>
         <div class="dl-acts">
-          <a class="btn primary" href="https://github.com/nghqqa/context-vault/releases/download/v0.10.3/ContextVault.exe">
+          <a class="btn primary" href="https://github.com/nghqqa/context-vault/releases/download/v0.11.0/ContextVault.exe">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19.5h14"/></svg>
             下载 ContextVault.exe
           </a>
-          <a class="dl-sub" href="https://github.com/nghqqa/context-vault/releases/tag/v0.10.3">Release 说明 &amp; SHA256</a>
+          <a class="dl-sub" href="https://github.com/nghqqa/context-vault/releases/tag/v0.11.0">Release 说明 &amp; SHA256</a>
         </div>
       </div>
       <p class="term-label" style="margin-top:0">命令行安装（Windows / Linux / macOS，纯 Python 3.9+ 标准库零依赖）</p>
@@ -499,7 +499,7 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
       <p class="term-label">试一次跨工具迁移（默认 dry-run，不加 <code style="font-family:var(--mono)">--apply</code> 绝不碰真实会话目录）</p>
       <div class="term">
 <pre><span class="pr">$</span> cv migrate ~/.claude/transcripts/ses_xxx.jsonl --target codex  <span class="cm"># 产物先落 vault/outbox/</span>
-<span class="pr">$</span> cv import cv_xxxx --target codex --apply                       <span class="cm"># --apply 才写真实目录</span></pre>
+<span class="pr">$</span> cv import cv_xxxx --target dsh --apply                         <span class="cm"># --apply 写入 DSH V4 压缩会话并登记工作区</span></pre>
       </div>
       <div class="privacy-row">
         <span class="pv"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>只读源文件 · 永不改写</span>
@@ -513,8 +513,8 @@ footer a:hover{text-decoration:underline;text-underline-offset:3px}
 
 <footer>
   <div class="wrap foot-in">
-    <div>Context Vault v0.10.3 · 完全免费 · 代码 MIT · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/snapshot-format.md">快照格式规范 CC-BY</a></div>
-    <div><a href="https://github.com/nghqqa/context-vault/releases/download/v0.10.3/ContextVault.exe">下载 Windows 托盘版</a> · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.md">中文手册</a> · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.en.md">English Guide</a> · <a href="https://github.com/nghqqa/context-vault">GitHub</a> · <a href="https://github.com/nghqqa/context-vault/releases">Releases</a> · <a href="https://raw.githubusercontent.com/nghqqa/context-vault/main/llms.txt">llms.txt</a></div>
+    <div>Context Vault v0.11.0 · 完全免费 · 代码 MIT · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/snapshot-format.md">快照格式规范 CC-BY</a></div>
+    <div><a href="https://github.com/nghqqa/context-vault/releases/download/v0.11.0/ContextVault.exe">下载 Windows 托盘版</a> · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.md">中文手册</a> · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.en.md">English Guide</a> · <a href="https://github.com/nghqqa/context-vault">GitHub</a> · <a href="https://github.com/nghqqa/context-vault/releases">Releases</a> · <a href="https://raw.githubusercontent.com/nghqqa/context-vault/main/llms.txt">llms.txt</a></div>
   </div>
 </footer>
 

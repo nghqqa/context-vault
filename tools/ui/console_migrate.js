@@ -125,6 +125,7 @@ function targetLossNote(t){
   if(t==="markdown")return "Markdown 是降级档：仅保留停点/最近动作/活上下文尾部摘要，工具调用配对细节不进简报。";
   if(t==="antigravity")return "Antigravity 目标：经 smigrate 转换并自动补步级时间戳与项目目录；产物落 vault/outbox/，导入后出现在 Conversations 列表。";
   if(t==="zcode")return "ZCode 写回（实验性）：转换为 ZCode session/message/part 写入主库；执行写入前自动先备份 ZCode 数据库。";
+  if(t==="dsh")return "DeepSeek Harness 目标：生成规范 V4 会话（.v4.jsonl.zstd）并同步登记 workspace.json；developer 注入块被过滤，未配对 tool_result 逐条计数。";
   if(t==="codex")return "Codex 目标：developer 注入块被过滤（由目标运行时重新注入）；未配对 tool_result 逐条计数进迁移报告。";
   if(t==="claude")return "Claude Code 目标：developer 注入块被过滤；未配对 tool_result 逐条计数进迁移报告。";
   return "";
@@ -165,6 +166,7 @@ function previewCmd(t){
   if(t==="markdown")return "code vault/outbox/brief-*.md";
   if(t==="antigravity")return "dir vault\\outbox\\harness-antigravity-*.json";
   if(t==="zcode")return "zcode  # 写入模式直接入主库，重启 ZCode 生效";
+  if(t==="dsh")return "打开或刷新 DeepSeek Harness（自动出现在对应工作区会话列表）";
   return "codex resume";
 }
 async function migGo(apply){
@@ -216,6 +218,8 @@ function renderMigResult(r,ctx){
     cmd=fpath;cmdNote=r.applied?"已写入 Antigravity conversations 目录，完全关闭并重启 Antigravity 后在对应项目下显示":"outbox 产物（已对齐原生步骤与项目结构）— 选择写入真实目录或 --apply 可直接落盘";
   }else if(ctx.target==="zcode"){
     cmd=fpath;cmdNote=r.applied?"已写回 ZCode 主库（已先备份原库），完全关闭并重启 ZCode 后在对应项目列表出现":"outbox 产物（ZCode payload）— 选择写入真实目录或 --apply 可写回主库";
+  }else if(ctx.target==="dsh"){
+    cmd=fpath;cmdNote=r.applied?"已写入 ~/.dsh/sessions 并同步登记 workspace.json，刷新或重启 DeepSeek Harness 即可在工作区列表续聊":"outbox 产物（V4 JSONL）— 选择写入真实目录或 --apply 可压缩为 .zstd 并自动登记工作区";
   }else{
     cmd="code \""+fpath+"\"";cmdNote="Markdown 简报 — 任意 agent / 编辑器可读";
   }

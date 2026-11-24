@@ -136,7 +136,7 @@ def local_day(epoch):
 # 内置公开列表价近似口径 (2026-11 整理, $/Mtok; cache_read 取各家公开折扣档)。
 # 订阅制型号 (glm-5*/gpt-5.6*/gpt-6* 等) 按「公开 API 挂牌价等效折算」收录参考近似价 —
 # UI 标注估算非账单; 精确价以 vault/pricing.json 覆盖 (逐条生效, 不需改代码)。
-PRICING_REV = 4  # 内置表修订号: 纳入配置指纹 (_cfg_fingerprint), 表变更即自动重算存量事件
+PRICING_REV = 5  # 内置表修订号: 纳入配置指纹 (_cfg_fingerprint), 表变更即自动重算存量事件
 DEFAULT_PRICING = {
     # Anthropic (cache 读 0.1x 输入, 写 1.25x 输入; 含空格可读名与连字符 id)
     "claude-opus-4*":     {"input": 15.0, "output": 75.0, "cache_read": 1.50, "cache_write": 18.75},
@@ -187,6 +187,9 @@ DEFAULT_PRICING = {
     # 其他主流 (近似列表价)
     "glm-4*":             {"input": 0.60, "output": 2.20},
     "deepseek-chat*":     {"input": 0.27, "output": 1.10, "cache_read": 0.07},
+    "deepseek-v4-flash*": {"input": 0.14, "output": 0.56, "cache_read": 0.028},
+    "deepseek-flash*":    {"input": 0.14, "output": 0.56, "cache_read": 0.028},
+    "deepseek-v4*":       {"input": 0.28, "output": 1.10, "cache_read": 0.028},
     "deepseek-v3*":       {"input": 0.27, "output": 1.10, "cache_read": 0.07},
     "deepseek-reasoner*": {"input": 0.55, "output": 2.19, "cache_read": 0.14},
     "deepseek-r1*":       {"input": 0.55, "output": 2.19, "cache_read": 0.14},
@@ -1556,8 +1559,95 @@ def collect_antigravity(base_dir=None, skip_fn=None, agv_state=None):
     return events, marks
 
 
+def collect_dsh(base_dir=None, skip_fn=None):
+    """~/.dsh/sessions/**/*.jsonl[.zstd] — assistant/message usage (inputTokens 不含缓存)。
+    同文件内按 message.id 去重取 tokens_out 最大的一条; skip_fn(path, sig) 未变更直接跳过。"""
+    import cv_dsh
+    root = Path(base_dir) if base_dir else cv_dsh.dsh_sessions_root()
+    files = cv_dsh.discover_dsh_session_files(root)
+    if not files:
+        return [], []
+    events, marks = [], []
+    for f in files:
+        try:
+            sig = _file_sig(f, with_wal=False)
+        except OSError:
+            continue
+        if skip_fn and skip_fn(f, sig):
+            marks.append((f, sig))
+            continue
+        sid = None
+        cwd = None
+        header_ts = 0.0
+        groups = {}
+        try:
+            for obj in cv_dsh.iter_dsh_jsonl(f):
+                t = obj.get("type")
+                if t == "session":
+                    sid = obj.get("id") or sid
+                    cwd = obj.get("cwd") or cwd
+                    cat = obj.get("createdAt")
+                    if isinstance(cat, (int, float)) and not isinstance(cat, bool) and cat >= 0:
+                        header_ts = float(cat) / 1000.0
+                    continue
+                if t != "assistant/message":
+                    continue
+                data = obj.get("data") or {}
+                if not isinstance(data, dict):
+                    continue
+                msg = data.get("message") or {}
+                u = data.get("usage")
+                if not isinstance(msg, dict) or not isinstance(u, dict):
+                    continue
+                if "inputTokens" not in u and "outputTokens" not in u:
+                    continue
+                sess_eff = str(sid or f.parent.name)
+                gkey = str(msg.get("id") or f"seq:{obj.get('seq')}")
+                if not gkey:
+                    continue
+                tin, tout, cr, cw, rt = cv_dsh._dsh_usage_normalized(u)
+                prev = groups.get(gkey)
+                if prev is not None and tout <= prev["tokens_out"]:
+                    continue
+                ms = obj.get("time")
+                if not isinstance(ms, (int, float)) or isinstance(ms, bool) or ms < 0:
+                    ms = cv_dsh._stream_first_ms(data.get("stream"))
+                occ = (
+                    float(ms) / 1000.0
+                    if (isinstance(ms, (int, float)) and not isinstance(ms, bool) and ms >= 0)
+                    else header_ts
+                )
+                src = msg.get("source") or {}
+                groups[gkey] = {
+                    "event_key": _sha(f"dsh|{sess_eff}|{gkey}"),
+                    "source": "dsh",
+                    "client": "dsh",
+                    "model": (src.get("model") if isinstance(src, dict) else None) or None,
+                    "project": cwd,
+                    "session_ref": sess_eff,
+                    "occurred_at": occ,
+                    "tokens_in": tin,
+                    "tokens_out": tout,
+                    "reasoning_tokens": rt,
+                    "cache_read": cr,
+                    "cache_write": cw,
+                    "is_estimated": 0,
+                    "raw": json.dumps({
+                        "message_id": msg.get("id"),
+                        "provider": src.get("provider") if isinstance(src, dict) else None,
+                        "cwd": cwd,
+                    }, ensure_ascii=False),
+                }
+        except (OSError, ValueError, RuntimeError):
+            continue
+        events.extend(groups.values())
+        marks.append((f, sig))
+    return events, marks
+
+
 COLLECTORS = {"claude": collect_claude, "codex": collect_codex,
-              "zcode": collect_zcode, "antigravity": collect_antigravity}
+              "zcode": collect_zcode, "antigravity": collect_antigravity,
+              "dsh": collect_dsh}
 
 
 def sync_from_agm(vault: Path, url: str, conn=None, pricing=None, accounts=None):
@@ -1841,7 +1931,7 @@ def cmd_ledger_sync(args):
             [s.strip() for s in str(want).split(",") if s.strip()]
         bad = [s for s in srcs if s not in COLLECTORS]
         if bad:
-            raise SystemExit(f"未知来源: {','.join(bad)} (可选: all|claude|codex|zcode|antigravity)")
+            raise SystemExit(f"未知来源: {','.join(bad)} (可选: all|claude|codex|zcode|antigravity|dsh)")
         # 主库升为 zcode 真相源的一次性迁移: model-io 零头事件与 zdb 全量重叠, 不删会双计
         zdb_active = bool(getattr(cv, "ZCODE_DB", None)) and Path(cv.ZCODE_DB).exists()
         try:

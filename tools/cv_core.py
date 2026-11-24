@@ -57,7 +57,7 @@ class BadMigrateTarget(ValueError):
 def cv_mod():
     """延迟取得主模块 cv, 兼容以 __main__ / tools.cv 运行及测试对 cv.HOME 等的 monkeypatch。"""
     mod = sys.modules.get("cv")
-    if mod is not None:
+    if mod is not None and hasattr(mod, "HOME"):
         return mod
     import cv as _cv_m
     return _cv_m

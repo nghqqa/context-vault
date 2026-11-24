@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "context-vault"
-version = "0.10.3"
+version = "0.11.0"
 description = "Local-first, vendor-neutral context asset vault for AI coding agents (zero third-party deps)"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -30,6 +30,7 @@ py-modules = [
   "cv_migrate",
   "cv_ops",
   "cv_antigravity",
+  "cv_dsh",
   "cv_server",
   "cv_ui",
   "mcp_server",

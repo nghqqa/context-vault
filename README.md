@@ -30,24 +30,24 @@ Your AI coding sessions are your most valuable work asset — yet they're locked
 
 ## ✨ Features
 
-- **Snapshot vault** — export Codex / Claude Code / ZCode / Antigravity / 18 bridged harnesses into the vendor-neutral [context-snapshot](docs/snapshot-format.md) format: content-addressed, immutable, idempotent, with automatic lineage (`parent_snapshot` trees & forks) and daily retention pruning (`cv prune`).
+- **Snapshot vault** — export Codex / Claude Code / ZCode / Antigravity / DeepSeek Harness (`dsh`) / 18 bridged harnesses into the vendor-neutral [context-snapshot](docs/snapshot-format.md) format: content-addressed, immutable, idempotent, with automatic lineage (`parent_snapshot` trees & forks) and daily retention pruning (`cv prune`).
 - **Handoff brief** — `--target markdown --budget-tokens 4000` assembles a utility-maximized brief under an explicit token budget (stop state / active decisions / disproven dead-ends / touched-file topology / live-context tail), folding repeated file reads and duplicate errors, with compression stats.
 - **Vault backup** — `cv backup`: consistent sqlite snapshot + rotated zips; optional `CV_SERVE_TOKEN` auth for the resident console.
-- **Honest migration & bidirectional sync** — bidirectional Codex ⇄ Claude Code, native Antigravity `.db`/Proto round-trip & project-tree batch sync/cleanup, experimental ZCode write-back (with auto-backup), dry-run by default, and a per-migration report of exactly what survives and what doesn't.
-- **Cross-agent Skill migration** — `cv skills` and the Web Console **Migrate → Skill Migration** tab discover, filter, normalize, deduplicate, and batch-migrate `SKILL.md` packages across ZCode, Claude Code, Codex, Antigravity, and Cursor with prompt-token budget warnings and toggleable Antigravity output modes (direct global `~/.gemini/config/skills/` vs. reversible plugin bundle with `plugin.json`).
+- **Honest migration & bidirectional sync** — bidirectional Codex ⇄ Claude Code, native Antigravity `.db`/Proto round-trip & project-tree batch sync/cleanup, native DeepSeek Harness V4 concatenated-Zstd write-back (`workspace.json` + `session_projcache` sync), experimental ZCode write-back (with auto-backup), dry-run by default, and a per-migration report of exactly what survives and what doesn't.
+- **Cross-agent Skill migration** — `cv skills` and the Web Console **Migrate → Skill Migration** tab discover, filter, normalize, deduplicate, and batch-migrate `SKILL.md` packages across ZCode, Claude Code, Codex, Antigravity, Cursor, and DeepSeek Harness (`connected_only=1` in UI aligns visible sources/targets with active MCP backends and hides 0-skill tools) with prompt-token budget warnings and toggleable Antigravity output modes (`skills` dir vs. reversible `plugin.json` bundle).
 - **Deep retrieval core** — code-aware tokenization (camelCase/snake_case/path/error-code composite+subword dual indexing), block-role-weighted BM25 (global IDF + length normalization), lineage folding (chain hits collapse to the latest version), time decay and optional dense-vector RRF; a compact SQLite inverted index replaces the giant pickle.
 - **Open reproducible benchmark** — `python benchmarks/run_bench.py` reproduces a 162-query, 5-dimension ablation (full v0→v2 evolution) in ~30s; see [docs/BENCHMARK.md](docs/BENCHMARK.md).
-- **Token ledger** — per-model costs, cache hit rates aggregated from usage records *inside your own session files*. No proxy required. `cv ledger sync` directly harvests Claude Code / Codex / ZCode / Antigravity local logs (read-only, idempotent) into a `usage_events` time series, and `cv ledger quota` reports the 5-hour rolling window, recovery ETA, 7d/monthly runway (optional `vault/accounts.json` quota pools) and per-model/project/account rankings — fully offline, no headroom required.
+- **Token ledger** — per-model costs, cache hit rates aggregated from usage records *inside your own session files*. No proxy required. `cv ledger sync` directly harvests Claude Code / Codex / ZCode / Antigravity / DeepSeek Harness local logs (read-only, idempotent) into a `usage_events` time series, and `cv ledger quota` reports the 5-hour rolling window, recovery ETA, 7d/monthly runway (optional `vault/accounts.json` quota pools) and per-model/project/account rankings — fully offline, no headroom required.
 - **Cross-session temporal memory** — decisions, preferences, summaries, pitfalls and hard constraints auto-extracted from history with exact provenance (snapshot#block + real session time) and topic signatures; when a decision is superseded, stale memories are marked and hidden by default (`include_history` traces the full evolution chain).
-- **MCP backend** — 6 tools (`vault_remember` etc.) turn any MCP client (Claude Code / Codex / Cursor) into a remembering agent with optional `budget_tokens` trimming. One command to install everywhere.
+- **MCP backend** — 6 tools (`vault_remember` etc.) turn any MCP client (Claude Code / Codex / Cursor / Antigravity / DeepSeek Harness Cordis patch) into a remembering agent with optional `budget_tokens` trimming; selective per-client onboarding & safe uninstall (`cv mcp uninstall`, skipping uninstalled residual dirs).
 - **AML Add/Search adapter** — `cv-aml` / `tools/aml_adapter.py` (and `/aml/add`, `/aml/search` mounted on `cv serve`) with tenant isolation, `request_id` idempotent replay & `409 Conflict` detection, plus a zero-dep `Dockerfile.aml`.
 - **Optional secret redaction** — `cv export --redact` or `CV_REDACT_SECRETS=1` masks common API keys, GitHub/AWS tokens, JWTs and PEM private keys before persisting snapshots.
 - **Optional local semantic layer (Ollama / LLM)** — `cv semantic` (and the Console **Settings & Ops** tab) configures local Ollama dense reranking, LLM memory distillation, and automatic session titles; off by default with zero outbound traffic.
-- **Instant local Web Console** — `Ctrl/Cmd+K` global palette, empty-vault 3-step onboarding, manual memory pinning, budgeted Markdown brief 1-click copy, visual MCP/backup/prune controls, and non-blocking SWR quota caching.
+- **Instant local Web Console** — `Ctrl/Cmd+K` global palette, empty-vault 3-step onboarding, manual memory pinning, budgeted Markdown brief 1-click copy, selective MCP / backup / prune controls, and non-blocking SWR quota caching.
 
 ## 🚀 Quick Start
 
-> **Windows ready-to-run tray app (no Python required, 14 MB single binary)**: Download [ContextVault.exe (v0.10.3)](https://github.com/nghqqa/context-vault/releases/download/v0.10.3/ContextVault.exe) ([Release notes & SHA256](https://github.com/nghqqa/context-vault/releases/tag/v0.10.3)) and double-click to launch the resident Web Console (`127.0.0.1:8791`), **built-in zero-Python MCP server (`--mcp`)**, periodic sync, and daily backups.
+> **Windows ready-to-run tray app (no Python required, 14.4 MB single binary)**: Download [ContextVault.exe (v0.11.0)](https://github.com/nghqqa/context-vault/releases/download/v0.11.0/ContextVault.exe) ([Release notes & SHA256](https://github.com/nghqqa/context-vault/releases/tag/v0.11.0)) and double-click to launch the resident Web Console (`127.0.0.1:8791`), **built-in zero-Python MCP server (`--mcp`)**, periodic sync, and daily backups.
 
 ```bash
 pip install -e .                   # optional: installs global `cv`, `cv-mcp`, `cv-aml` commands (zero deps)
@@ -58,10 +58,11 @@ cv serve --open                    # start web console + hot index + unified /am
 Or run directly without installation (zero dependencies, Python 3.9+):
 
 ```bash
-python tools/cv.py doctor          # environment check (zero dependencies, Python 3.9+)
-python tools/cv.py sync            # auto-ingest all local session sources (incremental + lineage)
-python tools/cv.py serve           # web console at http://127.0.0.1:8791
-python tools/cv.py mcp install --all   # register MCP backend in claude / codex / cursor
+python tools/cv.py doctor              # environment check (zero dependencies, Python 3.9+)
+python tools/cv.py sync                # auto-ingest all local session sources (incremental + lineage)
+python tools/cv.py serve               # web console at http://127.0.0.1:8791
+python tools/cv.py mcp install --all   # register MCP in detected apps (skips uninstalled residuals)
+python tools/cv.py mcp uninstall --client cursor  # safely remove context-vault entry (.bak-cv backup)
 ```
 
 Migrate a session (dry-run by default — nothing touches real session dirs without `--apply`):
@@ -117,7 +118,7 @@ Two rules that don't bend: **snapshots are immutable** (any derived data lives i
 - 195 MB Codex rollout → 12 MB snapshot in **1.5 s**; 39 compaction boundaries, 224M tokens of usage, 838 tool-call pairs intact.
 - **Bidirectional migration, both directions real-machine verified**: Codex→Claude resumes and continues accurately in Claude 2.1.181; Claude→Codex restores **373,160 tokens of full context** in Codex 0.153.4.
 - Reverse-engineered and dodged the two-generation Codex format trap (numeric vs string `ordinal`, resume reading the SQLite thread-store, misleading "rollout is empty").
-- Test suite: **241 tests** including hot/cold equivalence, SWR non-blocking caching, cross-agent skill migration with self-invalidating caches, `/stats` & DB migration caching, 413 payload guards, and gzip compression — the resident index and the file-scan fallback must return identical results. CI also runs JS syntax/runtime/unit checks and a real-browser layout probe (380–2560px × all views, zero overflow).
+- Test suite: **251 tests** including hot/cold equivalence, SWR non-blocking caching, DeepSeek Harness V4/Zstd/Cordis round-trip, selective MCP install/uninstall with residual isolation, cross-agent skill migration (`connected_only` enforcement & self-invalidating caches), `/stats` & DB migration caching, 413 payload guards, and gzip compression — the resident index and the file-scan fallback must return identical results. Real-machine verified in **DeepSeek Harness Desktop** (live MCP tool invocation, migrated Antigravity V4 `.jsonl.zstd` session rendering, and `/tdd` Skill recognition), **Claude Code 2.1.181**, and **Codex 0.153.4**. CI also runs JS syntax/runtime/unit checks and a real-browser layout probe (380–2560px × all views, zero overflow).
 
 ## Design principles
 
@@ -146,10 +147,10 @@ Porters are upstream adapters, not competitors — `cv ingest` and `cv export-ha
 
 | Channel | Coverage |
 |---|---|
-| Native read+write (real-machine verified) | Codex · Claude Code · Antigravity `.db`/Proto · ZCode transcripts (read + experimental write-back) |
+| Native read+write (real-machine verified) | Codex · Claude Code · Antigravity `.db`/Proto · DeepSeek Harness V4 Zstd · ZCode transcripts (read + experimental write-back) |
 | Bridged read (`cv ingest`, 18 formats) | opencode · cursor · qwen · kimi · grok · antigravity · copilot · devin · hermes · kilo · mastracode · muse · omp · pi · vibe · openhands … |
 | Bridged write (`cv export-harness`, 18 targets) | same list |
-| Ledger sources | headroom · relay billing API · ZCode usage audit |
+| Ledger sources | Claude Code · Codex · Antigravity · DeepSeek Harness · headroom · relay billing API · ZCode usage audit |
 | Not supported | harnesses with encrypted local stores (e.g. Windsurf) |
 
 ## Roadmap

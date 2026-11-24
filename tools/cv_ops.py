@@ -304,6 +304,7 @@ def cmd_dashboard(args):
 # ------------------------------------------------- watch: 切换携带会话 (M2)
 
 def active_sessions(hours: float = 8) -> list:
+    import cv_dsh
     cutoff = time.time() - hours * 3600
     found = []
     for f in _cv().CODEX_SESSIONS.glob("*/*/*/rollout-*.jsonl"):
@@ -315,6 +316,12 @@ def active_sessions(hours: float = 8) -> list:
     for f in (_cv().HOME / ".claude" / "transcripts").glob("*.jsonl"):
         if f.stat().st_mtime > cutoff:
             found.append(("claude-transcript", str(f)))
+    for f in cv_dsh.discover_dsh_session_files():
+        try:
+            if f.stat().st_mtime > cutoff:
+                found.append(("dsh", str(f)))
+        except OSError:
+            continue
     return sorted(found, key=lambda x: -Path(x[1]).stat().st_mtime)
 
 

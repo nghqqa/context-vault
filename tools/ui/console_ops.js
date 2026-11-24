@@ -1,25 +1,90 @@
 /* ================= 设置与运维 (MCP / Ollama 语义层 / 额度 Token / 备份与裁剪) ================= */
 const opsSeq=seqGuard();
+let opsMcpSel=new Set(),opsMcpBooted=false,opsMcpShowMore=false;
+function opsSyncMcpBtn(){
+  const btn=$("#ops-mcp-apply-btn");if(!btn)return;
+  const n=opsMcpSel.size;
+  btn.textContent="接入已选 ("+n+")";
+  btn.disabled=(n===0);
+}
+function opsMcpToggle(id,checked){
+  if(!id)return;
+  if(checked)opsMcpSel.add(id);else opsMcpSel.delete(id);
+  opsSyncMcpBtn();
+}
+function renderMcpClients(mcp){
+  const mb=$("#ops-mcp-box");if(!mb)return;
+  mb.dataset.loaded="1";
+  const rows=(mcp&&mcp.clients)||[];
+  const validIds=new Set();
+  if(!opsMcpBooted){
+    opsMcpSel.clear();
+    rows.forEach(c=>{
+      const appDet=(c.app_detected!==undefined)?!!c.app_detected:(!!c.detected&&!c.residual);
+      if(!c.installed&&!c.residual&&appDet)opsMcpSel.add(c.id);
+    });
+    opsMcpBooted=true;
+  }else{
+    rows.forEach(c=>{if(!c.installed&&c.detected)validIds.add(c.id);});
+    opsMcpSel=new Set([...opsMcpSel].filter(id=>validIds.has(id)));
+  }
+  const renderRow=c=>{
+    const appDet=(c.app_detected!==undefined)?!!c.app_detected:(!!c.detected&&!c.residual);
+    const residual=!!(c.residual!==undefined?c.residual:(c.detected&&!appDet));
+    let dotCls="off",pillCls="muted",statusTxt="未检测到",statusTip="";
+    if(c.installed&&residual){
+      dotCls="warn";pillCls="warn";statusTxt="已接入 · 未检测到程序";
+      statusTip="未检测到主程序，仅存在配置目录或残留 MCP 配置；如已卸载可点击右侧「移除」清理 context-vault 条目";
+    }else if(c.installed){
+      dotCls="ok";pillCls="ok";statusTxt="已接入";
+    }else if(residual){
+      dotCls="off";pillCls="muted";statusTxt="仅残留目录";
+      statusTip="仅检测到配置目录而未检测到主程序（如已卸载），默认不勾选；如需仍可手动勾选接入";
+    }else if(c.detected){
+      dotCls="warn";pillCls="warn";statusTxt="已检测到 · 未接入";
+    }
+    const chkChecked=c.installed||opsMcpSel.has(c.id);
+    const chkDisabled=c.installed||!c.detected;
+    const actBtn=c.installed
+      ?'<button class="btn sm'+(residual?" danger":"")+'" onclick="opsUninstallMcp(\''+esc(c.id)+'\')">移除</button>'
+      :'<button class="btn sm" onclick="opsInstallMcp(\''+esc(c.id)+'\')"'+(c.detected?"":" disabled")+'>接入</button>';
+    return '<div class="ops-row"><div class="ops-row-l">'+
+      '<input type="checkbox" class="ops-mcp-chk" aria-label="选择 '+esc(c.name)+'"'+
+      (chkChecked?" checked":"")+(chkDisabled?" disabled":"")+
+      ' onchange="opsMcpToggle(\''+esc(c.id)+'\',this.checked)">'+
+      '<span class="dot '+dotCls+'"></span>'+
+      '<span class="ops-row-name">'+esc(c.name)+'</span>'+
+      '<span class="pill '+pillCls+'"'+(statusTip?' title="'+esc(statusTip)+'"':"")+'>'+statusTxt+'</span>'+
+      '<span class="ops-row-sub" title="'+esc(c.config||"")+'">'+esc(truncPath(c.config||"",56))+'</span></div>'+
+      actBtn+'</div>';
+  };
+  const isPrimary=c=>{
+    const appDet=(c.app_detected!==undefined)?!!c.app_detected:(!!c.detected&&!c.residual);
+    return !!(c.installed||appDet);
+  };
+  let primaryRows=rows.filter(isPrimary);
+  let secondaryRows=rows.filter(c=>!isPrimary(c));
+  if(!primaryRows.length){primaryRows=rows;secondaryRows=[];}
+  const moreHtml=secondaryRows.length
+    ?('<details class="ops-mcp-more"'+(opsMcpShowMore?" open":"")+' ontoggle="opsMcpShowMore=this.open">'+
+        '<summary>其他受支持的客户端（未检测到程序 · '+secondaryRows.length+'）</summary>'+
+        '<div class="ops-mcp-more-body">'+secondaryRows.map(renderRow).join("")+'</div></details>')
+    :"";
+  mb.innerHTML=
+    '<div class="ops-mcp-note">勾选需要接入记忆库的本机客户端（未检测到或仅残留的客户端已默认折叠，已接入项可随时单独移除）。</div>'+
+    primaryRows.map(renderRow).join("")+
+    moreHtml+
+    '<div class="hint" style="margin-top:8px;word-break:break-all">MCP 启动命令：<code class="mono">'+esc((mcp&&mcp.server_cmd)||"")+'</code></div>'+
+    '<div id="ops-mcp-out"></div>';
+  opsSyncMcpBtn();
+}
 async function loadOps(probeSem){
   try{
     const [mcp,st]=await opsSeq(()=>Promise.all([
       api("/ops/mcp"),
       api("/ops/status"+(probeSem?"?probe=1":"")),
     ]));
-    const mb=$("#ops-mcp-box");
-    if(mb){
-      mb.dataset.loaded="1";
-      const rows=(mcp&&mcp.clients)||[];
-      mb.innerHTML=
-        rows.map(c=>'<div class="ops-row"><div class="ops-row-l">'+
-          '<span class="dot '+(c.installed?"ok":(c.detected?"warn":"off"))+'"></span>'+
-          '<span class="ops-row-name">'+esc(c.name)+'</span>'+
-          '<span class="pill '+(c.installed?"ok":(c.detected?"warn":""))+'">'+(c.installed?"已接入":(c.detected?"已检测到 · 未接入":"未检测到"))+'</span>'+
-          '<span class="ops-row-sub" title="'+esc(c.config||"")+'">'+esc(truncPath(c.config||"",56))+'</span></div>'+
-          '<button class="btn sm" onclick="opsInstallMcp(\''+esc(c.id)+'\')">'+(c.installed?"重检":"接入")+'</button></div>').join("")+
-        '<div class="hint" style="margin-top:8px;word-break:break-all">MCP 启动命令：<code class="mono">'+esc((mcp&&mcp.server_cmd)||"")+'</code></div>'+
-        '<div id="ops-mcp-out"></div>';
-    }
+    renderMcpClients(mcp);
     const sb=$("#ops-sem-box");
     if(sb){
       const sem=(st&&st.semantic)||{};
@@ -77,20 +142,38 @@ async function loadOps(probeSem){
     if(mb)mb.innerHTML=errEmpty("设置面板加载失败："+e.message,"loadOps(false)");
   }
 }
-async function opsInstallMcp(client){
+async function _postMcpOp(url,payload,okToast,errPrefix){
   const out=$("#ops-mcp-out");
   try{
-    const r=await api("/ops/mcp/install",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({client:client||"all"})});
+    const r=await api(url,{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(payload)});
     const lines=((r&&r.results)||[]).map(x=>"["+x.client+"] "+x.message).join("\n");
-    toast("MCP 配置已执行");
+    if(typeof skData!=="undefined"){skData=null;skSelected.clear();}
+    toast(okToast);
     await loadOps(false);
     const out2=$("#ops-mcp-out");
     if(out2&&lines)out2.innerHTML='<div class="ops-out">'+esc(lines)+'</div>';
   }catch(e){
-    toast("MCP 接入失败："+e.message,1);
+    toast(errPrefix+"："+e.message,1);
     if(out)out.innerHTML='<div class="ops-out">'+esc(e.message)+'</div>';
   }
+}
+function opsInstallMcp(client){
+  if(Array.isArray(client)){
+    if(!client.length)return toast("请先勾选要接入的客户端",1);
+    return _postMcpOp("/ops/mcp/install",{clients:client},"MCP 已接入所选客户端","MCP 接入失败");
+  }
+  return _postMcpOp("/ops/mcp/install",{client:client||"all"},"MCP 配置已执行","MCP 接入失败");
+}
+function opsInstallSelectedMcp(){
+  const ids=[...opsMcpSel];
+  if(!ids.length)return toast("请先勾选要接入的客户端",1);
+  return opsInstallMcp(ids);
+}
+async function opsUninstallMcp(client){
+  if(!client)return;
+  if(!await askConfirm("将从该客户端配置中安全移除 context-vault 条目（会自动备份原配置文件为 .bak-cv，不会删除其他 MCP 服务或配置目录）。确认继续？"))return;
+  return _postMcpOp("/ops/mcp/uninstall",{client:client},"已移除 context-vault MCP","MCP 移除失败");
 }
 async function opsConfigureOllama(){
   const host=($("#ops-ol-host")&&$("#ops-ol-host").value||"").trim()||"http://127.0.0.1:11434";
