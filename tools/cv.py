@@ -78,7 +78,7 @@ from cv_index import (  # noqa: F401 — re-exported as public engine API
 
 FORMAT_VERSION = "0.1"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # noconsole 进程 spawn 控制台程序不弹窗   # context-snapshot 格式版本
-VERSION = "0.12.0"  # Skill 预览Diff与安全移除回滚 / 并发与安全加固 / 核心模块拆分
+VERSION = "0.13.0"  # 整端全量/批量会话迁移工作台 / HTTP & CLI 批量迁移 / 显隐探针加固
 TOOL_RESULT_LIMIT = 256 * 1024  # spec §8.2 裁决: 单块截断阈值 256KB
 HOME = Path.home()
 HEADROOM_DIR = HOME / ".headroom"
@@ -1000,6 +1000,8 @@ from cv_migrate import (  # noqa: F401,E402
     do_import,
     _print_import_result,
     _check_single_sid_agent,
+    plan_batch_migration,
+    run_batch_migration,
     cmd_import,
     cmd_migrate,
 )
@@ -2328,6 +2330,7 @@ def main(argv=None):
     i.add_argument("--include-subagents", action="store_true", help="包含子代理与已归档会话")
     i.add_argument("--include-archived", action="store_true", help="包含 ZCode 已归档会话 (不含子代理)")
     i.add_argument("--apply", action="store_true", help="写入真实会话目录 (默认 dry-run)")
+    i.add_argument("--no-skip-migrated", action="store_true", help="整端批量导入时不跳过已迁移会话")
     i.add_argument("--strip-thinking", action="store_true", help="不迁移 reasoning 摘要")
     i.add_argument("--budget-tokens", type=int, default=None,
                    help="markdown 目标的简报 token 预算 (建议 2000|4000|8000; 缺省按 48KB 推导)")

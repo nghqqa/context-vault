@@ -9,7 +9,7 @@ Context Vault is a **100% free, local-first, zero-dependency** asset vault for A
 ## 1. 3-Minute Quick Start
 
 ### Option A — Windows Ready-to-Run Tray Binary (No Python Required, 14.4 MB)
-1. Download [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.12.0/ContextVault.exe) from [GitHub Releases (v0.12.0)](https://github.com/nghqqa/context-vault/releases/tag/v0.12.0) and optionally verify via `SHA256SUMS.txt`:
+1. Download [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.13.0/ContextVault.exe) from [GitHub Releases (v0.13.0)](https://github.com/nghqqa/context-vault/releases/tag/v0.13.0) and optionally verify via `SHA256SUMS.txt`:
    ```powershell
    certutil -hashfile ContextVault.exe SHA256
    ```
@@ -58,8 +58,9 @@ cv migrate ~/.claude/transcripts/ses_xxx.jsonl --target codex      # preview + o
 cv import cv_xxxx --target codex --apply                           # write into Codex sessions
 cv import cv_xxxx --target dsh --apply                             # write DSH V4 .jsonl.zstd + workspace registration
 cv import cv_xxxx --target markdown --budget-tokens 4000           # 5-slot utility handoff brief
+cv import --agent claude --target codex                            # full-harness batch dry-run (add --no-skip-migrated --apply to force overwrite)
 ```
-In the Web Console **Migrate (`3`)** tab, selecting **Markdown** lets you choose a token budget (`2K / 4K / 8K / Unlimited`) and copy the generated handoff brief in one click.
+In the Web Console **Migrate (`3`)** tab, switch between **Single Session** and **Full-Harness Batch** (filter by source harness/project/query, auto-skip same-origin & already-migrated sessions recorded in `migrations.jsonl`, isolate per-session failures, and export all matching sessions beyond the 300-row UI preview limit); selecting **Markdown** lets you choose a token budget (`2K / 4K / 8K / Unlimited`) and copy the generated handoff brief in one click.
 
 ### Cross-Agent Skill Workbench (`SKILL.md` Packages)
 ```bash

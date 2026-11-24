@@ -765,6 +765,196 @@ class TestProjectImprovements(unittest.TestCase):
         self.assertIn("T&#x27;&amp;&lt;x&gt;", ps_cmd)
         self.assertIn("M&#x27;&amp;&lt;y&gt;", ps_cmd)
 
+    def test_batch_session_migration_plan_run_http_and_cli(self):
+        """验证整端全量 / 批量会话迁移: plan 盘点、Claude 多子类型聚合、去重、单条容错、HTTP 与 CLI --agent 批量迁移。"""
+        import io
+        from types import SimpleNamespace
+
+        vault = self.tmp / "batch_vault"
+        (vault / "snapshots").mkdir(parents=True)
+        fake_home = self.tmp / "batch_home"
+        fake_codex = fake_home / ".codex" / "sessions"
+        fake_claude = fake_home / ".claude" / "projects"
+        fake_zdb = fake_home / ".zcode" / "db.sqlite"
+        fake_ztdb = fake_home / ".zcode" / "tasks.sqlite"
+        fake_codex.mkdir(parents=True)
+        fake_claude.mkdir(parents=True)
+        fake_zdb.parent.mkdir(parents=True)
+
+        conn = cv.db(vault)
+        conn.executescript(cv.SCHEMA)
+        samples = [
+            ("z1", "zcode", "E:/proj_alpha", "zcode alpha task", "2026-11-20T10:00:00"),
+            ("z_bad", "zcode", "E:/proj_beta", "zcode broken task", "2026-11-20T09:00:00"),
+            ("cc1", "claude-code", "E:/proj_alpha", "claude code fix", "2026-11-20T11:00:00"),
+            ("ct1", "claude-transcript", "E:/proj_beta", "claude transcript note", "2026-11-20T08:00:00"),
+            ("cx1", "codex", "E:/proj_alpha", "codex existing session", "2026-11-20T07:00:00"),
+            ("dh1", "dsh", "E:/proj_alpha", "dsh test session", "2026-11-20T06:00:00"),
+        ]
+        sids = {}
+        for key, ag, cwd, prompt, ts in samples:
+            env = cv.build_envelope({
+                "capture": {
+                    "agent": ag,
+                    "source_format": f"{ag}-test",
+                    "completeness": "full",
+                    "session_ref": f"ses_{key}",
+                    "cwd": cwd,
+                },
+                "conversation": [
+                    {"type": "text", "role": "user", "content": prompt, "ts": ts},
+                    {"type": "text", "role": "assistant", "content": f"done {prompt}", "ts": ts},
+                ],
+                "stats": cv.zero_stats(),
+                "created_at": ts,
+            })
+            sid = cv.snapshot_id(env)
+            p = vault / "snapshots" / f"{sid}.json"
+            p.write_text(json.dumps(env, ensure_ascii=False), encoding="utf-8")
+            cv.register_snapshot(conn, env, sid, p)
+            sids[key] = sid
+        conn.commit()
+        conn.close()
+
+        with (
+            mock.patch.object(cv, "HOME", fake_home),
+            mock.patch.object(cv, "CODEX_SESSIONS", fake_codex),
+            mock.patch.object(cv, "CLAUDE_PROJECTS", fake_claude),
+            mock.patch.object(cv, "ZCODE_DB", fake_zdb),
+            mock.patch.object(cv, "ZCODE_TASKS_DB", fake_ztdb),
+        ):
+            # 1) plan_batch_migration: claude 自动聚合 claude-code + claude-transcript, codex 标为同源跳过
+            plan_cl = cv.plan_batch_migration(vault, source="claude", target="codex")
+            self.assertEqual(plan_cl["source"], "claude")
+            self.assertEqual(plan_cl["counts"]["total"], 2)
+            self.assertEqual(plan_cl["counts"]["ready"], 2)
+            self.assertEqual({it["id"] for it in plan_cl["items"]}, {sids["cc1"], sids["ct1"]})
+            src_agents = {x["agent"] for x in plan_cl["sources"]}
+            self.assertEqual(src_agents, {"zcode", "claude", "codex", "dsh"})
+
+            plan_all = cv.plan_batch_migration(vault, source="all", target="codex")
+            by_id = {it["id"]: it for it in plan_all["items"]}
+            self.assertTrue(by_id[sids["cx1"]]["same_origin"])
+            self.assertEqual(by_id[sids["cx1"]]["status"], "skip_same_origin")
+
+            plan_proj = cv.plan_batch_migration(vault, source="all", target="codex", project="proj_alpha", query="dsh")
+            self.assertEqual([it["id"] for it in plan_proj["items"]], [sids["dh1"]])
+
+            # 2) dry-run outbox vs apply 写入 + migrations.jsonl 去重 + --no-skip-migrated 重跑
+            dry = cv.run_batch_migration(vault, source="claude", target="codex", apply=False)
+            self.assertFalse(dry["applied"])
+            self.assertEqual(dry["counts"]["migrated"], 2)
+            self.assertTrue(all(it["action"] == "outbox" and Path(it["dest"]).is_file() for it in dry["items"]))
+            self.assertFalse((vault / "migrations.jsonl").exists())
+
+            applied = cv.run_batch_migration(vault, source="claude", target="codex", apply=True)
+            self.assertTrue(applied["applied"])
+            self.assertEqual(applied["counts"]["migrated"], 2)
+            for it in applied["items"]:
+                self.assertEqual(it["action"], "migrated")
+                self.assertTrue(Path(it["dest"]).is_file())
+                self.assertTrue(str(it["dest"]).startswith(str(fake_codex)))
+
+            mig_lines = [json.loads(x) for x in (vault / "migrations.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
+            self.assertEqual(len(mig_lines), 2)
+            self.assertTrue(all(m.get("target") == "codex" for m in mig_lines))
+
+            dedup = cv.run_batch_migration(vault, source="claude", target="codex", skip_migrated=True, apply=False)
+            self.assertEqual(dedup["counts"]["migrated"], 0)
+            self.assertEqual(dedup["counts"]["skipped_migrated"], 2)
+
+            rerun = cv.run_batch_migration(vault, source="claude", target="codex", skip_migrated=False, apply=False)
+            self.assertEqual(rerun["counts"]["migrated"], 2)
+
+            # 3) markdown 目标强制禁止 apply 语义 + selected 指定子集混合同源与非同源
+            md_res = cv.run_batch_migration(vault, source="all", target="markdown", apply=True, limit=2)
+            self.assertFalse(md_res["applied"])
+            self.assertEqual(md_res["counts"]["migrated"], 2)
+            self.assertTrue(all(Path(it["dest"]).name.startswith("brief-") for it in md_res["items"]))
+
+            sel_res = cv.run_batch_migration(vault, source="all", target="codex", selected=[sids["z1"], sids["cx1"]], apply=False)
+            act_by_id = {it["id"]: it["action"] for it in sel_res["items"]}
+            self.assertEqual(act_by_id[sids["z1"]], "outbox")
+            self.assertEqual(act_by_id[sids["cx1"]], "skipped_same_origin")
+
+            # 4) 单条损坏容错: z_bad 损坏不影响 z1 完成
+            bad_p = vault / "snapshots" / f"{sids['z_bad']}.json"
+            bad_orig = bad_p.read_text(encoding="utf-8")
+            bad_p.write_text("{corrupted-json", encoding="utf-8")
+            try:
+                err_res = cv.run_batch_migration(vault, source="zcode", target="codex", apply=False)
+                self.assertEqual(err_res["counts"]["migrated"], 1)
+                self.assertEqual(err_res["counts"]["failed"], 1)
+                bad_row = next(it for it in err_res["items"] if it["id"] == sids["z_bad"])
+                self.assertEqual(bad_row["action"], "failed")
+                self.assertTrue(bad_row.get("error"))
+            finally:
+                bad_p.write_text(bad_orig, encoding="utf-8")
+
+            # 5) HTTP GET/POST /migrate/batch + 400 参数校验 + CLI cmd_import --agent 无 --project
+            srv, idx = cv.build_vault_server(vault, 0)
+            port = srv.server_address[1]
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            try:
+                def _get(path):
+                    cc = HTTPConnection("127.0.0.1", port, timeout=5)
+                    cc.request("GET", path)
+                    rr = cc.getresponse()
+                    txt = rr.read().decode("utf-8")
+                    cc.close()
+                    return rr.status, json.loads(txt)
+
+                def _post(path, body):
+                    cc = HTTPConnection("127.0.0.1", port, timeout=5)
+                    cc.request("POST", path, body=json.dumps(body).encode("utf-8"),
+                               headers={"Content-Type": "application/json"})
+                    rr = cc.getresponse()
+                    txt = rr.read().decode("utf-8")
+                    cc.close()
+                    return rr.status, json.loads(txt)
+
+                st_g, body_g = _get("/migrate/batch?source=claude&target=codex")
+                self.assertEqual(st_g, 200)
+                self.assertEqual(body_g["counts"]["skip_migrated"], 2)
+
+                st_gb, _ = _get("/migrate/batch?target=no_such_target")
+                self.assertEqual(st_gb, 400)
+
+                st_p, body_p = _post("/migrate/batch", {"source": "dsh", "target": "codex", "apply": False})
+                self.assertEqual(st_p, 200)
+                self.assertEqual(body_p["counts"]["migrated"], 1)
+
+                st_pb1, _ = _post("/migrate/batch", {"target": "no_such_target"})
+                self.assertEqual(st_pb1, 400)
+                st_pb2, _ = _post("/migrate/batch", {"selected": ["bad_sid"]})
+                self.assertEqual(st_pb2, 400)
+                st_pb3, _ = _post("/migrate/batch", {"selected": []})
+                self.assertEqual(st_pb3, 400)
+            finally:
+                srv.shutdown()
+                srv.server_close()
+                idx._close()
+
+            buf = io.StringIO()
+            cli_args = SimpleNamespace(
+                vault=str(vault),
+                snapshot_id=None,
+                project=None,
+                agent="claude",
+                target="markdown",
+                apply=False,
+                strip_thinking=False,
+                budget_tokens=None,
+                include_archived=False,
+                include_subagents=False,
+                no_skip_migrated=False,
+                limit=0,
+            )
+            with mock.patch("sys.stdout", buf):
+                cv.cmd_import(cli_args)
+            self.assertIn("整端批量迁移 [claude -> markdown]", buf.getvalue())
+            self.assertIn("成功 2", buf.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

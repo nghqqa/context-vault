@@ -658,6 +658,29 @@ def _get_agy_batch(h, ctx: _ServerCtx, q: dict):
     ))
 
 
+def _get_migrate_batch(h, ctx: _ServerCtx, q: dict):
+    try:
+        lim = _parse_int_arg(q.get("limit", 0) or 0, "limit", lo=0)
+    except ValueError:
+        return h._json({"error": "invalid limit: 需要非负整数"}, 400)
+    skip_raw = str(q.get("skip_migrated", "1")).strip().lower()
+    try:
+        res = _cv().plan_batch_migration(
+            ctx.vault,
+            source=q.get("source", "all") or "all",
+            target=q.get("target", "codex") or "codex",
+            project=q.get("project") or None,
+            query=q.get("q") or None,
+            include_archived=q.get("archived") in ("1", "true"),
+            include_subagents=q.get("subagents") in ("1", "true"),
+            skip_migrated=skip_raw not in ("0", "false", "no"),
+            limit=lim,
+        )
+    except (_cv().BadMigrateTarget, ValueError) as e:
+        return h._json({"error": str(e)}, 400)
+    h._json(res)
+
+
 def _get_messages(h, ctx: _ServerCtx, q: dict):
     qid = q.get("id", "")
     if not _sid_ok(qid):
@@ -712,6 +735,7 @@ GET_ROUTES = {
     "/projects": _get_projects,
     "/antigravity/sync": _get_agy_sync,
     "/antigravity/batch": _get_agy_batch,
+    "/migrate/batch": _get_migrate_batch,
     "/messages": _get_messages,
     "/snapshot": _get_snapshot,
 }
@@ -913,6 +937,51 @@ def _post_agy_batch(h, ctx: _ServerCtx, body: dict):
     h._json(res)
 
 
+def _post_migrate_batch(h, ctx: _ServerCtx, body: dict):
+    target = str(body.get("target") or "codex").strip()
+    raw_sel = body.get("selected")
+    selected = None
+    if raw_sel is not None:
+        if not isinstance(raw_sel, list):
+            return h._json({"error": "invalid selected: 需要快照 ID 数组"}, 400)
+        selected = [str(x or "").strip() for x in raw_sel if str(x or "").strip()]
+        bad = [s for s in selected if not _sid_ok(s)]
+        if bad:
+            return h._json({"error": f"invalid selected id: {bad[0]}"}, 400)
+    try:
+        lim = _parse_int_arg(body.get("limit") or 0, "limit", lo=0)
+        bt = _parse_int_arg(body.get("budget_tokens"), "budget_tokens", lo=1) if body.get("budget_tokens") not in (None, "") else None
+    except ValueError as e:
+        return h._json({"error": str(e)}, 400)
+    apply_flag = bool(body.get("apply")) and target.lower() != "markdown"
+    kwargs = dict(
+        source=str(body.get("source") or "all").strip() or "all",
+        target=target,
+        selected=selected,
+        project=str(body.get("project") or "").strip() or None,
+        query=str(body.get("query") or "").strip() or None,
+        include_archived=bool(body.get("archived")),
+        include_subagents=bool(body.get("subagents")),
+        skip_migrated=bool(body.get("skip_migrated", True)),
+        strip_thinking=bool(body.get("strip_thinking")),
+        budget_tokens=bt,
+        limit=lim,
+        apply=apply_flag,
+    )
+    try:
+        if apply_flag:
+            with ctx._write_lock:
+                res = _cv().run_batch_migration(ctx.vault, **kwargs)
+                ctx.cache.clear()
+        else:
+            res = _cv().run_batch_migration(ctx.vault, **kwargs)
+    except _cv().SnapshotNotFound as e:
+        return h._json({"error": str(e)}, 404)
+    except (_cv().BadMigrateTarget, ValueError) as e:
+        return h._json({"error": str(e)}, 400)
+    h._json(res)
+
+
 def _post_probe(h, ctx: _ServerCtx, body: dict):
     baseline_p = ctx.vault / "probe_baseline.json"
     baseline = json.loads(baseline_p.read_text(encoding="utf-8")) if baseline_p.exists() else {}
@@ -1099,6 +1168,7 @@ def _post_skills_rollback(h, ctx: _ServerCtx, body: dict):
 POST_ROUTES = {
     "/migrate": _post_migrate,
     "/migrate_project": _post_migrate_project,
+    "/migrate/batch": _post_migrate_batch,
     "/sync": _post_sync,
     "/memory/extract": _post_memory_extract,
     "/memory/dedup": _post_memory_dedup,

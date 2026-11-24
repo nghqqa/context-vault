@@ -365,7 +365,8 @@ def blocks_to_zcode(env: dict, strip_thinking: bool, session_id: str | None = No
 
 
 def do_import_zcode(vault: Path, env: dict, sid: str, apply: bool,
-                    session_id: str | None = None, db_path: Path | None = None) -> dict:
+                    session_id: str | None = None, db_path: Path | None = None,
+                    skip_backup: bool = False) -> dict:
     """写回 ZCode 主库 (实验性): 默认 dry-run 出行数预览; --apply 先备份再事务写入。
     会话 id 确定性派生 → 重导 = 同会话原位更新 (messages/parts 重写)。
     ZCode 运行中内存有缓存, 写入后需重启 ZCode 才能在会话列表看到。"""
@@ -383,10 +384,13 @@ def do_import_zcode(vault: Path, env: dict, sid: str, apply: bool,
     zdb = Path(dest)
     if not zdb.exists():
         raise _cv().BadMigrateTarget(f"ZCode 主库不存在: {zdb}")
-    backup_dir = vault / "backups"
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    backup = backup_dir / f"zcode-import-backup-{dt.datetime.now():%Y%m%d-%H%M%S}.sqlite"
-    shutil.copy2(zdb, backup)
+    backup_note = ""
+    if not skip_backup:
+        backup_dir = vault / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup = backup_dir / f"zcode-import-backup-{dt.datetime.now():%Y%m%d-%H%M%S}.sqlite"
+        shutil.copy2(zdb, backup)
+        backup_note = f"备份 {backup.name}; "
     conn = sqlite3.connect(zdb, timeout=15)
     try:
         conn.execute("PRAGMA busy_timeout=15000")
@@ -436,9 +440,9 @@ def do_import_zcode(vault: Path, env: dict, sid: str, apply: bool,
         conn.close()
         raise
     conn.close()
-    _record_migration(vault, zdb, sid, baseline=None)
+    _record_migration(vault, zdb, sid, baseline=None, target="zcode")
     return {"lines": len(sess["messages"]), "dropped": 0,
-            "dest": f"{dest} (备份 {backup.name}; 重启 ZCode 后生效)",
+            "dest": f"{dest} ({backup_note}重启 ZCode 后生效)",
             "new_sid": sess_id, "applied": True}
 
 
@@ -653,14 +657,18 @@ def blocks_to_dsh(env: dict, strip_thinking: bool = False, session_id: str | Non
     return cv_dsh.blocks_to_dsh(env, strip_thinking=strip_thinking, session_id=session_id)
 
 
-def _record_migration(vault: Path, dest: Path, sid: str, baseline=None):
+def _record_migration(vault: Path, dest: Path, sid: str, baseline=None, target: str | None = None):
+    rec = {"dest": _cv()._norm_path(dest), "source": sid, "baseline": baseline,
+           "at": _cv().now_iso()}
+    if target:
+        rec["target"] = target
     with (vault / "migrations.jsonl").open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"dest": _cv()._norm_path(dest), "source": sid, "baseline": baseline,
-                             "at": _cv().now_iso()}, ensure_ascii=False) + "\n")
+        fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
 def do_import(vault: Path, sid: str, target: str, apply: bool, strip_thinking=False,
-              session_id: str | None = None, budget_tokens: int | None = None) -> dict:
+              session_id: str | None = None, budget_tokens: int | None = None,
+              skip_backup: bool = False) -> dict:
     """迁移执行核心 (CLI 与控制台 HTTP 共用)。返回 {lines, dropped, dest, new_sid, applied}。
     session_id 缺省按源会话 (agent+session_ref) 确定性派生: 同一会话重复导出/演进后重导出
     在目标端同名覆盖 (原位更新), 不再产生并排副本。antigravity apply 同时登记
@@ -691,11 +699,11 @@ def do_import(vault: Path, sid: str, target: str, apply: bool, strip_thinking=Fa
             os.replace(tmp_db, target_db)
             dest_str = str(target_db)
             _cv()._antigravity_register_summaries(target_db, env, agy_sid)
-            _record_migration(vault, target_db, sid, baseline=None)
+            _record_migration(vault, target_db, sid, baseline=None, target="antigravity")
         return {"lines": res["lines"], "dropped": res["dropped"], "dest": dest_str,
                 "new_sid": agy_sid, "applied": apply}
     if target == "zcode":
-        return do_import_zcode(vault, env, sid, apply)
+        return do_import_zcode(vault, env, sid, apply, session_id=session_id, skip_backup=skip_backup)
     if target == "dsh":
         import cv_dsh
         header, events, dropped, dsh_sid, canonical_cwd = cv_dsh.blocks_to_dsh(
@@ -719,7 +727,7 @@ def do_import(vault: Path, sid: str, target: str, apply: bool, strip_thinking=Fa
         cv_dsh.write_dsh_session(dest, header, events, compression=comp)
         cv_dsh.invalidate_dsh_projcache(dsh_sid)
         ws_reg = cv_dsh.register_dsh_workspace(dsh_sid, canonical_cwd)
-        _record_migration(vault, dest, sid, baseline=None)
+        _record_migration(vault, dest, sid, baseline=None, target="dsh")
         return {"lines": 1 + len(events), "dropped": dropped, "dest": str(dest),
                 "new_sid": dsh_sid, "applied": True, "workspace_registered": ws_reg}
     if target not in ("markdown", "codex", "claude"):
@@ -765,10 +773,385 @@ def do_import(vault: Path, sid: str, target: str, apply: bool, strip_thinking=Fa
         base = ({k: s.get(k, 0) for k in ("tokens_in", "tokens_out", "cache_read", "cache_write",
                                           "total_tokens")}
                 if target == "codex" and s.get("usage_events") else None)
-        _record_migration(vault, dest, sid, baseline=base)
+        _record_migration(vault, dest, sid, baseline=base, target=target)
     return {"lines": len(lines), "dropped": dropped, "dest": str(dest),
             "new_sid": new_sid if target == "codex" else session_id if target == "claude" else None,
             "applied": apply}
+
+
+_HARNESS_ORDER = ("zcode", "claude", "codex", "antigravity", "dsh")
+
+
+def _canonical_harness(agent: str | None) -> str:
+    a = (agent or "").strip().lower()
+    if a in ("claude", "claude-code", "claude-transcript"):
+        return "claude"
+    return a or "unknown"
+
+
+def _is_same_harness(src_agent: str | None, target: str) -> bool:
+    tgt = str(target or "").strip().lower()
+    return bool(tgt) and tgt != "markdown" and _canonical_harness(src_agent) == tgt
+
+
+def _infer_migration_target(entry: dict) -> str:
+    t = str(entry.get("target") or "").strip().lower()
+    if t:
+        return t
+    norm = str(entry.get("dest") or "").replace("\\", "/").lower()
+    if "/.codex/" in norm or "/rollout-" in norm:
+        return "codex"
+    if "/.claude/" in norm:
+        return "claude"
+    if "/.gemini/antigravity/" in norm:
+        return "antigravity"
+    if "/.dsh/" in norm:
+        return "dsh"
+    if "/.zcode/" in norm or norm.endswith("/db.sqlite"):
+        return "zcode"
+    return ""
+
+
+def _load_migrated_targets(vault: Path) -> set[tuple[str, str]]:
+    """读取 vault/migrations.jsonl -> {(source_sid, target)}，非 zcode 目标仅当目标文件仍存在时计为已迁移。"""
+    p = vault / "migrations.jsonl"
+    if not p.is_file():
+        return set()
+    out: set[tuple[str, str]] = set()
+    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(e, dict):
+            continue
+        sid = str(e.get("source") or "").strip()
+        tgt = _infer_migration_target(e)
+        dest = str(e.get("dest") or "").strip()
+        if not sid or not tgt:
+            continue
+        if tgt == "zcode" or (dest and Path(dest).is_file()):
+            out.add((sid, tgt))
+    return out
+
+
+def _validate_mig_target(target: str) -> str:
+    tgt = str(target or "").strip().lower()
+    if tgt not in ("markdown", "codex", "claude", "antigravity", "zcode", "dsh") \
+            and tgt not in _cv().SMIGRATE_TARGETS:
+        raise _cv().BadMigrateTarget(
+            f"未知迁移目标: {target!r} (可选 {'|'.join(_cv().SMIGRATE_TARGETS)}|markdown|zcode|dsh)"
+        )
+    return tgt
+
+
+def plan_batch_migration(
+    vault: Path,
+    *,
+    source: str = "all",
+    target: str = "codex",
+    project: str | None = None,
+    query: str | None = None,
+    include_archived: bool = False,
+    include_subagents: bool = False,
+    skip_migrated: bool = True,
+    limit: int = 0,
+    ui_limit: int = 300,
+) -> dict:
+    """盘点并预演整端 / 批量跨 Harness 会话迁移计划 (纯只读)。"""
+    tgt = _validate_mig_target(target)
+    c = _cv()
+    all_top = c.resolve_top_conversations(
+        vault,
+        include_subagents=bool(include_subagents),
+        include_archived=bool(include_archived),
+    )
+    src_counts: dict[str, int] = {}
+    for it in all_top:
+        ca = _canonical_harness(it.get("agent"))
+        src_counts[ca] = src_counts.get(ca, 0) + 1
+    sources = [
+        {"agent": ag, "count": cnt}
+        for ag, cnt in sorted(
+            src_counts.items(),
+            key=lambda kv: (_HARNESS_ORDER.index(kv[0]) if kv[0] in _HARNESS_ORDER else 99, kv[0]),
+        )
+        if cnt > 0
+    ]
+
+    src_raw = str(source or "all").strip().lower()
+    if not src_raw or src_raw == "all":
+        want_sources = None
+        src_norm = "all"
+    else:
+        want_sources = {_canonical_harness(x) for x in src_raw.split(",") if x.strip()}
+        src_norm = ",".join(sorted(want_sources)) if len(want_sources) > 1 else next(iter(want_sources))
+
+    src_items = [
+        it for it in all_top
+        if want_sources is None or _canonical_harness(it.get("agent")) in want_sources
+    ]
+
+    proj_groups: dict[str, dict] = {}
+    for it in src_items:
+        cwd = it.get("cwd") or ""
+        if c._is_ungrouped_cwd(cwd):
+            key = "__ungrouped__"
+            name = "未关联工作区"
+        else:
+            key = cwd
+            norm_p = cwd.replace("\\", "/").rstrip("/")
+            name = norm_p.rsplit("/", 1)[-1] or cwd
+        grp = proj_groups.get(key)
+        if grp is None:
+            proj_groups[key] = {"cwd": key, "name": name, "count": 1}
+        else:
+            grp["count"] += 1
+    projects = sorted(proj_groups.values(), key=lambda g: (-g["count"], g["name"].lower()))[:200]
+
+    proj_filter = str(project or "").strip()
+    if proj_filter:
+        if proj_filter == "__ungrouped__":
+            matched = [it for it in src_items if c._is_ungrouped_cwd(it.get("cwd") or "")]
+        else:
+            matched = [it for it in src_items if c._norm_project_match(it.get("cwd") or "", proj_filter)]
+            matched = c._prefer_exact_project(matched, proj_filter)
+    else:
+        matched = list(src_items)
+
+    q_str = str(query or "").strip().lower()
+    if q_str:
+        matched = [
+            it for it in matched
+            if q_str in (it.get("id") or "").lower()
+            or q_str in (it.get("title") or "").lower()
+            or q_str in (it.get("cwd") or "").lower()
+            or q_str in (it.get("agent") or "").lower()
+        ]
+
+    if limit and limit > 0:
+        matched = matched[:limit]
+
+    migrated_set = _load_migrated_targets(vault)
+    annotated: list[dict] = []
+    c_ready = c_mig = c_same = 0
+    for it in matched:
+        ca = _canonical_harness(it.get("agent"))
+        same_origin = _is_same_harness(ca, tgt)
+        migrated = (tgt != "markdown") and ((it["id"], tgt) in migrated_set)
+        if same_origin:
+            st = "skip_same_origin"
+            c_same += 1
+        elif skip_migrated and migrated:
+            st = "skip_migrated"
+            c_mig += 1
+        else:
+            st = "ready"
+            c_ready += 1
+        annotated.append({
+            "id": it["id"],
+            "agent": it.get("agent") or "",
+            "canonical_agent": ca,
+            "session_ref": it.get("session_ref") or "",
+            "cwd": it.get("cwd") or "",
+            "title": it.get("title") or "",
+            "blocks_total": int(it.get("blocks_total") or 0),
+            "created_at": it.get("created_at") or "",
+            "same_origin": same_origin,
+            "migrated": migrated,
+            "status": st,
+        })
+
+    shown = annotated[:ui_limit] if ui_limit and ui_limit > 0 else annotated
+    return {
+        "source": src_norm,
+        "target": tgt,
+        "total_all": len(all_top),
+        "total": len(annotated),
+        "sources": sources,
+        "projects": projects,
+        "counts": {
+            "total": len(annotated),
+            "ready": c_ready,
+            "skip_migrated": c_mig,
+            "skip_same_origin": c_same,
+            "projects": len(projects),
+        },
+        "items": shown,
+        "truncated": len(annotated) > len(shown),
+    }
+
+
+def run_batch_migration(
+    vault: Path,
+    *,
+    source: str = "all",
+    target: str = "codex",
+    selected: list[str] | None = None,
+    project: str | None = None,
+    query: str | None = None,
+    include_archived: bool = False,
+    include_subagents: bool = False,
+    skip_migrated: bool = True,
+    strip_thinking: bool = False,
+    budget_tokens: int | None = None,
+    limit: int = 0,
+    apply: bool = False,
+) -> dict:
+    """执行整端 / 多选会话批量迁移 (默认 dry-run 至 outbox; apply=True 写入真实目录并单条容错)。"""
+    tgt = _validate_mig_target(target)
+    eff_apply = bool(apply) and tgt != "markdown"
+    t0 = time.time()
+    plan = plan_batch_migration(
+        vault,
+        source=source,
+        target=tgt,
+        project=project,
+        query=query,
+        include_archived=include_archived,
+        include_subagents=include_subagents,
+        skip_migrated=skip_migrated,
+        limit=limit,
+        ui_limit=0,
+    )
+    c = _cv()
+    if selected is not None:
+        if not isinstance(selected, list):
+            raise ValueError("selected 必须为快照 ID 数组")
+        want_ids: list[str] = []
+        seen_ids: set[str] = set()
+        for raw in selected:
+            sid = str(raw or "").strip()
+            if sid and sid not in seen_ids:
+                seen_ids.add(sid)
+                want_ids.append(sid)
+        if not want_ids:
+            raise ValueError("请至少选择一条要迁移的会话")
+        by_plan = {it["id"]: it for it in plan["items"]}
+        need_fallback = [sid for sid in want_ids if sid not in by_plan]
+        by_all = {}
+        if need_fallback:
+            all_ever = c.resolve_top_conversations(vault, include_subagents=True, include_archived=True)
+            by_all = {it["id"]: it for it in all_ever}
+        migrated_set = _load_migrated_targets(vault)
+        candidates: list[dict] = []
+        for sid in want_ids:
+            it = by_plan.get(sid)
+            if it is not None:
+                candidates.append(it)
+                continue
+            raw_it = by_all.get(sid)
+            if raw_it is None:
+                env = c.load_snapshot(vault, sid)
+                cap = env.get("capture") or {}
+                raw_it = {
+                    "id": sid,
+                    "agent": cap.get("agent") or "",
+                    "cwd": cap.get("cwd") or "",
+                    "title": cap.get("originator") or sid,
+                    "created_at": env.get("created_at") or "",
+                }
+            ca = _canonical_harness(raw_it.get("agent"))
+            same_origin = _is_same_harness(ca, tgt)
+            migrated = (tgt != "markdown") and ((sid, tgt) in migrated_set)
+            st = "skip_same_origin" if same_origin else ("skip_migrated" if (skip_migrated and migrated) else "ready")
+            candidates.append({
+                "id": sid,
+                "agent": raw_it.get("agent") or "",
+                "canonical_agent": ca,
+                "cwd": raw_it.get("cwd") or "",
+                "title": raw_it.get("title") or "",
+                "same_origin": same_origin,
+                "migrated": migrated,
+                "status": st,
+            })
+    else:
+        candidates = list(plan["items"])
+
+    zcode_backup_name = None
+    has_ready = any(it["status"] == "ready" for it in candidates)
+    if tgt == "zcode" and eff_apply and has_ready:
+        zdb = Path(c.ZCODE_DB)
+        if not zdb.exists():
+            raise c.BadMigrateTarget(f"ZCode 主库不存在: {zdb}")
+        bdir = vault / "backups"
+        bdir.mkdir(parents=True, exist_ok=True)
+        bp = bdir / f"zcode-import-backup-{dt.datetime.now():%Y%m%d-%H%M%S}.sqlite"
+        shutil.copy2(zdb, bp)
+        zcode_backup_name = bp.name
+
+    results: list[dict] = []
+    n_mig = n_skip_mig = n_skip_same = n_fail = total_lines = 0
+    first_dest_dir = ""
+    for it in candidates:
+        sid = it["id"]
+        st = it["status"]
+        base_row = {
+            "id": sid,
+            "agent": it.get("agent") or "",
+            "title": it.get("title") or "",
+            "cwd": it.get("cwd") or "",
+        }
+        if st == "skip_same_origin":
+            n_skip_same += 1
+            results.append({**base_row, "action": "skipped_same_origin", "reason": "源与目标同 Harness"})
+            continue
+        if st == "skip_migrated":
+            n_skip_mig += 1
+            results.append({**base_row, "action": "skipped_migrated", "reason": "已在 migrations.jsonl 登记"})
+            continue
+        try:
+            r = c.do_import(
+                vault, sid, tgt, eff_apply,
+                strip_thinking=bool(strip_thinking),
+                budget_tokens=budget_tokens,
+                skip_backup=(tgt == "zcode" and eff_apply),
+            )
+        except c.BadMigrateTarget:
+            raise
+        except Exception as e:
+            n_fail += 1
+            results.append({**base_row, "action": "failed", "error": str(e)[:200]})
+            continue
+        n_mig += 1
+        total_lines += int(r.get("lines") or 0)
+        dest_val = str(r.get("dest") or "")
+        if not first_dest_dir and dest_val:
+            if tgt == "zcode" and eff_apply:
+                first_dest_dir = str(c.ZCODE_DB)
+            else:
+                first_dest_dir = str(Path(dest_val).parent)
+        results.append({
+            **base_row,
+            "action": "migrated" if r.get("applied") else "outbox",
+            "dest": dest_val,
+            "new_sid": r.get("new_sid"),
+            "lines": int(r.get("lines") or 0),
+            "dropped": int(r.get("dropped") or 0),
+        })
+
+    if not first_dest_dir:
+        first_dest_dir = str(vault / "outbox")
+    return {
+        "applied": eff_apply,
+        "source": plan["source"],
+        "target": tgt,
+        "dest_dir": first_dest_dir,
+        "zcode_backup": zcode_backup_name,
+        "counts": {
+            "matched": len(candidates),
+            "migrated": n_mig,
+            "skipped_migrated": n_skip_mig,
+            "skipped_same_origin": n_skip_same,
+            "failed": n_fail,
+            "total_lines": total_lines,
+        },
+        "elapsed": round(time.time() - t0, 2),
+        "total_results": len(results),
+        "items": results[:200],
+    }
 
 
 def _print_import_result(r: dict, target: str):
@@ -829,7 +1212,28 @@ def cmd_import(args):
             _print_import_result(r, args.target)
         print(f"\n共导入 {len(items)} 条主对话 → {args.target}")
         return
-    raise SystemExit("请指定 snapshot_id 或 --project <项目名/路径>")
+    if req_agent:
+        res = run_batch_migration(
+            vault,
+            source=req_agent,
+            target=args.target,
+            include_archived=getattr(args, "include_archived", False),
+            include_subagents=getattr(args, "include_subagents", False),
+            skip_migrated=not bool(getattr(args, "no_skip_migrated", False)),
+            strip_thinking=getattr(args, "strip_thinking", False),
+            budget_tokens=getattr(args, "budget_tokens", None),
+            limit=getattr(args, "limit", 0),
+            apply=bool(args.apply),
+        )
+        c = res["counts"]
+        mode = "写入目标目录" if res["applied"] else "dry-run (vault/outbox/)"
+        print(f"整端批量迁移 [{res['source']} -> {res['target']}] ({mode}): "
+              f"成功 {c['migrated']} · 跳过已迁移 {c['skipped_migrated']} · "
+              f"同源跳过 {c['skipped_same_origin']} · 失败 {c['failed']} · 总行数 {c['total_lines']}")
+        if res.get("dest_dir"):
+            print(f"  输出位置: {res['dest_dir']}")
+        return
+    raise SystemExit("请指定 snapshot_id、--project <项目名/路径> 或 --agent <来源>")
 
 
 def cmd_migrate(args):

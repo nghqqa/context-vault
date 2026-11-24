@@ -156,6 +156,14 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
       <span class="hint" id="mig-mode-hint">跨工具搬运历史对话（支持保真度预演与 Markdown 预算简报）</span>
     </div>
     <div id="mig-session-pane">
+    <div class="mig-scopebar">
+      <div class="seg" role="tablist" aria-label="会话迁移粒度">
+        <button type="button" role="tab" class="btn on" id="mig-scope-single" aria-selected="true" onclick="setMigScope('single')">单条精调</button>
+        <button type="button" role="tab" class="btn" id="mig-scope-batch" aria-selected="false" onclick="setMigScope('batch')">整端批量迁移</button>
+      </div>
+      <span class="hint" id="mig-scope-hint">单条迁移可预览活上下文、逐项失真与精确恢复命令</span>
+    </div>
+    <div id="mig-single-shell">
     <div class="mig-shell">
       <div class="mig-col">
         <div class="mig-step">
@@ -226,6 +234,94 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
             </div>
             <div id="mig-result" style="margin-top:12px" aria-live="polite"></div>
             <div class="section-note">写入真实目录后，对应 agent 重启或使用恢复命令即可续写；默认写入 <code>vault/outbox/</code> 零副作用。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    </div>
+
+    <div id="mig-batch-shell" class="sk-shell" hidden>
+      <div class="mig-col">
+        <div class="mig-step">
+          <div class="card-h">
+            <span class="ch-l"><span class="stepno">1</span>选择源 Harness 与待迁会话</span>
+            <span class="sub" id="mb-sel-stat">加载中…</span>
+          </div>
+          <div class="card-b">
+            <div class="agent-pills" id="mb-src-bar" role="group" aria-label="会话来源 Harness"></div>
+            <div class="mb-filters">
+              <div class="ctl-search">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+                <input type="search" id="mb-q" placeholder="筛选会话标题、项目路径或 ID…" aria-label="筛选待迁会话" oninput="onMbFilterInput()">
+              </div>
+              <select id="mb-proj" class="mb-proj-sel" aria-label="按项目筛选" onchange="loadMigBatch()"><option value="">全部项目</option></select>
+            </div>
+            <div class="mb-filters" style="margin-top:6px">
+              <label class="sk-chk-inline" title="自动跳过已经在 vault/migrations.jsonl 登记迁移且目标文件仍存在的会话">
+                <input type="checkbox" id="mb-skip-mig" checked onchange="loadMigBatch()">跳过已迁移
+              </label>
+              <label class="sk-chk-inline" title="默认跳过 ZCode 已归档/已删会话（不含子代理）">
+                <input type="checkbox" id="mb-inc-arch" onchange="loadMigBatch()">包含已归档
+              </label>
+            </div>
+            <div class="sk-bulk-bar">
+              <button type="button" class="btn sm" onclick="mbSelectBatch('ready')">全选整端待迁</button>
+              <button type="button" class="btn sm" onclick="mbSelectBatch('visible')">仅选当前列表</button>
+              <button type="button" class="btn sm" onclick="mbSelectBatch('none')">清空选择</button>
+            </div>
+            <div class="hint mb-trunc-note" id="mb-trunc-note" hidden></div>
+            <div class="sk-list-wrap">
+              <div class="sk-list" id="mb-list" aria-live="polite">
+                <div class="skel" style="width:65%;margin:12px"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="mig-col">
+        <div class="mig-step">
+          <div class="card-h"><span class="ch-l"><span class="stepno">2</span>目标格式与选项</span></div>
+          <div class="card-b">
+            <div class="tgt-cards" id="mb-tgt-cards" role="radiogroup" aria-label="批量迁移目标">
+              <label class="tgt-card on"><input type="radio" name="mb-tgt" value="codex" checked onchange="mbSetTarget('codex')">
+                <span><span class="tt">Codex</span><br><span class="td">rollout 文件 · codex resume</span></span></label>
+              <label class="tgt-card"><input type="radio" name="mb-tgt" value="claude" onchange="mbSetTarget('claude')">
+                <span><span class="tt">Claude Code</span><br><span class="td">projects jsonl · --resume</span></span></label>
+              <label class="tgt-card"><input type="radio" name="mb-tgt" value="antigravity" onchange="mbSetTarget('antigravity')">
+                <span><span class="tt">Antigravity</span><br><span class="td">原生 .db（重启 app 生效）</span></span></label>
+              <label class="tgt-card"><input type="radio" name="mb-tgt" value="zcode" onchange="mbSetTarget('zcode')">
+                <span><span class="tt">ZCode 写回</span><br><span class="td">实验性 · 整批前备份 1 次</span></span></label>
+              <label class="tgt-card"><input type="radio" name="mb-tgt" value="dsh" onchange="mbSetTarget('dsh')">
+                <span><span class="tt">DeepSeek Harness</span><br><span class="td">V4 会话 · ~/.dsh/sessions</span></span></label>
+              <label class="tgt-card"><input type="radio" name="mb-tgt" value="markdown" onchange="mbSetTarget('markdown')">
+                <span><span class="tt">Markdown 交接简报</span><br><span class="td">批量输出结构化简报至 outbox</span></span></label>
+            </div>
+            <div class="hint" id="mb-md-note" style="display:none;margin-top:8px">
+              Markdown 目标始终批量输出至 vault/outbox/brief-*.md，不写入任何会话目录。
+            </div>
+            <div class="mig-budget-row" id="mb-budget-row" style="display:none">
+              <label for="mb-budget">单条简报预算</label>
+              <select id="mb-budget" aria-label="批量 Markdown 简报预算">
+                <option value="4000" selected>4,000 tokens（推荐 · 五槽位压缩）</option>
+                <option value="2000">2,000 tokens（紧凑速览）</option>
+                <option value="8000">8,000 tokens（详尽交接）</option>
+                <option value="">不限预算（单条 ≤48KB）</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="mig-step">
+          <div class="card-h"><span class="ch-l"><span class="stepno">3</span>预演摘要与批量执行</span></div>
+          <div class="card-b">
+            <div class="sk-budget" id="mb-summary">正在统计源端与可迁移主对话…</div>
+            <div class="exec-bar" style="margin-top:12px">
+              <button type="button" class="btn primary" id="mb-outbox" onclick="mbRun(false)">批量生成到 outbox（安全）</button>
+              <button type="button" class="btn danger" id="mb-apply" onclick="mbRun(true)">批量写入目标会话目录</button>
+            </div>
+            <div id="mb-result" style="margin-top:12px" aria-live="polite"></div>
+            <div class="section-note">单条失败不会中断整批；相同会话重复迁移采用确定性 ID 原位覆盖并登记 <code>migrations.jsonl</code>。</div>
           </div>
         </div>
       </div>

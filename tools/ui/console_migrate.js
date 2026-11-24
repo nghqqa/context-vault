@@ -241,3 +241,284 @@ function renderMigResult(r,ctx){
     '</code><br><button class="btn sm" style="margin-top:8px" data-v="'+esc(cmd)+'" onclick="copyData(this,\'已复制命令\')">复制命令</button></div></div>';
 }
 
+/* ================= 整端全量 / 批量会话迁移 ================= */
+let migScope="single",mbSource="all",mbTarget="codex",mbData=null,mbSelected=new Set(),mbSelectAllMatched=true;
+const mbSeq=seqGuard();
+let mbFilterTimer=null;
+const MB_NAMES={all:"全部源",zcode:"ZCode",claude:"Claude Code",codex:"Codex",antigravity:"Antigravity",dsh:"DeepSeek Harness"};
+const MB_TGT_ORDER=["codex","claude","antigravity","zcode","dsh","markdown"];
+
+function setMigScope(scope){
+  migScope=(scope==="batch")?"batch":"single";
+  const isB=(migScope==="batch");
+  const ss=$("#mig-single-shell"),bs=$("#mig-batch-shell");
+  if(ss)ss.hidden=isB;
+  if(bs)bs.hidden=!isB;
+  const b1=$("#mig-scope-single"),b2=$("#mig-scope-batch");
+  if(b1){b1.classList.toggle("on",!isB);b1.setAttribute("aria-selected",!isB?"true":"false")}
+  if(b2){b2.classList.toggle("on",isB);b2.setAttribute("aria-selected",isB?"true":"false")}
+  const sh=$("#mig-scope-hint");
+  if(sh)sh.textContent=isB
+    ?"按整个 Harness 批量盘点并迁出主对话（支持按项目/已迁移/同源自动去重，一键落 outbox 或写入真实目录）"
+    :"单条迁移可预览活上下文、逐项失真与精确恢复命令";
+  if(isB&&!mbData)loadMigBatch();
+}
+function onMbFilterInput(){
+  clearTimeout(mbFilterTimer);
+  mbFilterTimer=setTimeout(()=>loadMigBatch({soft:true}),220);
+}
+function _syncMbTargetUi(){
+  $$("#mb-tgt-cards .tgt-card").forEach(c=>{
+    const inp=c.querySelector("input");
+    const v=inp?inp.value:"";
+    const on=(v===mbTarget);
+    c.classList.toggle("on",on);
+    if(inp)inp.checked=on;
+    const oldSame=c.querySelector(".mb-same-pill");
+    if(oldSame)oldSame.remove();
+    if(mbSource&&mbSource!=="all"&&v===mbSource){
+      const tt=c.querySelector(".tt");
+      if(tt)tt.insertAdjacentHTML("beforeend",' <span class="pill muted mb-same-pill">同源</span>');
+    }
+  });
+  const isMd=(mbTarget==="markdown");
+  const note=$("#mb-md-note");if(note)note.style.display=isMd?"block":"none";
+  const br=$("#mb-budget-row");if(br)br.style.display=isMd?"flex":"none";
+  const ob=$("#mb-outbox");if(ob)ob.textContent=isMd?"导出批量交接简报（始终 outbox）":"批量生成到 outbox（安全）";
+  const ap=$("#mb-apply");if(ap)ap.style.display=isMd?"none":"inline-flex";
+}
+function mbSetSource(ag){
+  mbSource=ag||"all";
+  mbSelectAllMatched=true;
+  const ps=$("#mb-proj");if(ps)ps.value="";
+  if(mbSource!=="all"&&mbTarget===mbSource){
+    const alt=MB_TGT_ORDER.find(t=>t!=="markdown"&&t!==mbSource);
+    if(alt)mbTarget=alt;
+  }
+  const rs=$("#mb-result");if(rs)rs.innerHTML="";
+  _syncMbTargetUi();
+  loadMigBatch();
+}
+function mbSetTarget(t){
+  mbTarget=t||"codex";
+  const rs=$("#mb-result");if(rs)rs.innerHTML="";
+  _syncMbTargetUi();
+  loadMigBatch({soft:true});
+}
+function mbSelectBatch(mode){
+  const items=(mbData&&mbData.items)||[];
+  if(mode==="none"){
+    mbSelectAllMatched=false;
+    mbSelected.clear();
+  }else if(mode==="visible"){
+    mbSelectAllMatched=false;
+    mbSelected=new Set(items.filter(it=>!it.same_origin).map(it=>it.id));
+  }else{
+    mbSelectAllMatched=true;
+    mbSelected=new Set(items.filter(it=>it.status==="ready").map(it=>it.id));
+  }
+  mbRenderList();
+  mbUpdateSummary();
+}
+function mbToggleItem(sid,checked){
+  if(mbSelectAllMatched&&mbData){
+    mbSelected=new Set((mbData.items||[]).filter(it=>it.status==="ready").map(it=>it.id));
+    mbSelectAllMatched=false;
+  }
+  if(checked)mbSelected.add(sid);
+  else mbSelected.delete(sid);
+  mbUpdateSummary();
+}
+function mbRenderSources(){
+  const bar=$("#mb-src-bar");if(!bar)return;
+  const srcs=(mbData&&mbData.sources)||[];
+  const totAll=(mbData&&mbData.total_all)||0;
+  const pills=[{agent:"all",count:totAll},...srcs];
+  bar.innerHTML=pills.map(s=>{
+    const on=(s.agent===mbSource);
+    return '<button type="button" class="pill-btn'+(on?' on':'')+'" onclick="mbSetSource(\''+esc(s.agent)+'\')">'+
+      esc(MB_NAMES[s.agent]||s.agent)+' <span class="mono" style="opacity:.78">'+num(s.count||0)+'</span></button>';
+  }).join("");
+}
+function mbRenderProjects(){
+  const sel=$("#mb-proj");if(!sel)return;
+  const cur=sel.value||"";
+  const projs=(mbData&&mbData.projects)||[];
+  sel.innerHTML='<option value="">全部项目 ('+num(projs.length)+')</option>'+projs.map(p=>
+    '<option value="'+esc(p.cwd)+'">'+esc(p.name)+' ('+num(p.count)+')</option>'
+  ).join("");
+  if(cur&&projs.some(p=>p.cwd===cur))sel.value=cur;
+}
+function mbRenderList(){
+  const el=$("#mb-list");if(!el)return;
+  const items=(mbData&&mbData.items)||[];
+  const note=$("#mb-trunc-note");
+  const c=(mbData&&mbData.counts)||{};
+  if(note){
+    if(mbData&&mbData.truncated){
+      note.hidden=false;
+      note.textContent="当前仅预览前 "+num(items.length)+" 条（共筛选命中 "+num(mbData.total||0)+
+        " 条）；保持「全选整端待迁」将一次处理全部 "+num(c.ready||0)+" 条待迁移会话。";
+    }else{
+      note.hidden=true;
+    }
+  }
+  if(!items.length){
+    el.innerHTML='<div class="empty"><span>当前筛选条件下没有可迁移的主对话（请切换源 Harness 或勾选「包含已归档」）。</span></div>';
+    return;
+  }
+  el.innerHTML=items.map(it=>{
+    const dis=(it.status==="skip_same_origin"||(it.status==="skip_migrated"&&$("#mb-skip-mig")&&$("#mb-skip-mig").checked));
+    const chk=(!dis&&mbSelected.has(it.id));
+    let pill='<span class="pill ok">待迁移</span>';
+    if(it.status==="skip_same_origin")pill='<span class="pill muted">同源跳过</span>';
+    else if(it.status==="skip_migrated")pill='<span class="pill warn">已迁入跳过</span>';
+    const cwdShort=it.cwd?truncPath(it.cwd,26):"未关联工作区";
+    return '<label class="sk-row">'+
+      '<input type="checkbox"'+(chk?' checked':'')+(dis?' disabled':'')+' onchange="mbToggleItem(\''+esc(it.id)+'\',this.checked)">'+
+      '<div class="sk-row-b"><div class="sk-row-top">'+
+      '<span class="sk-slug">'+esc((it.title||it.id).slice(0,56))+'</span>'+pill+
+      '<button type="button" class="btn sm sk-inspect-btn" onclick="event.preventDefault();event.stopPropagation();snapDetail(\''+esc(it.id)+'\',\''+esc(it.created_at||"")+'\')">详情</button>'+
+      '<span class="sk-tok">'+num(it.blocks_total||0)+' 块</span></div>'+
+      '<div class="mb-row-meta"><span class="chip">'+esc(it.agent||it.canonical_agent||"?")+'</span>'+
+      '<span class="mb-row-cwd" title="'+esc(it.cwd||"")+'">'+esc(cwdShort)+'</span>'+
+      '<span class="mono">'+esc(frel(it.created_at))+'</span></div></div></label>';
+  }).join("");
+}
+function mbPlannedCount(){
+  if(!mbData)return 0;
+  if(mbSelectAllMatched)return Number((mbData.counts&&mbData.counts.ready)||0);
+  return mbSelected.size;
+}
+function mbUpdateSummary(){
+  const n=mbPlannedCount();
+  const c=(mbData&&mbData.counts)||{};
+  const stEl=$("#mb-sel-stat");
+  if(stEl){
+    stEl.textContent=mbSelectAllMatched
+      ?("整端待迁 "+num(n)+" / "+num(c.total||0)+" 条")
+      :("已手动勾选 "+num(n)+" 条");
+  }
+  const sum=$("#mb-summary");
+  if(sum&&mbData){
+    const srcLbl=MB_NAMES[mbSource]||mbSource;
+    const tgtLbl=(mbTarget==="markdown")?"Markdown 交接简报":agyTargetLabel(mbTarget);
+    sum.innerHTML=
+      '<div>源范围：<b>'+esc(srcLbl)+'</b> · 命中主对话 <b>'+num(c.total||0)+'</b> 条（涉及 '+num(c.projects||0)+' 个项目）</div>'+
+      '<div>目标：<b>'+esc(tgtLbl)+'</b> · 计划处理 <b style="color:var(--acc-strong)">'+num(n)+'</b> 条'+
+      (c.skip_migrated?' · 自动跳过已迁移 '+num(c.skip_migrated)+' 条':'')+
+      (c.skip_same_origin?' · 同源跳过 '+num(c.skip_same_origin)+' 条':'')+
+      (mbTarget==="zcode"?' · ZCode 写入前仅备份 1 次主库':'')+'</div>';
+  }
+  const ob=$("#mb-outbox"),ap=$("#mb-apply");
+  if(ob)ob.disabled=(n===0);
+  if(ap)ap.disabled=(n===0);
+}
+async function loadMigBatch(opts){
+  const o=opts||{};
+  const listEl=$("#mb-list");
+  if(listEl){
+    if(o.soft&&mbData)listEl.style.opacity="0.65";
+    else listEl.innerHTML='<div style="padding:12px"><div class="skel" style="width:60%"></div><div class="skel" style="width:78%"></div></div>';
+  }
+  const q=(($("#mb-q")&&$("#mb-q").value)||"").trim();
+  const proj=(($("#mb-proj")&&$("#mb-proj").value)||"").trim();
+  const skipMig=!($("#mb-skip-mig")&&$("#mb-skip-mig").checked===false);
+  const incArch=!!($("#mb-inc-arch")&&$("#mb-inc-arch").checked);
+  const qs=[
+    "source="+encodeURIComponent(mbSource||"all"),
+    "target="+encodeURIComponent(mbTarget||"codex"),
+    "skip_migrated="+(skipMig?1:0),
+    "archived="+(incArch?1:0),
+  ];
+  if(q)qs.push("q="+encodeURIComponent(q));
+  if(proj)qs.push("project="+encodeURIComponent(proj));
+  try{
+    const d=await mbSeq(()=>api("/migrate/batch?"+qs.join("&")));
+    if(listEl)listEl.style.opacity="";
+    mbData=d;
+    const validIds=new Set((d.items||[]).filter(it=>!it.same_origin).map(it=>it.id));
+    if(mbSelectAllMatched){
+      mbSelected=new Set((d.items||[]).filter(it=>it.status==="ready").map(it=>it.id));
+    }else{
+      mbSelected=new Set([...mbSelected].filter(id=>validIds.has(id)));
+    }
+    mbRenderSources();
+    mbRenderProjects();
+    _syncMbTargetUi();
+    mbRenderList();
+    mbUpdateSummary();
+  }catch(e){
+    if(listEl)listEl.style.opacity="";
+    if(e&&e.stale)return;
+    if(listEl)listEl.innerHTML=errEmpty("批量迁移列表加载失败："+e.message,"loadMigBatch()");
+  }
+}
+async function mbRun(apply){
+  const effApply=!!apply&&mbTarget!=="markdown";
+  const count=mbPlannedCount();
+  if(!count)return toast("当前没有可迁移的会话（请切换源/取消跳过已迁移或勾选会话）",1);
+  if(effApply){
+    const srcLbl=MB_NAMES[mbSource]||mbSource;
+    const msg="源 Harness: "+srcLbl+"\n目标: "+agyTargetLabel(mbTarget)+"\n预计迁移: "+num(count)+" 条主对话\n\n"+
+      "单条异常不会中断整批，已迁移会话会自动登记 migrations.jsonl。";
+    if(!await askConfirm(msg,"确认整端批量写入真实会话目录","确认批量迁移"))return;
+  }
+  const btns=[$("#mb-outbox"),$("#mb-apply")];
+  btns.forEach(b=>b&&(b.disabled=true));
+  const resEl=$("#mb-result");
+  if(resEl)resEl.innerHTML='<div class="skel" style="width:60%"></div>';
+  const q=(($("#mb-q")&&$("#mb-q").value)||"").trim();
+  const proj=(($("#mb-proj")&&$("#mb-proj").value)||"").trim();
+  const skipMig=!($("#mb-skip-mig")&&$("#mb-skip-mig").checked===false);
+  const incArch=!!($("#mb-inc-arch")&&$("#mb-inc-arch").checked);
+  const payload={
+    source:mbSource||"all",
+    target:mbTarget||"codex",
+    project:proj||null,
+    query:q||null,
+    skip_migrated:skipMig,
+    archived:incArch,
+    apply:effApply,
+  };
+  if(!mbSelectAllMatched)payload.selected=[...mbSelected];
+  if(mbTarget==="markdown"){
+    const bv=Number(($("#mb-budget")&&$("#mb-budget").value)||0);
+    if(bv>0)payload.budget_tokens=bv;
+  }
+  try{
+    const r=await api("/migrate/batch",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(payload)});
+    const c=r.counts||{};
+    const sortedItems=[...(r.items||[])].sort((a,b)=>(a.action==="failed"?-1:0)-(b.action==="failed"?-1:0));
+    const actLbl={migrated:"已写入",outbox:"outbox",skipped_migrated:"已迁过跳过",skipped_same_origin:"同源跳过",failed:"失败"};
+    const rowsHtml=sortedItems.slice(0,100).map(it=>{
+      const cls=it.action==="failed"?"err":((it.action==="migrated"||it.action==="outbox")?"ok":"muted");
+      const info=it.error||(it.lines?(num(it.lines)+" 行"):"")||(it.reason||"");
+      return '<div class="sk-res-row"><span class="pill '+cls+'">'+esc(actLbl[it.action]||it.action)+'</span>'+
+        '<span class="mono">'+esc(shortSid(it.id))+'</span>'+
+        '<span>'+esc((it.title||"").slice(0,32))+'</span>'+
+        (info?'<span class="hint">'+esc(info)+'</span>':"")+'</div>';
+    }).join("");
+    if(resEl){
+      resEl.innerHTML=
+        '<div class="result-card"><div class="rt">'+(c.failed?WARN:GOOD)+(r.applied?"整端批量迁移已写入目标目录":"整端批量预演完成（已落 vault/outbox/）")+'</div>'+
+        '<div class="path-row"><span class="hint">输出位置:</span><span class="mono" style="word-break:break-all">'+esc(r.dest_dir||"")+'</span>'+
+        '<button type="button" class="btn sm" data-v="'+esc(r.dest_dir||"")+'" onclick="copyData(this,\'已复制输出路径\')">复制路径</button></div>'+
+        '<div class="hint">成功 '+num(c.migrated||0)+' · 跳过已迁 '+num(c.skipped_migrated||0)+
+        ' · 同源跳过 '+num(c.skipped_same_origin||0)+' · 失败 '+num(c.failed||0)+
+        ' · 共 '+num(c.total_lines||0)+' 行 · 耗时 '+esc(String(r.elapsed||0))+'s'+
+        (r.zcode_backup?' · 已备份 ZCode 主库 '+esc(r.zcode_backup):'')+'</div>'+
+        (r.applied?'<div class="hint" style="margin-top:4px">'+esc(agyApplyHint(mbTarget))+'</div>':'')+
+        (rowsHtml?'<div class="sk-res-tbl">'+rowsHtml+'</div>':"")+'</div>';
+    }
+    toast((r.applied?"批量迁移完成：写入 ":"批量生成完成：")+num(c.migrated||0)+" 条");
+    if(r.applied)await loadMigBatch({soft:true});
+  }catch(e){
+    if(resEl)resEl.innerHTML='<div class="result-card err"><div class="rt">'+ERRIC+'批量迁移失败</div><div class="hint">'+esc(e.message)+'</div></div>';
+    toast("批量迁移失败："+e.message,1);
+  }
+  btns.forEach(b=>b&&(b.disabled=false));
+  mbUpdateSummary();
+}
+

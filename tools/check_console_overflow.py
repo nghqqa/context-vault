@@ -123,9 +123,26 @@ def main() -> int:
                                     failures.append((w, sub_lbl))
                             page.click("#snap-list-btn")
                         if tab == "mig":
+                            page.click("#mig-scope-batch")
+                            page.wait_for_timeout(350)
+                            mb_vis = page.locator("#mig-batch-shell").is_visible()
+                            mb_box = page.locator("#mig-batch-shell").bounding_box()
+                            r_mb = page.evaluate(PROBE)
+                            if not mb_vis or not mb_box or mb_box["height"] <= 100:
+                                r_mb["bad"].append("#mig-batch-shell hidden")
+                            ok_mb = r_mb["docW"] <= r_mb["vw"] and not r_mb["bad"]
+                            print(f"{w:>5}px {'mig:bat':<8} docW={r_mb['docW']:<5} "
+                                  + ("OK" if ok_mb else "OVERFLOW " + "; ".join(r_mb["bad"])))
+                            if not ok_mb:
+                                failures.append((w, "mig:bat"))
+                            page.click("#mig-scope-single")
                             page.click("#mig-tab-skills")
                             page.wait_for_timeout(350)
+                            sk_vis = page.locator("#mig-skills-pane").is_visible()
+                            sk_box = page.locator("#mig-skills-pane").bounding_box()
                             r_sk = page.evaluate(PROBE)
+                            if not sk_vis or not sk_box or sk_box["height"] <= 100:
+                                r_sk["bad"].append("#mig-skills-pane hidden")
                             ok_sk = r_sk["docW"] <= r_sk["vw"] and not r_sk["bad"]
                             print(f"{w:>5}px {'mig:sk':<8} docW={r_sk['docW']:<5} "
                                   + ("OK" if ok_sk else "OVERFLOW " + "; ".join(r_sk["bad"])))

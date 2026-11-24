@@ -15,7 +15,7 @@ Rules for agents using this tool: never modify source session files (read-only);
 - `cv doctor` — environment check (Python, session sources, DSH Zstd backend, MCP summary, vault DB)
 - `cv sync [--debounce]` — incremental intake across Claude Code / Codex / ZCode / Antigravity / DeepSeek Harness (`dsh` V4/Zstd)
 - `cv export <session-file> [--redact]` — snapshot a session (idempotent, content-addressed; `--redact` or `CV_REDACT_SECRETS=1` masks common secrets)
-- `cv migrate <file> --target codex|claude|antigravity|dsh|markdown` — export → honest diff → import (dry-run by default; `--apply` writes real dirs)
+- `cv migrate <file> --target codex|claude|antigravity|dsh|markdown` / `cv import --agent <src> --target <tgt> [--no-skip-migrated] [--apply]` — single-session or full-harness batch migration with honest diff, same-origin & `migrations.jsonl` dedup, and per-item fault isolation (dry-run by default; `--apply` writes real dirs)
 - `cv skills list|inspect|migrate|remove|backups|rollback` — cross-agent `SKILL.md` inventory, unified-diff preview, bulk migration, auto-backed removal & verified rollback across ZCode / Claude Code / Codex / Antigravity / Cursor / DeepSeek Harness (Web Console enforces `connected_only=1` aligned with MCP connections)
 - `cv ingest <file> [--format X]` / `cv export-harness <sid> --to X` — bridged read/write via `session-migrate` (18 formats)
 - `cv memory extract|search|list|dedup` — temporal memory (decisions/preferences/pitfalls/constraints; active-only by default, `--history` traces superseded chains)
@@ -39,5 +39,5 @@ Rules for agents using this tool: never modify source session files (read-only);
 - [User Guide (EN)](https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.en.md): Concise English user guide — Windows `.exe` (`--mcp`), CLI quick start, Web Console, playbooks & env vars
 - [Snapshot format spec v0.1](https://github.com/nghqqa/context-vault/blob/main/docs/snapshot-format.md): vendor-neutral envelope, block types, what migrates and what cannot
 - [README](https://github.com/nghqqa/context-vault/blob/main/README.md): fidelity table ("what survives"), comparison with porters/memory layers, dependency boundary
-- [BENCHMARK](https://github.com/nghqqa/context-vault/blob/main/docs/BENCHMARK.md): CodingVault-Bench — 162 gold queries, 5 dimensions + noisy/streaming panels (258 unit tests in CI)
+- [BENCHMARK](https://github.com/nghqqa/context-vault/blob/main/docs/BENCHMARK.md): CodingVault-Bench — 162 gold queries, 5 dimensions + noisy/streaming panels (259 unit tests in CI)
 - [Releases](https://github.com/nghqqa/context-vault/releases): verification receipts (tests, real-machine checks)
