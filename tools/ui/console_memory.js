@@ -134,6 +134,7 @@ async function toggleMemPin(id,nextPin){
   }catch(e){toast("操作失败："+e.message,1)}
 }
 async function deleteMemItem(id){
+  if(!await askConfirm("确认删除记忆条目 #"+id+"？该操作仅移除提取出的长期记忆条目，不会改动任何原始快照。"))return;
   try{
     await api("/memory/delete",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({id:id})});
@@ -241,7 +242,7 @@ async function loadMemoryView(){
       ):"";
       return '<div class="mem-row'+(isPin?' pinned':'')+'">'+
         '<div class="mem-row-top">'+
-          (isPin?'<span class="chip err">置顶</span>':'')+
+          (isPin?'<span class="chip pin">置顶</span>':'')+
           '<span class="chip '+km.cls+'">'+esc(km.t)+'</span>'+
           '<span class="chip">'+esc(m.project||"全局")+'</span>'+
           (m.hits>0?'<span class="mini-tag">引用 ×'+num(m.hits)+'</span>':'')+

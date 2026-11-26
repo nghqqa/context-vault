@@ -172,7 +172,7 @@ async function loadOps(probeSem){
           '<input id="ops-ol-llm" value="'+esc(llm.model||"qwen2.5:7b")+'" placeholder="LLM 模型" aria-label="LLM 模型">'+
         '</div></div>'+
         '<div class="ops-acts">'+
-          '<button class="btn sm primary" onclick="opsConfigureOllama()">保存并启用 Ollama</button>'+
+          '<button class="btn sm" onclick="opsConfigureOllama()">保存并启用 Ollama</button>'+
           '<button class="btn sm" onclick="opsSemanticRun(\'refine\')">LLM 精炼记忆</button>'+
           '<button class="btn sm" onclick="opsSemanticRun(\'titles\')">生成会话标题</button>'+
         '</div><div id="ops-sem-out"></div>';
@@ -186,7 +186,7 @@ async function loadOps(probeSem){
         '</div>'+
         '<div class="ops-form"><div class="ops-form-row">'+
           '<input type="password" id="ops-plan-tok" placeholder="粘贴智谱 Coding Plan Token（仅存本机 vault/plan_token.json）" aria-label="智谱 Coding Plan Token">'+
-          '<button class="btn sm primary" onclick="opsSavePlanToken(false)">保存并校验</button>'+
+          '<button class="btn sm" onclick="opsSavePlanToken(false)">保存并校验</button>'+
           (st&&st.plan_token_set?'<button class="btn sm" onclick="opsSavePlanToken(true)">清除</button>':"")+
         '</div></div><div id="ops-quota-out"></div>';
     }
@@ -201,7 +201,7 @@ async function loadOps(probeSem){
         '<b>本地备份</b><span>'+(lb?(esc(lb.name)+' ('+lb.size_mb+' MB · 共 '+num(st.backups_count||0)+' 份)'):'暂无备份')+'</span>'+
         '</div>'+
         '<div class="ops-acts">'+
-          '<button class="btn sm primary" id="ops-bk-btn" onclick="opsBackupNow()">立即备份 (zip)</button>'+
+          '<button class="btn sm" id="ops-bk-btn" onclick="opsBackupNow()">立即备份 (zip)</button>'+
           '<button class="btn sm" onclick="opsPrune(false)">预览可裁剪版本</button>'+
           '<button class="btn sm danger" onclick="opsPrune(true)">执行裁剪 (自动先备份)</button>'+
         '</div>'+renderOpsBackupsList(bk)+'<div id="ops-maint-out"></div>';
@@ -263,7 +263,11 @@ async function opsSemanticRun(kind){
   try{
     const url=kind==="titles"?"/semantic/titles":"/semantic/refine";
     const r=await api(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({limit:15})});
-    if(out)out.innerHTML='<div class="ops-out">'+esc(JSON.stringify(r,null,2))+'</div>';
+    const sum=kind==="titles"
+      ?("生成会话标题：处理 "+num((r&&(r.processed||r.updated))||0)+" 条"+(r&&r.skipped!=null?" · 跳过 "+num(r.skipped):"")+(r&&r.errors?" · 失败 "+num(r.errors):""))
+      :("语义记忆精炼：处理 "+num((r&&(r.refined||r.updated||r.processed||r.memories))||0)+" 条"+(r&&r.errors?" · 失败 "+num(r.errors):""));
+    const raw=JSON.stringify(r,null,2);
+    if(out)out.innerHTML='<div class="ops-out"><div>'+esc(sum)+'</div><details style="margin-top:6px"><summary style="cursor:pointer;color:var(--ink-3)">查看详细返回 JSON</summary><pre style="margin:6px 0 0;white-space:pre-wrap;word-break:break-word">'+esc(raw)+'</pre></details></div>';
     toast(kind==="titles"?"会话标题生成完成":"语义记忆精炼完成");
     loadOv();
   }catch(e){
@@ -272,6 +276,7 @@ async function opsSemanticRun(kind){
   }
 }
 async function opsSavePlanToken(clear){
+  if(clear&&!await askConfirm("确认清除本机保存的智谱 Coding Plan Token？（不影响本地用量统计，仅停用实时额度探测）"))return;
   const tok=clear?"":(($("#ops-plan-tok")&&$("#ops-plan-tok").value)||"").trim();
   if(!clear&&!tok)return toast("请先粘贴 Token",1);
   try{

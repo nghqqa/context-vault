@@ -26,7 +26,7 @@ async function fillMig(){
   if(hint)hint.textContent="已载入 "+num(migRecentRows.length)+" 个独立会话 · 支持搜全库";
   sel.innerHTML=migRecentRows.length
     ?migOptionHtml(migRecentRows)
-    :'<option value="">（vault 为空 — 先 ↻ 立即同步）</option>';
+    :'<option value="">（vault 为空 — 先点击右上角「同步」）</option>';
   onMigSource();
 }
 function onMigFilterInput(){
@@ -88,7 +88,7 @@ function onMigTarget(){
 function onMigSource(){
   const sel=$("#mig-sid");
   const opt=sel.options[sel.selectedIndex];
-  $("#mig-src-meta").innerHTML=(!opt||!opt.value)?"<span class='hint'>无可用快照 — 先 <b>↻ 立即同步</b> 或搜其他关键词</span>"
+  $("#mig-src-meta").innerHTML=(!opt||!opt.value)?"<span class='hint'>无可用快照 — 先点击右上角 <b>「同步」</b> 或搜其他关键词</span>"
     :"已选 <span class='mono'>"+esc(opt.value)+"</span>";
   migPreview();
 }
@@ -99,7 +99,7 @@ function migExecEnabled(on){
 }
 async function migPreview(){
   const id=$("#mig-sid").value;
-  if(!id){$("#mig-preview").innerHTML='<div class="mig-idle">暂无已选快照 — 在左侧搜索关键词或点击右上角 <b>↻ 立即同步</b>。</div>';
+  if(!id){$("#mig-preview").innerHTML='<div class="mig-idle">暂无已选快照 — 在左侧搜索关键词或点击右上角 <b>「同步」</b>。</div>';
     migExecEnabled(false);return}
   $("#mig-preview").innerHTML='<div class="skel" style="width:55%"></div><div class="skel" style="width:75%"></div><div class="skel" style="width:40%"></div>';
   migLastPreview=null;migExecEnabled(false);
@@ -254,13 +254,7 @@ function setMigScope(scope){
   const ss=$("#mig-single-shell"),bs=$("#mig-batch-shell");
   if(ss)ss.hidden=isB;
   if(bs)bs.hidden=!isB;
-  const b1=$("#mig-scope-single"),b2=$("#mig-scope-batch");
-  if(b1){b1.classList.toggle("on",!isB);b1.setAttribute("aria-selected",!isB?"true":"false")}
-  if(b2){b2.classList.toggle("on",isB);b2.setAttribute("aria-selected",isB?"true":"false")}
-  const sh=$("#mig-scope-hint");
-  if(sh)sh.textContent=isB
-    ?"按整个 Harness 批量盘点并迁出主对话（支持按项目/已迁移/同源自动去重，一键落 outbox 或写入真实目录）"
-    :"单条迁移可预览活上下文、逐项失真与精确恢复命令";
+  if(typeof setMigMode==="function")setMigMode("session");
   if(isB&&!mbData)loadMigBatch();
 }
 function onMbFilterInput(){

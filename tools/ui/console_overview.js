@@ -51,10 +51,13 @@ async function loadOv(){
     $("#ov-band").innerHTML=band;
     const ob=$("#ov-onboard");
     if(ob){
-      if(!(ow.snapshots||0)){
+      let obDismissed=false;
+      try{if(typeof localStorage!=="undefined")obDismissed=localStorage.getItem("cv-onboard-dismissed")==="1"}catch(e){}
+      if(!(ow.snapshots||0)&&!obDismissed){
         ob.hidden=false;
         ob.innerHTML='<div class="onboard-card"><div class="onboard-hd"><b>欢迎使用 Context Vault — 3 步开启本机上下文资产库</b>'+
-          '<span class="hint">全部数据保留在本机 · 零外发</span></div>'+
+          '<span style="display:inline-flex;align-items:center;gap:8px"><span class="hint">全部数据保留在本机 · 零外发</span>'+
+          '<button type="button" class="btn xs" onclick="dismissOnboard()">暂不提示</button></span></div>'+
           '<div class="onboard-steps">'+
           '<div class="onboard-step"><div class="os-t">① 同步本机全部会话</div>'+
           '<div class="os-d">只读扫描 Claude Code / Codex / ZCode / Antigravity / DeepSeek Harness 历史会话与跨会话记忆。</div>'+
@@ -79,9 +82,9 @@ async function loadOv(){
         const sub=(a.snapshots!=null&&a.snapshots!==sess)?(num(sess)+" 会话 · "+num(a.snapshots)+" 版本"):(num(sess)+" 独立会话");
         const agRaw=String(a.agent||"");
         const agName=agRaw==="dsh"?"DeepSeek Harness":(agRaw||"未知");
-        return '<div class="feed-row click" data-a="'+esc(agRaw)+'" onclick="openAgentSnaps(this.dataset.a)" title="查看该来源全部快照">'+
+        return '<button type="button" class="feed-row click" data-a="'+esc(agRaw)+'" onclick="openAgentSnaps(this.dataset.a)" title="查看该来源全部快照">'+
           '<span class="feed-main">'+agentCell(agName)+'<span class="feed-txt">'+sub+'</span></span>'+
-          '<span class="feed-r">'+bn(a.tokens_in||0)+' tok</span></div>';
+          '<span class="feed-r">'+bn(a.tokens_in||0)+' tok</span></button>';
       }).join("")
         :'<div class="hint" style="padding:10px 14px">暂无多端会话 · 点击右上角「同步」采集本机会话</div>';
     }
@@ -113,7 +116,7 @@ async function loadOv(){
         '<span class="nowr hint" title="'+esc(s.created_at||"")+'">'+frel(s.created_at)+"</span>"];
         tr.__tr='class="rowlink" onclick="snapDetail(\''+s.sid+'\',\''+(s.created_at||"")+'\')"';
         return tr}),"tbl-44 fixed-cols tbl-ov")
-      :'<div class="empty">还没有会话入库<br>先点右上角 <b>↻ 立即同步</b> 或运行 <code>python tools/cv.py sync</code>'+
+      :'<div class="empty">还没有会话入库<br>先点右上角 <b>「同步」</b> 或运行 <code>python tools/cv.py sync</code>'+
        '<br><button class="btn sm" onclick="loadOv()">重试</button></div>')+
       '<div class="foot"><span>显示最近 '+arr.length+" 个独立会话 · 共 "+num(total)+" 个会话 / "+
         num((rc&&rc.versions_total)||total)+" 个版本</span>"+
@@ -127,16 +130,22 @@ async function loadOv(){
       const km=memKindMeta(m.kind);
       const txt=stripMd(m.content).replace(/\s+/g," ").trim();
       const sid=m.snapshot||"";
-      const clickAttr=(/^cv_[0-9a-f]{8,64}$/i.test(sid))?' class="feed-row click" onclick="snapDetail(\''+sid+'\')"':' class="feed-row"';
-      return '<div'+clickAttr+' title="'+esc(txt+(sid?(" · 来源 "+sid):""))+'"><span class="feed-main">'+
+      const validSid=/^cv_[0-9a-f]{8,64}$/i.test(sid);
+      const tag=validSid?'button':'div';
+      const clickAttr=validSid?(' type="button" class="feed-row click" onclick="snapDetail(\''+sid+'\')"'):' class="feed-row"';
+      return '<'+tag+clickAttr+' title="'+esc(txt+(sid?(" · 来源 "+sid):""))+'"><span class="feed-main">'+
         '<span class="chip '+km.cls+'">'+esc(km.t)+'</span>'+
         '<span class="feed-txt">'+esc(txt)+'</span></span>'+
-        '<span class="feed-r"><span class="chip">'+esc(m.project||"全局")+"</span></span></div>";
+        '<span class="feed-r"><span class="chip">'+esc(m.project||"全局")+"</span></span></"+tag+">";
     }).join("")
       :'<div class="hint" style="padding:10px 14px;display:flex;align-items:center;justify-content:space-between;gap:8px"><span>暂无跨会话记忆</span><button class="btn sm" onclick="openMemoryView()">提取记忆 →</button></div>';
   })();
 
   await Promise.allSettled([pLedger,pUsage,pRecent,pMem]);
+}
+function dismissOnboard(){
+  try{if(typeof localStorage!=="undefined")localStorage.setItem("cv-onboard-dismissed","1")}catch(e){}
+  const ob=$("#ov-onboard");if(ob){ob.hidden=true;ob.innerHTML=""}
 }
 const kpi=(v,k,tip,sub)=>'<div class="kpi"'+(tip?' title="'+esc(tip)+'"':"")+'>'+
   '<div class="k"><span>'+k+'</span></div>'+

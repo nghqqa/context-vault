@@ -1,6 +1,6 @@
 ---
-name: Context Vault Console
-description: Local-first AI session specimen ledger & bidirectional migration workbench (`tools/ui/console.*`)
+name: Context Vault Design System
+description: Swiss International Style (Hochkontrast & Helvetica Grid) across Web Console (tools/ui/), Token Dashboard, Docs Site, and Windows Tray
 colors:
   primary: "#e1251b"
   primary-ink-light: "#c81e14"
@@ -11,33 +11,154 @@ colors:
   surface-dark: "#202225"
   subtle-light: "#f8f8f6"
   subtle-dark: "#272a2e"
+  inset-light: "#ecece8"
+  inset-dark: "#2f3338"
   line-light: "#d4d4d0"
   line-dark: "#383c42"
+  line-soft-light: "#e6e6e2"
+  line-soft-dark: "#2c3035"
+  line-strong-light: "#111111"
+  line-strong-dark: "#d4d6d8"
   ink-light: "#0a0a0a"
   ink-dark: "#ededeb"
   ink-secondary-light: "#333333"
   ink-secondary-dark: "#b8bcc2"
   ink-muted-light: "#666662"
-  ink-muted-dark: "#8a8f96"
+  ink-muted-dark: "#9aa0a8"
+  cta-light: "#141414"
+  cta-hover-light: "#2c2c2c"
+  cta-dark: "#ededeb"
+  cta-hover-dark: "#d6d6d2"
+  link-light: "#1d5bbf"
+  link-dark: "#6ea8fe"
+  ok-light: "#157a3f"
+  ok-bg-light: "#eaf7ef"
+  ok-line-light: "#a8dec0"
+  ok-dark: "#3fb950"
+  pin-light: "#9a5200"
+  pin-bg-light: "#fef3c7"
+  pin-line-light: "#edd09a"
+  pin-dark: "#f5b027"
   warning-light: "#9a5200"
+  warning-bg-light: "#fef5e7"
+  warning-line-light: "#edd09a"
   warning-dark: "#f5b027"
   danger-light: "#990f0f"
+  danger-bg-light: "#fdf0f0"
+  danger-line-light: "#eabcbc"
   danger-dark: "#ff7070"
+  acc-soft-light: "#fceceb"
+  acc-line-light: "#f3b7b3"
+  link-soft-light: "#edf4ff"
+  brand-badge: "#16181c"
+  brand-rim-dark: "#424852"
+  scrollbar-light: "#888884"
+  scrollbar-dark: "#5a5e66"
+  chevron-muted: "#78828d"
+  terminal-bg: "#0f1419"
+  terminal-header: "#151b23"
+  terminal-border: "#242e3a"
+  terminal-fg: "#dfe5ea"
+  terminal-prompt: "#6ee7b7"
+  terminal-comment: "#93a0b0"
+  terminal-copy: "#9fb0c0"
+  terminal-err: "#f87171"
+  quota-gem-light: "#2563eb"
+  quota-gem-dark: "#60a5fa"
+  quota-cla-light: "#d97706"
+  quota-cla-dark: "#fbbf24"
+  quota-arg-light: "#7c3aed"
+  quota-arg-dark: "#a78bfa"
+  quota-arg-bg-light: "#faf8ff"
+  quota-arg-line-light: "#d8ccf8"
+  quota-zp-light: "#0d9488"
+  quota-zp-dark: "#2dd4bf"
+  backdrop-black: "#000"
+  black-scrim-42: "rgba(0,0,0,.42)"
+  scrim-drawer: "rgba(12,16,20,.38)"
+  scrim-dialog: "rgba(12,16,20,.4)"
+  scrim-help: "rgba(12,16,20,.42)"
+  argon-bg-dark: "rgba(139,92,246,.08)"
+  argon-line-dark: "rgba(167,139,250,.35)"
+  ok-pulse-glow: "rgba(21,122,63,.4)"
+  ok-pulse-ring: "rgba(21,122,63,.35)"
+  copy-surface: "rgba(223,229,234,.06)"
+  copy-border: "rgba(223,229,234,.16)"
+  copy-hover: "rgba(223,229,234,.34)"
+  copy-ok: "rgba(110,231,183,.4)"
+  copy-bad: "rgba(248,113,113,.4)"
 typography:
-  body:
-    fontFamily: '"Helvetica Neue", "Inter", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif'
-    fontSize: "13.5px"
-    fontWeight: 400
-    lineHeight: 1.58
+  micro:
+    fontFamily: '"JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", ui-monospace, monospace'
+    fontSize: "10px"
+  badge:
+    fontFamily: '"JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", ui-monospace, monospace'
+    fontSize: "10.5px"
+  tag:
+    fontFamily: '"JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", ui-monospace, monospace'
+    fontSize: "11px"
   label:
     fontFamily: '"JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", ui-monospace, monospace'
     fontSize: "12px"
     fontWeight: 600
     letterSpacing: "0.03em"
+  body:
+    fontFamily: '"Helvetica Neue", "Inter", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif'
+    fontSize: "13.5px"
+    fontWeight: 400
+    lineHeight: 1.58
+  subhead:
+    fontFamily: '"Helvetica Neue", "Inter", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif'
+    fontSize: "14.5px"
+    fontWeight: 650
+  section:
+    fontFamily: '"Helvetica Neue", "Inter", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif'
+    fontSize: "15px"
+    fontWeight: 650
+  lead:
+    fontFamily: '"Helvetica Neue", "Inter", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif'
+    fontSize: "16.5px"
+  dialogTitle:
+    fontFamily: '"Helvetica Neue", "Inter", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif'
+    fontSize: "16px"
+    fontWeight: 650
+  pageTitle:
+    fontFamily: '"Helvetica Neue", "Inter", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif'
+    fontSize: "18px"
+    fontWeight: 700
+  heading:
+    fontFamily: '"Helvetica Neue", "Inter", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif'
+    fontSize: "20px"
+    fontWeight: 700
+  mobileStat:
+    fontFamily: '"JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", ui-monospace, monospace'
+    fontSize: "22px"
+    fontWeight: 650
+  dashTitle:
+    fontFamily: '"Helvetica Neue", "Inter", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif'
+    fontSize: "24px"
+    fontWeight: 700
+  kpi:
+    fontFamily: '"JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", ui-monospace, monospace'
+    fontSize: "23px"
+    fontWeight: 650
+  stat:
+    fontFamily: '"JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", ui-monospace, monospace'
+    fontSize: "25px"
+    fontWeight: 650
+  hero:
+    fontFamily: '"Helvetica Neue", "Inter", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif'
+    fontSize: "30px"
+    fontWeight: 700
+  heroMax:
+    fontFamily: '"Helvetica Neue", "Inter", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif'
+    fontSize: "46px"
+    fontWeight: 700
 rounded:
   sm: "2px"
   md: "2px"
   lg: "4px"
+  pill: "999px"
 spacing:
   xs: "4px"
   sm: "8px"
@@ -47,7 +168,7 @@ spacing:
   xxl: "32px"
 components:
   button-primary:
-    backgroundColor: "{colors.primary}"
+    backgroundColor: "{colors.cta-light}"
     textColor: "#ffffff"
     rounded: "{rounded.sm}"
     height: "34px"
@@ -63,92 +184,58 @@ components:
     rounded: "{rounded.md}"
 ---
 
-# Design System: Context Vault Console
+# Design System: Context Vault
 
 ## Overview
 
-**Creative North Star: "Archival Specimen Ledger"**
+**Creative North Star: "Swiss International Typographic Ledger" + Vault Core Brand System**
 
-Context Vault Console is a zero-dependency local web workbench served directly from Python (`CONSOLE_HTML` in `tools/cv.py`) over `127.0.0.1:8791`. Every conversation snapshot (`cv_*`) is treated as a verifiable archival specimen rather than ephemeral chat noise. Surfaces rely on disciplined 1px hairline divisions over cool mineral paper (`#f3f5f7`) or deep graphite canvas (`#0d1014`), paired with tabular numerals (`tnum`), crisp monochrome linear SVGs, and one restrained forest-teal semantic seal (`#0e7568`).
+Context Vault spans four tightly unified surfaces sharing the exact same Swiss grid tokens, monochrome craftsmanship, and brand geometry:
+1. **Local Web Console** (`tools/ui/console.html`, `tools/ui/console.css`, `tools/ui/console_*.js`, bundled by `tools/cv_ui.py`) at `http://127.0.0.1:8791`.
+2. **Token Economy Dashboard** (`tools/ui/dashboard.html`) at `http://127.0.0.1:8791/dashboard`.
+3. **Public Documentation & Release Portal** (`docs/site/index.html` at `https://vault.nghqqa.cn/`).
+4. **Windows High-DPI System Tray & Layered Popover** (`pro/tray_ui.py`, `pro/tray_app.py`, `pro/assets/icon.ico`).
 
-**Key Characteristics:**
-- Adaptive dual-scheme tokens via CSS `light-dark()` backed by `<meta name="color-scheme" content="light dark">` and a 3-state footer toggle (`跟随` / `浅色` / `深色`).
-- Hairline-integrated ledger strips (`.kpi-band`) and container-responsive zero-overflow tables (`@container tbl`).
-- Honest, strict visual boundary between dry-run `vault/outbox/` operations (`primary` teal action) and confirmed live tool directory writes (`danger` action).
+Surfaces reject blurred shadows and decorative gradients in favor of cool archival paper (`#f4f4f2`) or carbon slate (`#18191b`), crisp 1px architectural hairline divisions, tabular numerals (`tnum`), high-contrast carbon CTAs (`#141414` / `#ededeb`), and restrained **SBB Swiss Signal Red (`#e1251b`)** reserved for the brand lock bolt, active meter bars, and dangerous-write contrast.
 
-## Colors
+## Brand Mark: Vault Core (`几何金库门`)
 
-Restrained neutral mineral slate surfaces paired with a single forest-teal accent and semantic warning/danger tokens calibrated for >=4.5:1 WCAG AA contrast in both light and dark modes.
+- **Geometry (`viewBox="0 0 24 24"`)**: Deep carbon squircle badge `[1.5..22.5]` with crisp Swiss corner `rx=3` (`14.3%`), enclosing a precision white `C`-shaped vault door frame (`x: 5.0..19.0`, `y: 4.8..19.2`, inner cavity `x: 8.5+`, `y: 7.9..16.1`) and a solid Signal Red `#e1251b` lock bolt (`x: 10.8..19.0`, `y: 10.2..13.8`, `rx=0.7`).
+- **Equidistant Negative Space**: Top, bottom, and left channels between the red bolt and the white door frame are uniformly `2.3` SVG units (`~1.53px` at `16×16`), preventing subpixel merging in Windows taskbar trays and browser tabs.
+- **Conditional Rim Stroke (`.cv-mark .cv-rim`)**: `--cv-rim: light-dark(transparent, #424852)`. Light surfaces omit any outer border (`transparent`) so the `#16181c` badge stays razor-sharp against `#ffffff`/`#f8f8f6`; dark surfaces apply a `0.8` hairline `#424852` stroke (`tray_ui.make_brand_icon(..., rim=model.dark)`).
 
-### Primary
-- **Forest Teal Fill** (`#0e7568`): Solid primary action buttons (`.btn.primary`), active nav accent indicator, selected target tile borders, active radio/checkbox `accent-color`.
-- **Forest Teal Ink** (`light-dark(#0a5a50, #4fd1c5)`): High-contrast accent text, snapshot ID links (`.sid`), active navigation labels, `caret-color`, `:focus-visible` outlines, and positive/healthy telemetry readouts.
-- **Teal Tint & Border** (`--acc-soft: light-dark(#e6f3f0, rgba(79,209,197,.14))`, `--acc-line: light-dark(#b7dcd4, rgba(79,209,197,.32))`): Active navigation item plates, selected target cards, success result containers, and selection highlights.
+## Color & Semantic Separation
 
-### Neutral
-- **Canvas** (`light-dark(#f3f5f7, #0d1014)`): Root workspace viewport background (`--bg-canvas`).
-- **Surface** (`light-dark(#ffffff, #14191f)`): Elevated ledger sheets, sidebar chrome, topbar, tables, modals, and drawer (`--bg-surface`).
-- **Subtle & Inset** (`--bg-subtle: light-dark(#f8fafb, #1a2028)`, `--bg-inset: light-dark(#eaeef2, #222933)`): Table headers, segmented control wells, Antigravity maintenance row, skeleton shimmer base.
-- **Hairline Rules** (`--line: light-dark(#dfe3e8, #27303c)`, `--line-soft: light-dark(#edf0f3, #1e2630)`, `--line-strong: light-dark(#c6cdd5, #3a4656)`): Structural 1px borders separating panes, table cells, and ledger segments.
-- **Ink Ramp**: Primary `--ink: light-dark(#15191d, #edf1f5)`, Secondary `--ink-2: light-dark(#424a52, #b6c0ca)`, Muted metadata `--ink-3: light-dark(#5e6770, #8d98a5)`.
+Strict semantic discipline prevents Signal Red from colliding with healthy, pinned, or interactive states:
+- **Canvas & Chrome**: `--bg-canvas` (`#f4f4f2` / `#18191b`), `--bg-surface` (`#ffffff` / `#202225`), `--bg-subtle` (`#f8f8f6` / `#272a2e`), `--bg-inset` (`#ecece8` / `#2f3338`).
+- **Text Ink & AA Contrast**: `--ink` (`#0a0a0a` / `#ededeb`), `--ink-2` (`#333333` / `#b8bcc2`), `--ink-3` (`#666662` / `#9aa0a8` — dark `#9aa0a8` maintains `>= 4.7:1` contrast even over `--bg-inset` `#2f3338`).
+- **Primary Actions (`.btn.primary`)**: Neutral high-contrast Swiss carbon `--cta` (`#141414` light / `#ededeb` dark) with `--cta-ink`. Reserve `.btn.primary` to at most one dominant primary button per card/screen (`#ops-mcp-apply-btn` in Settings & Ops).
+- **Success / Healthy (`--ok`)**: `light-dark(#157a3f, #3fb950)` — used for live service status dots (`.status-pill .pulse`, website `.mm-status .dot`, `.badge .dot`), dashboard health indicator `.ok`, migration immutable guarantees (`.immlist li.good`), verified `.result-card`, and tray `"运行中"` / switch toggles.
+- **Pinned / Important (`--pin`)**: `light-dark(#9a5200, #f5b027)` — warm amber `.chip.pin` and `.mem-op.pin-on` (never error red).
+- **Interactive Links (`--link`)**: `light-dark(#1d5bbf, #6ea8fe)` — snapshot IDs, clickable feed row hover text, card footer links, keyboard focus rings (`:focus-visible` & Win32 tray `focus_ring`).
+- **Warning (`--warn`) & Error/Dangerous Write (`--err`)**: `light-dark(#9a5200, #f5b027)` and `light-dark(#990f0f, #ff7070)` — reserved for incomplete warnings, errors, and confirmed writes into live agent directories (`.btn.danger`).
 
-### Semantic States
-- **Warning** (`--warn: light-dark(#9a5b05, #f5b942)` / `--warn-bg` / `--warn-line`): Decision memory tags, incomplete transcription flags, switch detections, and pending warnings.
-- **Danger / Error** (`--err: light-dark(#b42323, #f87171)` / `--err-bg` / `--err-line`): Service disconnects, unresponsive upstream relay states, and destructive/confirmed live directory write buttons (`.btn.danger`).
+## Typography & Swiss Craft Floor
 
-**The Single Seal Rule.** Reserve forest-teal solid fills (`#0e7568`) exclusively for primary constructive CTAs (`筛选`, `生成到 outbox`, `导出整项`, `一键补齐导入`); keep navigation highlights soft-tinted (`--acc-soft`) so interactive emphasis never competes across cards.
+- **Font Stacks**: `"Helvetica Neue", "Inter", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif` paired with `"JetBrains Mono", "Cascadia Code", Consolas, "SF Mono", ui-monospace, monospace` and `font-feature-settings: "tnum"` everywhere.
+- **Hierarchy & Clean Craft**:
+  - Distinct typographic steps across Console (`10.5px`/`12px`/`13.5px`/`15px`/`18px`/`23px`), Dashboard (`12px`/`13.5px`/`22px`/`23px`), and Marketing Site (`12px`/`15px`/`16.5px`/`25px`/`30px–46px`).
+  - Zero colored >1px left borders or side-tabs (`.side-nav button.on` uses clean `--bg-inset` + `1px` border box-shadow; `.msg-card.user`, `.mem-row.pinned`, `.onboard-card`, `.sk-mode-card.on` use 1px semantic borders).
+  - Zero layout-property transitions (`.drawer` transitions `transform`/`opacity` only; `.winbar i` renders direct width without animating layout).
+  - Zero `outline: none` suppression; every control keeps a crisp `:focus-visible` outline (`2px solid var(--link)`).
 
-## Typography
+## Responsive Grid & Shapes
 
-- **UI & Body Font:** `"Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif` (zero external webfont requests; offline-safe).
-- **Monospace / Telemetry Font:** `"Cascadia Code", Consolas, "SF Mono", ui-monospace, monospace` (for snapshot IDs, timestamps, file paths, KPI readouts, terminal commands).
+- **Console Radii**: Strict Swiss precision — `--rad-s: 2px`, `--rad-m: 2px`, `--rad-l: 4px`, plus `999px` / `50%` for semantic pills/dots only. Windows tray uses matching `4px` outer corner and `2px` inner blocks.
+- **Container-Driven Tables (`@container tbl`)**: Desktop `.sidebar` (`222px` wide, `white-space: nowrap` brand header) plus `@container tbl` thresholds at `<920px`, `<740px`, and stacked cards `<640px` guarantee zero column overlap between `Col 1 (sid)` and `Col 2 (summary)` across `380px`, `900px`, `1000px`, `1440px`, and `2560px` viewports.
+- **Information Architecture**:
+  - Overview (`#t-ov`): `#ov-band` -> `.ov-grid` (`7:4.5`) -> `#ov-quota-card` collapsed by default (`localStorage`-dismissible onboarding when empty).
+  - Snapshots & Memory (`#t-snap`): View switcher (`最近列表` / `项目树` with `<optgroup>` export targets / `记忆库` with confirm-on-delete).
+  - Migration (`#t-mig`): Single unified 3-mode segmented bar (`单条精调` / `整端批量迁移` / `Skill 技能迁移`).
+  - Settings & Ops (`#t-ops`): Single primary CTA (`#ops-mcp-apply-btn`), collapsible structured Ollama outputs, confirm-before-clearing Plan Token.
 
-### Hierarchy
-- **KPI Hero Figure**: `23px` monospace bold (`650`), `-0.02em` tracking, `tabular-nums` (`tnum`).
-- **Page / Modal Title (`h1`, `h3`)**: `15px`, weight `650`.
-- **Body / Button / Control**: `13px–13.5px`, line-height `1.58`.
-- **Compact Metadata / Table Headers**: `12px–12.5px`, weight `600` on headers and card titles.
+## Keyboard Navigation & Accessibility
 
-**The Numeric Truth Rule.** All counts, latencies, token quantities, and table timestamps enable `font-variant-numeric: tabular-nums` and separate abbreviated readouts (`19.70B`) cleanly from exact integer readouts (`19,704,665,238`) with zero unstyled CJK uppercase breakage.
-
-## Layout
-
-- **Desktop App Shell (`>900px`)**: Two-track grid `var(--sidebar-w) minmax(0,1fr)` (`216px` sidebar + fluid workspace) locked to `100dvh` with inner scrolling in `.content` (`max-width: 1600px`, `18px 24px 48px` padding) across 4 focused tabs (`概览`, `快照资产`, `迁移`, `设置与运维`).
-- **Overview (`#t-ov`)**: 4-cell integrated `.kpi-band` directly above `minmax(0,7fr) minmax(0,5fr)` `.ov-grid` (left: `最近入库会话`; right rail: `多端资产分布` `#ov-agents`, `最新记忆摘要` `#ov-mem`), with collapsible disclosure `#ov-quota-card` underneath showing live summary text.
-- **Migration (`#t-mig`)**: Split workbench `minmax(0,440px) minmax(0,1fr)` pairing source search/selection + 2-column target format tiles on the left with real-time fidelity preview + outbox/apply execution on the right so Steps 1–4 fit simultaneously within `1440×900`.
-- **Container-Adaptive Tables (`@container tbl`)**: Desktop (`tbl-ov`, `tbl-snap`) enforces `table-layout: fixed` with budgeted `<colgroup>` widths for zero horizontal scrollbars; under `<560px` container width, rows transform into labeled key-value ledger cards with multi-line wrapped summaries (`.sum-main`).
-- **Mobile Shell (`<=900px`)**: `.sidebar` converts to a 2-row CSS Grid (row 1: brand left + 3-state theme switcher right; row 2: equal `repeat(4, minmax(0, 1fr))` nav tabs across full width), and `.topbar` wraps cleanly without page overflow down to `380px`.
-
-## Elevation & Depth
-
-Surfaces distinguish depth cleanly through tonal shifts (`--bg-canvas` -> `--bg-surface` -> `--bg-subtle`) and `1px` borders (`--line`, `--line-soft`) rather than heavy drop shadows:
-- **Resting Card / Shell Shadow (`--shadow-1`)**: `0 1px 2px light-dark(rgba(16,20,24,.04), rgba(0,0,0,.28))`.
-- **Top-Layer Modal / Drawer / Popover Toast Shadow (`--shadow-2`)**: `0 14px 36px light-dark(rgba(16,20,24,.15), rgba(0,0,0,.55))` with `rgba(12,16,20,.38–.40)` backdrop scrim on `<dialog>::backdrop`.
-
-## Shapes
-
-- **Compact Controls & Inputs (`--rad-s`)**: `6px` border radius on `.btn`, inputs, selects, target cards, and terminal command boxes.
-- **Primary Cards & Result Panes (`--rad-m`)**: `9px` radius on `.card`, `.cardbox`, `.kpi-band`, `.proj-dock`, `.result-card`, and `#toast`.
-- **Confirm Modals (`--rad-l`)**: `13px` radius on `#confirm-dlg`.
-- **Status Pills**: Full pill `999px` only on concise status indicators (`.status-pill`, `.pill`).
-
-## Components
-
-- **Buttons (`.btn`)**: `34px` default / `27px` `.btn.sm`; hairline border (`--line-strong`), subtle press feedback (`translateY(1px)`), disabled `0.48` opacity; monochrome `1.5–1.6px` stroke inline SVGs matched to label weight.
-- **Data Tables (`.cardbox` + `.tbl-wrap`)**: Sticky headers (`top: 0`), `44px` uniform row height on desktop (`sid-wrap` prevents version badge wrapping), full-width click affordability paired with accessible `<button class="sid">` / `.sumbtn` focus triggers.
-- **Project Workbench Dock (`.proj-dock`)**: Three cleanly separated horizontal bands: (1) source & archive filter + expand/collapse, (2) generic 10-target export format selector + conditional `#tree-apply` (auto-disabled for non-writable targets), (3) distinct subtle-tinted `.proj-sync` bar strictly for Antigravity bidirectional cleanup/batch import.
-- **Native Top-Layer Overlays**: Slide-over Detail `<dialog class="drawer" closedby="any">`, safety `<dialog id="confirm-dlg">` defaulting focus onto `取消`, and non-modal `<div id="toast" popover="manual">` always stacking cleanly above open dialogs.
-- **Markdown & Telemetry Sanitizers**: Strips raw `**`/`__`/`` ` `` markdown syntax and messy local URLs before table/memory display; maps memory kinds and status indicators into clear Chinese pills.
-
-## Do's and Don'ts
-
-### Do:
-- **Do** keep `CONSOLE_HTML` strictly self-contained with a single `<script>` tag (required by `tools/check_console_js.py`) and zero external CDN requests.
-- **Do** keep desktop table `.tbl-wrap` widths fitted inside their container budgets (`scrollWidth <= clientWidth` at `1440px`) and verify both desktop inner-wrap and mobile stacked behavior after table column edits.
-- **Do** maintain clear separation between dry-run `outbox` buttons and confirmed live-directory actions, auto-disabling `#tree-apply` for targets without live write support.
-- **Do** use `1.5–1.6px` stroke inline monochrome `<svg>` icons (`aria-hidden="true"` when decorative beside visible text) across every button, accordion, and card icon.
-
-### Don't:
-- **Don't** add external frontend packages, build pipelines, `<script>` tags inside `<head>`, or Unicode emoji/glyph characters standing in for UI icons.
-- **Don't** remove `:focus-visible` rings on inputs/selects (`outline: none` without replacement) or leak unstripped raw Markdown syntax / duplicated status strings (`ERR ERR`) into summaries or pills.
-- **Don't** auto-open secondary disclosure sections (`#ov-usage-card`) or hide core mobile navigation/theme controls at `<=900px`.
+- `<html lang="zh-CN">`, skip-link to `<main id="main-content">`, native `<dialog closedby="any">`, top-layer `popover="manual"` toasts.
+- Global shortcuts: `/` (search input button & key), `Ctrl/⌘+K` (`#cmdk` `role="combobox"` + `role="listbox"` + default quick actions + `aria-activedescendant`), `1–4` tabs, `?` opens `#help-dlg` (shortcuts & glossary), `Esc` closes modals.
+- Win32 Tray (`TrayPopoverWindow`): Full `Tab` / `Shift+Tab` / `↑` / `↓` / `Home` / `End` / `Space` / `Enter` / `Esc` navigation with 2px `focus_ring` across `_FOCUS_ORDER`, failure toasts on sync/backup exceptions, and `MessageBoxW` confirmation if quitting while background sync/backup is busy.

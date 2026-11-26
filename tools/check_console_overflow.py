@@ -25,10 +25,9 @@ if hasattr(sys.stdout, "reconfigure"):
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cv  # noqa: E402
 
-VIEWPORTS = [(380, 740), (900, 800), (1440, 900), (2560, 1300)]
+VIEWPORTS = [(380, 740), (900, 800), (1000, 900), (1440, 900), (2560, 1300)]
 TABS = ["ov", "snap", "mig", "ops"]
-# 页面级溢出: 文档宽于视口, 或可见元素越出视口。.tbl-wrap (表格容器) 与 .sidebar (窄屏时栏内横滚)
-# 的内部滚动是设计行为, 排除。
+# 页面级溢出与列碰撞检测: 文档宽于视口、元素越出视口或表格首列文本挤撞第二列均判定回归。
 PROBE = """() => {
   const vw = window.innerWidth, bad = [];
   for (const el of document.querySelectorAll('body *')) {
@@ -40,6 +39,17 @@ PROBE = """() => {
     if (r.right > vw + 1 || r.left < -1) {
       bad.push(el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + ' right=' + Math.round(r.right));
       if (bad.length >= 5) break;
+    }
+  }
+  for (const tr of document.querySelectorAll('table.tbl-snap tbody tr')) {
+    const tds = tr.querySelectorAll('td');
+    if (tds.length < 2) continue;
+    const r0 = tds[0].getBoundingClientRect(), r1 = tds[1].getBoundingClientRect();
+    if (r0.width === 0 || r1.width === 0 || Math.abs(r0.top - r1.top) > 10) continue;
+    const wrap = tds[0].querySelector('.sid-wrap');
+    if (wrap && wrap.getBoundingClientRect().right > r1.left + 1) {
+      bad.push('tbl-snap:col-collision');
+      break;
     }
   }
   return {docW: document.documentElement.scrollWidth, vw: vw, bad: bad};
@@ -148,7 +158,7 @@ def main() -> int:
                                   + ("OK" if ok_sk else "OVERFLOW " + "; ".join(r_sk["bad"])))
                             if not ok_sk:
                                 failures.append((w, "mig:sk"))
-                            page.click("#mig-tab-session")
+                            page.click("#mig-scope-single")
                 browser.close()
         finally:
             srv.shutdown()

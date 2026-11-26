@@ -201,17 +201,21 @@ function renderProjectTree(d,q){
     '<div class="proj-batch-row">'+
       '<label for="tree-tgt">单条 / 整项导出目标</label>'+
       '<select id="tree-tgt" onchange="onTreeTgtChange(this.value)">'+
-        '<option value="antigravity"'+(treeTarget==="antigravity"?" selected":"")+'>Antigravity（原生 .db 会话）</option>'+
-        '<option value="claude"'+(treeTarget==="claude"?" selected":"")+'>Claude Code</option>'+
-        '<option value="codex"'+(treeTarget==="codex"?" selected":"")+'>Codex</option>'+
-        '<option value="markdown"'+(treeTarget==="markdown"?" selected":"")+'>Markdown 简报（outbox）</option>'+
-        '<option value="zcode"'+(treeTarget==="zcode"?" selected":"")+'>ZCode 写回（实验性）</option>'+
-        '<option value="dsh"'+(treeTarget==="dsh"?" selected":"")+'>DeepSeek Harness（V4 原生会话）</option>'+
-        '<option value="cursor"'+(treeTarget==="cursor"?" selected":"")+'>Cursor</option>'+
-        '<option value="opencode"'+(treeTarget==="opencode"?" selected":"")+'>OpenCode</option>'+
-        '<option value="qwen"'+(treeTarget==="qwen"?" selected":"")+'>Qwen Code</option>'+
-        '<option value="kimi"'+(treeTarget==="kimi"?" selected":"")+'>Kimi CLI</option>'+
-        '<option value="copilot"'+(treeTarget==="copilot"?" selected":"")+'>Copilot</option>'+
+        '<optgroup label="原生深度写入 (支持直接写入目标目录)">'+
+          '<option value="antigravity"'+(treeTarget==="antigravity"?" selected":"")+'>Antigravity（原生 .db 会话）</option>'+
+          '<option value="claude"'+(treeTarget==="claude"?" selected":"")+'>Claude Code</option>'+
+          '<option value="codex"'+(treeTarget==="codex"?" selected":"")+'>Codex</option>'+
+          '<option value="dsh"'+(treeTarget==="dsh"?" selected":"")+'>DeepSeek Harness（V4 原生会话）</option>'+
+          '<option value="zcode"'+(treeTarget==="zcode"?" selected":"")+'>ZCode 写回（实验性）</option>'+
+        '</optgroup>'+
+        '<optgroup label="通用简报与桥接格式 (仅导出 outbox)">'+
+          '<option value="markdown"'+(treeTarget==="markdown"?" selected":"")+'>Markdown 简报（outbox）</option>'+
+          '<option value="cursor"'+(treeTarget==="cursor"?" selected":"")+'>Cursor</option>'+
+          '<option value="opencode"'+(treeTarget==="opencode"?" selected":"")+'>OpenCode</option>'+
+          '<option value="qwen"'+(treeTarget==="qwen"?" selected":"")+'>Qwen Code</option>'+
+          '<option value="kimi"'+(treeTarget==="kimi"?" selected":"")+'>Kimi CLI</option>'+
+          '<option value="copilot"'+(treeTarget==="copilot"?" selected":"")+'>Copilot</option>'+
+        '</optgroup>'+
       '</select>'+
       '<label id="tree-apply-wrap" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;opacity:'+(applyOk?"1":".5")+'">'+
         '<input type="checkbox" id="tree-apply"'+(treeApply&&applyOk?' checked':'')+(applyOk?'':' disabled')+' style="accent-color:var(--acc)" onchange="treeApply=this.checked">同时写入真实目录</label>'+
@@ -486,7 +490,7 @@ function renderSnapTable(rows,opt){
     body=opt.search
       ?'<div class="empty">'+WARN+'<div>没有命中「'+esc(opt.search)+'」— 换个关键词试试：项目名、文件路径、任务描述都行</div>'+
        '<button class="btn" onclick="loadSnaps()">清空筛选，显示最近</button></div>'
-      :'<div class="empty">vault 还是空的<br>点右上角 <b>↻ 立即同步</b> 或运行：<code>python tools/cv.py sync</code></div>';
+      :'<div class="empty">vault 还是空的<br>点右上角 <b>「同步」</b> 或运行：<code>python tools/cv.py sync</code></div>';
   }else{
     const maxSc=opt.search?Math.max(...rows.map(x=>+(x.score)||1),1):1;
     body='<div class="cardbox">'+

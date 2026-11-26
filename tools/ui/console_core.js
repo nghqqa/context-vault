@@ -163,29 +163,63 @@ document.addEventListener("keydown",e=>{
   }
   if(drawerIsOpen()||cmdkIsOpen())return;
   if(e.key==="/"){e.preventDefault();const g=$("#g-q");if(g&&g.focus)g.focus();return}
+  if(e.key==="?"){e.preventDefault();openHelp();return}
   const n=+e.key;
   if(n>=1&&n<=TABS.length){setTab(TABS[n-1]);e.preventDefault()}
 });
+function openHelp(){
+  const d=$("#help-dlg");if(!d)return;
+  if(d.open){closeHelp();return}
+  try{if(d.showModal)d.showModal()}catch(e){}
+}
+function closeHelp(){const d=$("#help-dlg");if(d&&d.open&&d.close)d.close()}
 let cmdkTimer=null,cmdkSeq=0,cmdkItems=[],cmdkIdx=0;
+const CMDK_QUICK=[
+  {label:"立即扫描同步全端会话",sub:"Sync",fn:()=>syncVaultNow()},
+  {label:"查看全部快照与项目树",sub:"快捷键 2",fn:()=>{setTab("snap");snapTreeToggle(true)}},
+  {label:"打开跨会话长期记忆库",sub:"Memory",fn:()=>openMemoryView()},
+  {label:"前往整端批量会话迁移",sub:"快捷键 3",fn:()=>{setTab("mig");if(typeof setMigScope==="function")setMigScope("batch")}},
+  {label:"前往 Skill 技能跨端迁移",sub:"Skills",fn:()=>{setTab("mig");if(typeof setMigMode==="function")setMigMode("skills")}},
+  {label:"管理 MCP 接入与备份体检",sub:"快捷键 4",fn:()=>setTab("ops")},
+  {label:"打开独立 Token 经济面板",sub:"/dashboard",fn:()=>{try{window.open("/dashboard","_blank")}catch(e){}}},
+  {label:"查看快捷键与术语说明",sub:"?",fn:()=>openHelp()}
+];
 function cmdkIsOpen(){const d=$("#cmdk");return !!(d&&d.open)}
 function openCmdk(){
   const d=$("#cmdk");if(!d)return;
   try{if(!d.open&&d.showModal)d.showModal()}catch(e){}
   const inp=$("#cmdk-q");
   if(inp){inp.value=($("#g-q")&&$("#g-q").value)||"";if(inp.focus)inp.focus();if(inp.select)inp.select()}
-  onCmdkInput();
+  runCmdkSearch();
 }
 function closeCmdk(){const d=$("#cmdk");if(d&&d.open&&d.close)d.close()}
 function onCmdkInput(){
   clearTimeout(cmdkTimer);
   cmdkTimer=setTimeout(()=>runCmdkSearch(),150);
 }
+function _syncCmdkActive(){
+  const inp=$("#cmdk-q");
+  $$(".cmdk-item").forEach((el,i)=>{
+    const on=(i===cmdkIdx);
+    el.classList.toggle("on",on);
+    el.setAttribute("aria-selected",on?"true":"false");
+    if(on){
+      if(inp)inp.setAttribute("aria-activedescendant",el.id||("cmdk-opt-"+i));
+      if(el.scrollIntoView)el.scrollIntoView({block:"nearest"});
+    }
+  });
+  if(!cmdkItems.length&&inp)inp.setAttribute("aria-activedescendant","");
+}
 async function runCmdkSearch(){
   const my=++cmdkSeq,body=$("#cmdk-body"),q=($("#cmdk-q")&&$("#cmdk-q").value||"").trim();
   if(!body)return;
   if(!q){
-    cmdkItems=[];cmdkIdx=0;
-    body.innerHTML='<div class="cmdk-empty">输入关键词即时检索跨会话记忆与历史快照 · 回车直达</div>';
+    cmdkItems=CMDK_QUICK.map(x=>({type:"act",fn:x.fn}));cmdkIdx=0;
+    body.innerHTML='<div class="cmdk-sec">快捷操作 (↑↓ 选择 · Enter 执行)</div>'+
+      CMDK_QUICK.map((x,i)=>'<button type="button" id="cmdk-opt-'+i+'" role="option" aria-selected="'+(i===0?"true":"false")+'" class="cmdk-item'+(i===0?' on':'')+'" data-ci="'+i+'" onclick="execCmdkItem('+i+')">'+
+        '<span class="ci-main"><span class="chip">操作</span><span>'+esc(x.label)+'</span></span>'+
+        '<span class="ci-sub">'+esc(x.sub)+'</span></button>').join("");
+    _syncCmdkActive();
     return;
   }
   body.innerHTML='<div class="cmdk-empty">检索中…</div>';
@@ -196,15 +230,27 @@ async function runCmdkSearch(){
     ]);
     if(my!==cmdkSeq)return;
     const mems=(mr&&mr.memories)||[],hits=(sr&&sr.hits)||[];
+    const ql=q.toLowerCase();
+    const acts=CMDK_QUICK.filter(x=>x.label.toLowerCase().includes(ql)||x.sub.toLowerCase().includes(ql));
     cmdkItems=[];cmdkIdx=0;
     let html="";
+    if(acts.length){
+      html+='<div class="cmdk-sec">快捷操作 ('+acts.length+')</div>';
+      acts.forEach(x=>{
+        const idx=cmdkItems.length;
+        cmdkItems.push({type:"act",fn:x.fn});
+        html+='<button type="button" id="cmdk-opt-'+idx+'" role="option" aria-selected="'+(idx===0?"true":"false")+'" class="cmdk-item'+(idx===0?' on':'')+'" data-ci="'+idx+'" onclick="execCmdkItem('+idx+')">'+
+          '<span class="ci-main"><span class="chip">操作</span><span>'+esc(x.label)+'</span></span>'+
+          '<span class="ci-sub">'+esc(x.sub)+'</span></button>';
+      });
+    }
     if(mems.length){
       html+='<div class="cmdk-sec">跨会话记忆 ('+mems.length+')</div>';
       mems.forEach(m=>{
         const idx=cmdkItems.length,km=memKindMeta(m.kind),txt=stripMd(m.content).replace(/\s+/g," ").trim();
         const sid=m.snapshot||"";
         cmdkItems.push({type:"mem",sid:sid,q:q});
-        html+='<button type="button" class="cmdk-item'+(idx===0?' on':'')+'" data-ci="'+idx+'" onclick="execCmdkItem('+idx+')">'+
+        html+='<button type="button" id="cmdk-opt-'+idx+'" role="option" aria-selected="'+(idx===0?"true":"false")+'" class="cmdk-item'+(idx===0?' on':'')+'" data-ci="'+idx+'" onclick="execCmdkItem('+idx+')">'+
           '<span class="ci-main"><span class="chip '+km.cls+'">'+esc(km.t)+'</span><span>'+highlightPlain(esc(txt.slice(0,84)),q)+'</span></span>'+
           '<span class="ci-sub">'+esc(m.project||"全局")+'</span></button>';
       });
@@ -214,16 +260,18 @@ async function runCmdkSearch(){
       hits.forEach(h=>{
         const idx=cmdkItems.length,c=cleanSummary(h.first||"");
         cmdkItems.push({type:"snap",sid:h.sid,ts:h.created_at||""});
-        html+='<button type="button" class="cmdk-item'+(idx===0?' on':'')+'" data-ci="'+idx+'" onclick="execCmdkItem('+idx+')">'+
+        html+='<button type="button" id="cmdk-opt-'+idx+'" role="option" aria-selected="'+(idx===0?"true":"false")+'" class="cmdk-item'+(idx===0?' on':'')+'" data-ci="'+idx+'" onclick="execCmdkItem('+idx+')">'+
           '<span class="ci-main"><span class="chip">'+esc(h.agent||"?")+'</span><span>'+highlightPlain(esc(c.text.slice(0,72)),q)+'</span></span>'+
           '<span class="ci-sub">'+esc(shortSid(h.sid))+'</span></button>';
       });
     }
     if(!cmdkItems.length){
       body.innerHTML='<div class="cmdk-empty">未找到匹配「'+esc(q)+'」的记忆或快照</div>';
+      _syncCmdkActive();
       return;
     }
     body.innerHTML=html;
+    _syncCmdkActive();
   }catch(e){
     if(my!==cmdkSeq)return;
     body.innerHTML='<div class="cmdk-empty">检索失败：'+esc(e.message)+'</div>';
@@ -241,7 +289,7 @@ function onCmdkKey(e){
   if(e.key==="ArrowDown"||e.key==="ArrowUp"){
     e.preventDefault();
     cmdkIdx=(cmdkIdx+(e.key==="ArrowDown"?1:-1)+cmdkItems.length)%cmdkItems.length;
-    $$(".cmdk-item").forEach((el,i)=>el.classList.toggle("on",i===cmdkIdx));
+    _syncCmdkActive();
     return;
   }
   if(e.key==="Enter"){e.preventDefault();execCmdkItem(cmdkIdx)}
@@ -249,6 +297,7 @@ function onCmdkKey(e){
 function execCmdkItem(idx){
   const it=cmdkItems[idx];if(!it)return;
   closeCmdk();
+  if(it.type==="act"&&it.fn){it.fn();return}
   if(it.sid&&/^cv_[0-9a-f]{8,64}$/i.test(it.sid)){snapDetail(it.sid,it.ts||"");return}
   openMemoryView();
   if($("#snap-q"))$("#snap-q").value=it.q||"";
@@ -274,7 +323,7 @@ async function checkHealth(){
   lastHealthAt=Date.now();
   const s=$("#status");s.classList.remove("err","auth");
   s.title="数据已同步于 "+new Date().toLocaleTimeString("zh-CN",{hour12:false});
-  s.innerHTML='<span class="pulse"></span>服务正常 · '+num(h.snapshots)+" 快照 · "+num(h.terms)+" 索引词项";
+  s.innerHTML='<span class="pulse"></span><span>服务正常 · '+num(h.snapshots)+" 快照 · "+num(h.terms)+" 索引词项</span>";
   return h;
 }
 let healthSeq=seqGuard();
@@ -290,9 +339,9 @@ async function boot(){
   }catch(e){
     const s=$("#status");
     if(e&&e.code===401){s.classList.remove("err");s.classList.add("auth");
-      s.innerHTML='<span class="pulse"></span>需要鉴权 — 请用带 token 的链接重新打开 (凭据不入页面)';}
+      s.innerHTML='<span class="pulse"></span><span>需要鉴权 — 请用带 token 的链接重新打开 (凭据不入页面)</span>';}
     else{s.classList.add("err");
-      s.innerHTML="<span class='pulse'></span>服务异常 · 4s 后重试";}
+      s.innerHTML="<span class='pulse'></span><span>服务异常 · 4s 后重试</span>";}
     scheduleBoot();
   }
   await ovP;

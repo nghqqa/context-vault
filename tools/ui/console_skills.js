@@ -19,13 +19,17 @@ function setMigMode(m){
   const sp=$("#mig-session-pane"),kp=$("#mig-skills-pane");
   if(sp)sp.hidden=isSk;
   if(kp)kp.hidden=!isSk;
-  const bs=$("#mig-tab-session"),bk=$("#mig-tab-skills");
-  if(bs){bs.classList.toggle("on",!isSk);bs.setAttribute("aria-selected",!isSk?"true":"false")}
+  const isBatch=(typeof migScope!=="undefined"&&migScope==="batch");
+  const b1=$("#mig-scope-single"),b2=$("#mig-scope-batch"),bk=$("#mig-tab-skills");
+  if(b1){const on=!isSk&&!isBatch;b1.classList.toggle("on",on);b1.setAttribute("aria-selected",on?"true":"false")}
+  if(b2){const on=!isSk&&isBatch;b2.classList.toggle("on",on);b2.setAttribute("aria-selected",on?"true":"false")}
   if(bk){bk.classList.toggle("on",isSk);bk.setAttribute("aria-selected",isSk?"true":"false")}
   const mh=$("#mig-mode-hint");
   if(mh)mh.textContent=isSk
     ?"批量搬运已接入后端的本地 SKILL.md 技能包（支持目录展平、Frontmatter 规范化与 Antigravity 双模式）"
-    :"跨工具搬运历史对话（支持保真度预演与 Markdown 预算简报）";
+    :(isBatch
+      ?"按整个 Harness 批量盘点并迁出主对话（支持按项目/已迁移/同源自动去重，一键落 outbox 或写入真实目录）"
+      :"单条精调可预览活上下文、逐项失真与精确恢复命令");
   if(isSk&&!skData)loadSkills({refresh:true});
 }
 function skVisibleList(){
