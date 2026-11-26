@@ -19,7 +19,7 @@ from pathlib import Path
 from cv_ui import load_dashboard_html as _load_dashboard_html
 
 
-from cv_core import cv_mod as _cv  # noqa: E402
+from cv_core import cv_mod as _cv, user_agent  # noqa: E402
 
 
 # ------------------------------------------------- probe: 上游可用性探测
@@ -47,7 +47,7 @@ def models_url(base: str) -> str:
 
 
 def fetch_models(url: str, key: str | None, timeout: int = 10) -> tuple:
-    req = urllib.request.Request(url, headers={"User-Agent": "ContextVault/0.1"})
+    req = urllib.request.Request(url, headers={"User-Agent": user_agent()})
     if key:
         req.add_header("Authorization", f"Bearer {key}")
     t0 = time.time()
@@ -186,7 +186,7 @@ def post_chat(url: str, key: str, model: str, messages: list, timeout: int = 120
     req = urllib.request.Request(url, data=body,
                                  headers={"Content-Type": "application/json",
                                           "Authorization": f"Bearer {key}",
-                                          "User-Agent": "ContextVault/0.1"})
+                                          "User-Agent": user_agent()})
     t0 = time.time()
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8")), int((time.time() - t0) * 1000)

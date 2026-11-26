@@ -623,7 +623,7 @@ def compress_brief(env: dict, budget_tokens: int | None = None,
         kept["tail"] = sum(1 for ln in sec if ln.startswith("- **"))
         out += sec
 
-    out_tokens = estimate_text_tokens("\n".join(out)) + used
+    out_tokens = estimate_text_tokens("\n".join(out))
     stats = {"budget_tokens": budget, "orig_tokens": orig_tokens, "out_tokens": out_tokens,
              "ratio": round(out_tokens / max(orig_tokens, 1), 4),
              "decisions_kept": kept["decisions"], "decisions_total": len(decisions),
@@ -649,6 +649,164 @@ def blocks_to_brief(env: dict, max_chars: int = 48 * 1024, budget_tokens: int | 
     if len(brief) > max_chars:
         brief = brief[:max_chars] + "\n\n…[简报超限截断; 完整内容请用精确迁移 cv import]"
     return brief
+
+
+def build_handoff_api(
+    vault: Path,
+    sid: str | None = None,
+    project: str | None = None,
+    budget_tokens: int = 4000,
+    include_memories: bool = True,
+) -> dict:
+    """生成带预算的五槽位跨工具交接简报 (MCP vault_handoff 与 HTTP /handoff 共用)。"""
+    from cv_rank import match_project_scope, project_match_rank
+    import cv_memory as _mem
+
+    c = _cv()
+    if isinstance(budget_tokens, bool):
+        raise ValueError("budget_tokens 必须为整数")
+    try:
+        bt = int(budget_tokens)
+    except (TypeError, ValueError):
+        raise ValueError("budget_tokens 必须为整数")
+    if bt < 200 or bt > 32000:
+        raise ValueError("budget_tokens 必须在 200..32000 之间")
+
+    proj_q = str(project or "").strip()
+    target_sid = str(sid or "").strip()
+    env = None
+    if target_sid:
+        if not re.fullmatch(r"cv_[0-9a-f]{8,64}", target_sid):
+            raise ValueError("无效 id: 需要 cv_ 前缀的快照 id")
+        p = vault / "snapshots" / f"{target_sid}.json"
+        if not p.is_file():
+            raise c.SnapshotNotFound(f"快照不存在: {target_sid}")
+        try:
+            env = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"快照损坏或不可读: {target_sid} ({exc})")
+    else:
+        has_db_snaps = False
+        if (vault / "vault.db").is_file():
+            try:
+                conn = c.db(vault)
+                try:
+                    has_db_snaps = conn.execute("SELECT 1 FROM snapshots LIMIT 1").fetchone() is not None
+                except sqlite3.OperationalError:
+                    has_db_snaps = False
+                finally:
+                    conn.close()
+            except (sqlite3.Error, OSError):
+                has_db_snaps = False
+        if has_db_snaps:
+            try:
+                tops = (
+                    c._resolve_project_items(vault, proj_q)
+                    if proj_q
+                    else c.resolve_top_conversations(vault, limit=1)
+                )
+                if proj_q:
+                    tops = [it for it in tops if match_project_scope(it.get("cwd"), proj_q)]
+                if tops:
+                    cand_sid = tops[0].get("id") or ""
+                    cp = vault / "snapshots" / f"{cand_sid}.json"
+                    if cand_sid and cp.is_file():
+                        target_sid = cand_sid
+                        env = json.loads(cp.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                env = None
+            if env is None:
+                hint = f" (项目: {proj_q})" if proj_q else ""
+                raise c.SnapshotNotFound(f"未找到可用会话快照{hint}")
+        else:
+            snap_dir = vault / "snapshots"
+            files = sorted(snap_dir.glob("cv_*.json")) if snap_dir.is_dir() else []
+            loaded: list[tuple[str, dict]] = []
+            parent_sids: set[str] = set()
+            for f in files:
+                try:
+                    cand_env = json.loads(f.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if not isinstance(cand_env, dict) or not isinstance(cand_env.get("capture"), dict) \
+                        or not isinstance(cand_env.get("conversation"), list):
+                    continue
+                lin = cand_env.get("lineage")
+                if isinstance(lin, dict) and lin.get("parent_snapshot"):
+                    parent_sids.add(str(lin["parent_snapshot"]))
+                loaded.append((f.stem, cand_env))
+            best_key = None
+            best_pair = None
+            for fsid, cand_env in loaded:
+                if fsid in parent_sids:
+                    continue
+                cap_cand = cand_env["capture"]
+                if cap_cand.get("parent_session_ref") \
+                        or str(cap_cand.get("originator") or "").startswith("workflow subagent"):
+                    continue
+                cwd_cand = str(cap_cand.get("cwd") or "")
+                prank = project_match_rank(cwd_cand, proj_q) if proj_q else 1
+                if proj_q and prank <= 0:
+                    continue
+                key = (prank, str(cand_env.get("created_at") or ""), fsid)
+                if best_key is None or key > best_key:
+                    best_key = key
+                    best_pair = (fsid, cand_env)
+            if best_pair is None:
+                hint = f" (项目: {proj_q})" if proj_q else ""
+                raise c.SnapshotNotFound(f"未找到可用会话快照{hint}")
+            target_sid, env = best_pair
+
+    if not isinstance(env, dict) or not isinstance(env.get("capture"), dict) \
+            or not isinstance(env.get("stats"), dict) or not isinstance(env.get("conversation"), list):
+        raise ValueError(f"快照结构不完整: {target_sid}")
+    env = dict(env)
+    env["_sid"] = target_sid
+
+    cap = env["capture"]
+    cwd = str(cap.get("cwd") or "")
+    proj_label = proj_q or (Path(cwd).name if cwd else "")
+
+    mem_section = ""
+    mem_items: list = []
+    mem_tokens = 0
+    if include_memories and bt >= 500:
+        mem_query_proj = proj_q or cwd or proj_label
+        if mem_query_proj:
+            try:
+                raw_mems = _mem.memory_search_api(vault, "", limit=8, project=mem_query_proj)
+            except sqlite3.OperationalError:
+                raw_mems = []
+            if raw_mems:
+                mem_budget = min(bt // 4, 800)
+                mem_lines = ["", "## 项目当前有效记忆 (Active Project Memories)", ""]
+                for m in raw_mems:
+                    pin = "**[置顶]** " if m.get("pinned") else ""
+                    txt = re.sub(r"\s+", " ", str(m.get("content") or "")).strip()[:220]
+                    cand_line = f"- [{m['kind']}] {pin}{txt}"
+                    cand_sec = "\n".join(mem_lines + [cand_line])
+                    if estimate_text_tokens(cand_sec) <= mem_budget:
+                        mem_lines.append(cand_line)
+                        mem_items.append(m)
+                if mem_items:
+                    mem_section = "\n".join(mem_lines)
+                    mem_tokens = estimate_text_tokens(mem_section)
+
+    core_budget = max(200, bt - mem_tokens)
+    brief, stats = compress_brief(env, budget_tokens=core_budget)
+    full_brief = f"{brief}\n{mem_section}" if mem_section else brief
+    return {
+        "id": target_sid,
+        "agent": cap.get("agent") or "?",
+        "cwd": cwd,
+        "project": proj_label,
+        "created_at": env.get("created_at") or "",
+        "budget_tokens": bt,
+        "tokens_est": estimate_text_tokens(full_brief),
+        "memories_count": len(mem_items),
+        "stats": stats,
+        "brief": full_brief,
+    }
 
 
 def blocks_to_dsh(env: dict, strip_thinking: bool = False, session_id: str | None = None) -> tuple:

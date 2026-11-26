@@ -17,7 +17,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from cv_core import atomic_write_text
+from cv_core import atomic_write_text, user_agent
 from cv_index import rrf_fuse
 
 EMBED_URL_ENV = "CV_EMBEDDINGS_URL"       # 如 http://127.0.0.1:11434/v1/embeddings (Ollama)
@@ -93,7 +93,7 @@ def probe_ollama(host: str | None = None, timeout: float = 2.5) -> dict:
     """探测本机 Ollama 服务 (/api/tags) 与已拉取的模型列表。"""
     base = (host or os.environ.get(OLLAMA_HOST_ENV) or "http://127.0.0.1:11434").strip().rstrip("/")
     try:
-        req = urllib.request.Request(f"{base}/api/tags", headers={"User-Agent": "ContextVault/0.7"})
+        req = urllib.request.Request(f"{base}/api/tags", headers={"User-Agent": user_agent()})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         models = [str(m.get("name") or "") for m in (data.get("models") or []) if m.get("name")]
@@ -272,10 +272,12 @@ def _snapshot_repr(env: dict) -> str:
 
 
 def hybrid_search(idx, vault: Path, query: str, limit: int,
-                  provider: DenseProvider | None = None, cache: EmbeddingCache | None = None) -> dict:
+                  provider: DenseProvider | None = None, cache: EmbeddingCache | None = None,
+                  project: str | None = None, agent: str | None = None,
+                  since: str | None = None) -> dict:
     """RRF 混合检索: BM25 候选池 × 稠密语义排序 → 融合。任何环节失败都优雅回退纯 BM25。"""
     lim = max(1, int(limit))
-    base = idx.search(query, max(lim, RRF_CANDIDATES))
+    base = idx.search(query, max(lim, RRF_CANDIDATES), project=project, agent=agent, since=since)
     fallback_hits = base["hits"][:lim]
     provider = provider or DenseProvider(vault=vault)
     if not provider.available or not base["hits"]:
@@ -398,7 +400,7 @@ class LocalLLMClient:
                 {"role": "user", "content": user_prompt},
             ],
         }
-        headers = {"Content-Type": "application/json", "User-Agent": "ContextVault/0.7"}
+        headers = {"Content-Type": "application/json", "User-Agent": user_agent()}
         if self.key:
             headers["Authorization"] = f"Bearer {self.key}"
         req = urllib.request.Request(

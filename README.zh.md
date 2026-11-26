@@ -38,16 +38,16 @@
 - **深度检索内核**——代码感知分词（camel/snake/路径/错误码复合+子词双索引）、块角色加权 BM25（全局 IDF + 长度归一）、Lineage 折叠（演进链命中折叠到最新版）、时间衰减与可选稠密向量 RRF；SQLite 紧凑倒排取代巨型 pickle。
 - **公开可复现 Benchmark**——`python benchmarks/run_bench.py` 30 秒复现 162 题五维度消融（v0→v2 全演进链），见 [docs/BENCHMARK.md](docs/BENCHMARK.md)。
 - **token 账本**——从你自己会话文件内嵌的 usage 记录聚合出按模型成本、缓存命中率，不需要任何代理。`cv ledger sync` 直接只读采集 Claude Code / Codex / ZCode / Antigravity / DeepSeek Harness（内置 DeepSeek V4/Flash 费率）本地日志（幂等去重）形成 `usage_events` 事件流，`cv ledger quota` 输出 5 小时滚动窗口、恢复 ETA、7d/月跑道（可选 `vault/accounts.json` 账号额度池）与按模型/项目/账号排行——纯本地离线，无需 headroom。
-- **跨会话双时态记忆**——从历史自动提取决策/偏好/摘要/踩坑/架构红线，每条带精确出处（快照#块 + 会话真实时间）与主题签名；方案被推翻时旧记忆自动标记 `superseded` 并默认不再返回，`include_history` 可追溯完整演变链。
-- **MCP 记忆后端**——6 个工具让任意 MCP 客户端（Claude Code / Codex / Cursor / Antigravity / DeepSeek Harness `cordis.patch.yml`）变成"记得住的 agent"，支持显式 `budget_tokens` 预算裁剪；精确识别卸载残留目录，支持 `--clients` 多选接入与 `.bak-cv` 安全移除（`cv mcp uninstall`）。
+- **跨会话双时态记忆与规则编译器**——从历史自动提取决策/偏好/摘要/踩坑/架构红线，每条带精确出处（快照#块 + 会话真实时间）与主题签名；方案被推翻时旧记忆自动标记 `superseded` 并默认不再返回，`include_history` 可追溯完整演变链。`cv memory compile-rules`（及 Web 控制台「记忆库 → 编译项目规则」）可将项目有效记忆按 token 预算编译为受哨兵保护的 `AGENTS.md` / `CLAUDE.md` / `.cursorrules`，保留手写段落。
+- **双向 MCP 记忆后端**——8 个工具（`vault_remember`、`vault_memorize`、`vault_handoff`、`vault_context`、`vault_search`、`vault_recent`、`vault_snapshot`、`vault_stats`）让任意 MCP 客户端（Claude Code / Codex / Cursor / Antigravity / DeepSeek Harness `cordis.patch.yml`）既能按 `project`/`agent`/`since` 过滤检索历史，也能在工作中直接写入决策/红线与拉取交接简报，并支持 `budget_tokens` 预算裁剪；精确识别卸载残留目录，支持 `--clients` 多选接入与 `.bak-cv` 安全移除（`cv mcp uninstall`）。
 - **AML 标准 Add/Search 适配**——内置 `cv-aml` / [tools/aml_adapter.py](tools/aml_adapter.py)（及挂载于 `cv serve` 的 `/aml/add`、`/aml/search`），支持多租户隔离、`request_id` 幂等重放与 `409 Conflict` 冲突检测，附带零依赖 [Dockerfile.aml](Dockerfile.aml)。
 - **可选敏感信息脱敏**——`cv export --redact` 或 `CV_REDACT_SECRETS=1` 在入库前自动对常见 API Key / GitHub Token / AWS Key / JWT / PEM 私钥打码。
 - **可选本地语义增强（Ollama / LLM）**——`cv semantic`（及控制台「设置与运维」页）支持接入本地 Ollama 做向量混合重排、LLM 记忆精炼与自动会话标题；默认关闭零外发。
-- **开箱即用 Web 控制台**——支持 `Ctrl/Cmd+K` 全局联想、空库 3 步新手向导、记忆手动置顶、Markdown 预算简报一键复制、MCP 按需运维/备份/裁剪与 SWR 异步秒开。
+- **开箱即用 Web 控制台**——支持 `Ctrl/Cmd+K` 全局联想、空库 3 步新手向导、记忆手动置顶与项目规则一键编译、Markdown 预算简报一键复制、MCP 按需运维/备份/裁剪与 SWR 异步秒开。
 
 ## 🚀 快速开始
 
-> **Windows 绿色托盘版（免装 Python，14.4 MB 单文件双击即用）**：直接下载 [ContextVault.exe (v0.13.1)](https://github.com/nghqqa/context-vault/releases/download/v0.13.1/ContextVault.exe)（校验见 [Release 页](https://github.com/nghqqa/context-vault/releases/tag/v0.13.1)），内置 Web 控制台（`127.0.0.1:8791`）、**免 Python 原生 MCP 服务（`--mcp`）**、定时同步全端会话与每日自动备份。
+> **Windows 绿色托盘版（免装 Python，14.5 MB 单文件双击即用）**：直接下载 [ContextVault.exe (v0.14.0)](https://github.com/nghqqa/context-vault/releases/download/v0.14.0/ContextVault.exe)（校验见 [Release 页](https://github.com/nghqqa/context-vault/releases/tag/v0.14.0)），内置 Web 控制台（`127.0.0.1:8791`）、**免 Python 原生 MCP 服务（`--mcp`）**、定时同步全端会话与每日自动备份。
 
 ```bash
 pip install -e .                   # 可选：注册全局命令 cv / cv-mcp / cv-aml (零第三方依赖)
@@ -91,11 +91,13 @@ python tools/cv.py import --agent claude --target codex     # 整端全量批量
 
 ## 🧠 记忆后端 —— API 一览
 
-| MCP 工具 | 返回 |
+| MCP 工具 | 用途 |
 |---|---|
-| `vault_remember(query)` | 长期记忆：历史决策/项目结论/用户偏好（每条标注来源快照） |
-| `vault_context(query)` | 与当前任务相关的历史摘录 |
-| `vault_search(query)` | 全库文本搜索 |
+| `vault_remember(query[, kind, project, since, include_history])` | 长期记忆检索：返回带 `#id` 与快照/时间出处的有效记忆（支持历史演变链） |
+| `vault_memorize(content[, kind, project, pinned, supersedes])` | Agent 直接写入决策/红线/踩坑/偏好（支持置顶与 `supersedes` 推翻旧记忆，永不改快照） |
+| `vault_handoff([id, project, budget_tokens, include_memories])` | 生成带预算的五槽位跨工具交接简报（自动附带项目有效记忆） |
+| `vault_context(query[, project, agent, since, budget_tokens])` | 与当前任务相关的历史摘录 |
+| `vault_search(query[, project, agent, since, budget_tokens])` | 全库文本搜索（热索引与冷扫严格等价） |
 | `vault_recent(limit)` | 最近快照列表 |
 | `vault_snapshot(id)` | 单快照详情（块分布/活上下文/token） |
 | `vault_stats()` | token 账本汇总 |
@@ -119,7 +121,7 @@ vault/
 - 195MB Codex rollout → **1.5 秒**导出 → 12MB 快照；39 个压缩边界、2.24 亿 token 用量、838 对工具调用全部保真。
 - **双向迁移真机验证全部通过**：Codex→Claude 在 2.1.181 里 resume 续写；Claude→Codex 在 0.153.4 里恢复 **373,160 tokens 全量上下文**。
 - 逆向并规避 codex 两代格式陷阱（`ordinal` 数字/字符串互不兼容、resume 走 SQLite thread-store、"rollout is empty" 误导性报错）。
-- 测试 **259 项用例**，含冷热双路径等价、SWR 非阻塞缓存、DeepSeek Harness V4/Zstd/Cordis 全链路、整端全量批量会话迁移（`plan_batch_migration` / `run_batch_migration` / `/migrate/batch` / `cv import --agent`）、MCP 按需自选与卸载残留隔离、Skill 工作台（Diff 预览 / 路径安全移除 / 备份一键回滚 / `connected_only` 与自失效缓存）、HTTP 安全响应头与 IPv6 `[::1]` 守卫、`/stats` 与数据库迁移缓存、POST 413 限流与 gzip 压测——常驻索引与文件扫描回退必须结果一致；并在 **DeepSeek Harness Desktop**（MCP 工具调用、V4 压缩会话渲染、`/tdd` Skill 识别）、**Claude Code 2.1.181** 与 **Codex 0.153.4** 完成真机实测；CI 另有控制台 JS 执行/单元回归（`S1-S8`、`MB1-MB4`）、真实浏览器多视口显隐与布局探针（380–2560px × 8 面板 32/32 零溢出）、20 模块纯标准库导入校验与安装包冒烟测试。
+- 测试 **268 项用例**，含冷热三路等价与 `project`/`agent`/`since` 作用域过滤（及演进链叶子 `since`）、双向 MCP（`vault_memorize` 推翻链 / `vault_handoff` / 401 与旧版 404 回退保护）、`cv memory compile-rules`（哨兵保护/预算裁剪/`.bak-cv` 备份/HTTP 白名单校验）、SWR 非阻塞缓存、DeepSeek Harness V4/Zstd/Cordis 全链路、整端全量批量会话迁移（`plan_batch_migration` / `run_batch_migration` / `/migrate/batch` / `cv import --agent`）、MCP 按需自选与卸载残留隔离、Skill 工作台（Diff 预览 / 路径安全移除 / 备份一键回滚 / `connected_only` 与自失效缓存）、HTTP 安全响应头与 IPv6 `[::1]` 守卫、`/stats` 与数据库迁移缓存、POST 413 限流与 gzip 压测——常驻索引与文件扫描回退必须结果一致；并在 **DeepSeek Harness Desktop**（MCP 工具调用、V4 压缩会话渲染、`/tdd` Skill 识别）、**Claude Code 2.1.181** 与 **Codex 0.153.4** 完成真机实测；CI 另有控制台 JS 执行/单元回归（`S1-S8`、`MB1-MB4`、`MR1a-MR1d`）、真实浏览器多视口显隐与布局探针（380–2560px × 8 面板 32/32 零溢出）、26 模块纯标准库导入校验与安装包冒烟测试。
 
 ## 设计原则
 
@@ -133,7 +135,7 @@ vault/
 
 | 功能 | headroom 提供 | 无 headroom 的替代 |
 |---|---|---|
-| 省钱账本导入 | `~/.headroom/savings_events.jsonl` + `proxy_savings.json` | 暂无（路线图：直连 relay usage API） |
+| 省钱账本导入 | `~/.headroom/savings_events.jsonl` + `proxy_savings.json` | 内置多端本地直采（`cv ledger sync` / `quota`，零代理）与通用 relay billing/web API（`cv ledger import-relay`） |
 | 上游探测/预热的 relay 发现 | `switcher-profiles.json` | 环境变量 `CV_RELAY_PROFILES='[{"id":"x","openai_api_url":"https://…","default_model":"…"}]'` |
 | 探测/预热的认证 | `headroom-auth-token.ps1` 自动取 token | 环境变量 `CV_RELAY_KEY` |
 | 切换守望 | 监听 Switcher 写的 `upstream-profile.json` | 任何程序写该文件均触发；或 `cv watch --file` 监听任意配置 |
@@ -146,7 +148,7 @@ vault/
 |---|---|---|---|---|
 | 层次 | **资产库** | 转换器 | 记忆 | 通路 |
 | 不可变内容寻址存储 + lineage | ✅ | — | — | — |
-| 双向迁移 | ✅ 原生 2 + 桥接 18 | ✅ | — | — |
+| 双向迁移 | ✅ 原生 5 + 桥接 18 | ✅ | — | — |
 | 从会话文件出账本 | ✅ | — | — | 仅自家流量 |
 | 带出处的记忆 | ✅（双时态引擎 v2，含冲突覆盖；可插拔） | — | ✅ | — |
 | 开放格式规范 | ✅ [CC-BY](docs/snapshot-format.md)（含 txcript 映射） | txcript `Simple` | — | — |

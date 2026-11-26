@@ -5,10 +5,12 @@
 
 工具:
     vault_recent(limit)          最近快照列表 (id/agent/token/完整性)
-    vault_search(query, limit)   全库文本搜索, 词频评分
-    vault_context(query, limit)  记忆检索: 命中块 + 前后文摘录 (记忆后端核心)
+    vault_search(query, limit)   全库文本搜索, 词频评分 (支持 project/agent/since 过滤)
+    vault_context(query, limit)  记忆检索: 命中块 + 前后文摘录 (支持 project/agent/since 过滤)
     vault_snapshot(id)           单快照详情 (capture/stats/块分布/活上下文)
-    vault_remember(query, limit) 跨会话长期记忆检索 (含演变链)
+    vault_remember(query, limit) 跨会话长期记忆检索 (含演变链, 支持 project/since/kind 过滤)
+    vault_memorize(content, ...) Agent 直接写入长期记忆 (支持置顶与 supersedes 推翻链)
+    vault_handoff(id|project...) 生成带预算的五槽位跨工具交接简报 (附项目有效记忆)
     vault_stats()                token 账本汇总 (本地多端直采)
 
 接入 (任一 MCP 客户端):
@@ -24,11 +26,13 @@ import re
 import sqlite3
 import sys
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 from pathlib import Path
 
 SERVER_NAME = "context-vault"
-SERVER_VERSION = "0.13.1"
+SERVER_VERSION = "0.14.0"
 PROTO = "2025-06-18"
 SEARCH_CONTEXT_CHARS = 400  # vault_context 每个命中块返回的摘录长度
 MAX_TEXT_LEN = 2000
@@ -40,9 +44,16 @@ from cv_core import (  # noqa: E402
     estimate_text_tokens as _estimate_tokens,
     parse_budget_tokens as _parse_budget_tokens,
     truncate_to_tokens as _truncate_to_tokens,
+    user_agent as _user_agent,
     vault_dir,
 )
 from cv_index import VaultIndex, block_text  # noqa: F401,E402
+
+
+def _debug_log(ctx: str, exc: BaseException) -> None:
+    """仅当 CV_MCP_DEBUG 为真值时将冷回退调试异常写入 stderr, 默认静默."""
+    if os.environ.get("CV_MCP_DEBUG", "").strip().lower() in ("1", "true", "yes", "on"):
+        sys.stderr.write(f"[context-vault mcp] {ctx}: {type(exc).__name__}: {exc}\n")
 
 
 def load_all_snapshots(vault: Path) -> list:
@@ -119,7 +130,8 @@ def _readonly_index(args_vault):
     try:
         idx = VaultIndex(args_vault, block_text, readonly=True)
         return None if getattr(idx, "_broken", False) else idx
-    except Exception:
+    except Exception as exc:
+        _debug_log("_readonly_index", exc)
         return None
 
 
@@ -168,24 +180,27 @@ def _trim_by_budget(header: str, items: list[str], footer: str,
     return "\n".join(parts)[:hard_cap]
 
 
-def t_search(args_vault, query: str, limit: int, budget_tokens: int | None = None) -> str:
+def t_search(args_vault, query: str, limit: int, budget_tokens: int | None = None,
+             project: str | None = None, agent: str | None = None,
+             since: str | None = None) -> str:
     """冷回退搜索 — 三级路径: 常驻服务热索引 > 只读 search_index.db 直查 (毫秒级)
     > 全量文件扫描 ColdRanker。三级共用同一评分/折叠/衰减数学, 命中集一致
     (铁律: 常驻只是加速, 不是依赖)。"""
     import cv as _cv
+    _cv.normalize_since(since)
     if not _cv.tokenize(query):
         return "查询词太短"
     limit = max(1, min(int(limit), 200))  # limit<=0 → 1: 0 曾把真实命中报成"未命中"而热路径报"命中 N" (修复4)
     idx = _readonly_index(args_vault)
     if idx is not None:
         try:
-            r = idx.search(query, limit)
+            r = idx.search(query, limit, project=project, agent=agent, since=since)
         finally:
             idx._close()  # 立即释放 Windows SQLite 只读句柄
         via = " (via 本地索引)"
     else:
         snaps = load_all_snapshots(args_vault)
-        r = _cv.ColdRanker(snaps, query).search(limit)
+        r = _cv.ColdRanker(snaps, query).search(limit, project=project, agent=agent, since=since)
         via = ""
     if not r["hits"]:
         return f"未命中: {query}"
@@ -199,23 +214,26 @@ def t_search(args_vault, query: str, limit: int, budget_tokens: int | None = Non
     return _trim_by_budget(header, lines, "", budget_tokens)
 
 
-def t_context(args_vault, query: str, limit: int, budget_tokens: int | None = None) -> str:
+def t_context(args_vault, query: str, limit: int, budget_tokens: int | None = None,
+              project: str | None = None, agent: str | None = None,
+              since: str | None = None) -> str:
     """记忆检索: 跨快照找最相关的上下文摘录, 供当前会话引用。
     三级路径同 t_search (同分词/评分/折叠), 保证启停常驻服务不改变命中集合。"""
     import cv as _cv
+    _cv.normalize_since(since)
     if not _cv.tokenize(query):
         return "查询词太短"
     limit = max(1, min(int(limit), 200))  # 同修复4: 0/负数钳 1, 冷热语义一致
     idx = _readonly_index(args_vault)
     if idx is not None:
         try:
-            r = idx.context(query, limit)
+            r = idx.context(query, limit, project=project, agent=agent, since=since)
         finally:
             idx._close()  # 立即释放 Windows SQLite 只读句柄
         via = " (via 本地索引)"
     else:
         snaps = load_all_snapshots(args_vault)
-        r = _cv.ColdRanker(snaps, query).context(limit)
+        r = _cv.ColdRanker(snaps, query).context(limit, project=project, agent=agent, since=since)
         via = ""
     if not r["results"]:
         return f"vault 中无相关上下文: {query}"
@@ -416,27 +434,115 @@ def _svc_clear_neg():
     _svc_neg_until = 0.0
 
 
-def _svc_get(path: str, timeout: float = 0.5):
-    import urllib.request
-    headers = {"User-Agent": "ContextVault-mcp/0.1"}
-    tok = os.environ.get("CV_SERVE_TOKEN")  # 与 cv serve --token 配对: 鉴权档热索引联动
-    if tok:
-        headers["X-Vault-Token"] = tok
-    req = urllib.request.Request(_resolve_base() + path, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+def _qs(params: dict) -> str:
+    clean = [(k, str(v)) for k, v in params.items() if v is not None and str(v) != ""]
+    return urllib.parse.urlencode(clean)
+
+
+class _SvcClientError(Exception):
+    """常驻服务明确返回的可诊断客户端错误 (400 参数错或真实业务 404), 不触发负缓存."""
+
+    def __init__(self, code: int, msg: str):
+        super().__init__(msg)
+        self.code = code
+        self.msg = msg
+
+
+class _SvcRouteMissing(Exception):
+    """旧版常驻服务缺少新增端点 (404 unknown route), 静默回退本地且不触发负缓存."""
+
+
+def _svc_http_err_info(exc: urllib.error.HTTPError) -> tuple[str, dict | None]:
+    try:
+        raw = exc.read().decode("utf-8", errors="replace")
+        obj = json.loads(raw) if raw else None
+        if isinstance(obj, dict):
+            msg = str(obj.get("error") or f"HTTP {exc.code}: {exc.reason}")
+            return msg, obj
+    except Exception:
+        pass
+    return f"HTTP {exc.code}: {exc.reason}", None
+
+
+def _svc_request(req: urllib.request.Request, timeout: float):
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        msg, obj = _svc_http_err_info(exc)
+        if exc.code == 400 and isinstance(obj, dict) and isinstance(obj.get("error"), str):
+            raise _SvcClientError(400, msg) from exc
+        if exc.code == 404 and isinstance(obj, dict) and isinstance(obj.get("error"), str):
+            if obj["error"] == "unknown route" or "routes" in obj:
+                raise _SvcRouteMissing(msg) from exc
+            raise _SvcClientError(404, msg) from exc
+        raise OSError(f"HTTP {exc.code}: {msg}") from exc
     _svc_clear_neg()  # 一次成功请求即证明服务活着: 负缓存立即失效 (修复3)
     return data
 
 
+def _svc_get(path: str, timeout: float = 0.5):
+    headers = {"User-Agent": _user_agent()}
+    tok = os.environ.get("CV_SERVE_TOKEN")  # 与 cv serve --token 配对: 鉴权档热索引联动
+    if tok:
+        headers["X-Vault-Token"] = tok
+    req = urllib.request.Request(_resolve_base() + path, headers=headers)
+    return _svc_request(req, timeout)
+
+
+def _svc_post(path: str, payload: dict, timeout: float = 2.0):
+    base = _resolve_base()
+    headers = {
+        "User-Agent": _user_agent(),
+        "Content-Type": "application/json; charset=utf-8",
+        "Origin": base,
+    }
+    tok = os.environ.get("CV_SERVE_TOKEN")
+    if tok:
+        headers["X-Vault-Token"] = tok
+    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(base + path, data=raw, headers=headers, method="POST")
+    return _svc_request(req, timeout)
+
+
+def _format_memorize_text(res: dict, via_hot: bool = False) -> str:
+    status = "已更新/去重复用" if res.get("existed") else "已写入"
+    via = " (via 热索引)" if via_hot else ""
+    pin_tag = " · 已置顶" if res.get("pinned") else ""
+    lines = [
+        f"{status}长期记忆 #{res['id']} [{res['kind']}] · 项目 {res.get('project') or 'manual'}{pin_tag}{via}"
+    ]
+    if res.get("superseded_id"):
+        lines.append(f"  已标记推翻旧记忆: #{res['superseded_id']} (superseded_by=#{res['id']})")
+    lines.append(f"  内容: {str(res.get('content') or '')[:300]}")
+    return "\n".join(lines)
+
+
+def _format_handoff_text(res: dict, via_hot: bool = False) -> str:
+    via = " · via 热索引" if via_hot else ""
+    hdr = (
+        f"[vault_handoff{via}] 快照 {res['id']} ({res.get('agent', '?')}"
+        f" · 估算 {res.get('tokens_est', 0)}/{res.get('budget_tokens', 4000)} tok"
+        f" · 附带记忆 {res.get('memories_count', 0)} 条)\n\n"
+    )
+    return hdr + str(res.get("brief") or "")
+
+
 def _via_service(name: str, args_dict: dict):
-    """常驻服务活着时走热索引; 挂了/超时返回 None 回退文件扫描。"""
+    """常驻服务活着时走热索引; 挂了/超时返回 None 回退文件扫描。
+    4xx 业务/参数校验错 (HTTPError < 500) 直接转抛 ValueError, 绝不触发负缓存也不吞掉。"""
     try:
         if name == "vault_search":
             lim = max(1, min(int(args_dict.get('limit', 5)), 200))  # limit<=0 → 1, 与本地/冷扫同口径 (修复4)
             bt = args_dict.get("budget_tokens")
-            r = _svc_get(f"/search?q={urllib.parse.quote(args_dict.get('query', ''))}"
-                         f"&limit={lim}")
+            qs = _qs({
+                "q": args_dict.get("query", ""),
+                "limit": lim,
+                "project": args_dict.get("project"),
+                "agent": args_dict.get("agent"),
+                "since": args_dict.get("since"),
+            })
+            r = _svc_get(f"/search?{qs}")
             if not r.get("terms"):
                 return "查询词太短"  # 与冷回退同口径: 参数无效不是一次真实搜索的无命中
             # 判空用服务端 total (截断前的真实命中数): limit=0 曾把真实命中报成"未命中" (二轮 mcp-6)
@@ -456,8 +562,14 @@ def _via_service(name: str, args_dict: dict):
         if name == "vault_context":
             lim = max(1, min(int(args_dict.get('limit', 3)), 200))  # 同修复4: 0/负数钳 1
             bt = args_dict.get("budget_tokens")
-            r = _svc_get(f"/context?q={urllib.parse.quote(args_dict.get('query', ''))}"
-                         f"&limit={lim}")
+            qs = _qs({
+                "q": args_dict.get("query", ""),
+                "limit": lim,
+                "project": args_dict.get("project"),
+                "agent": args_dict.get("agent"),
+                "since": args_dict.get("since"),
+            })
+            r = _svc_get(f"/context?{qs}")
             if not r.get("terms"):
                 return "查询词太短"  # 与冷回退同口径
             if not r.get("total"):  # 截断前真实命中数, 同 mcp-6 口径
@@ -491,25 +603,64 @@ def _via_service(name: str, args_dict: dict):
             if not r and not usage.get("events_total"):
                 return None  # 空库交冷路径输出一致的"账本为空"提示
             return _format_stats_text(r, full.get("owned"), usage=usage, via_hot=True)
-    except OSError:  # 连接拒绝/超时 = 服务失活: 记负缓存, TTL 内不再逐调用重试 (修复3)
+        if name == "vault_memorize":
+            payload = {
+                "content": args_dict.get("content", ""),
+                "kind": args_dict.get("kind") or "decision",
+                "project": args_dict.get("project") or "manual",
+                "pinned": bool(args_dict.get("pinned", False)),
+                "source": "mcp",
+            }
+            if args_dict.get("supersedes") is not None:
+                payload["supersedes"] = args_dict.get("supersedes")
+            res = _svc_post("/memory/add", payload)
+            return _format_memorize_text(res, via_hot=True)
+        if name == "vault_handoff":
+            raw_bt = args_dict.get("budget_tokens")
+            bt = 4000 if raw_bt is None else _parse_budget_tokens(raw_bt)
+            inc_mem = True if args_dict.get("include_memories") is None else bool(args_dict.get("include_memories"))
+            qs = _qs({
+                "id": args_dict.get("id"),
+                "project": args_dict.get("project"),
+                "budget_tokens": bt,
+                "include_memories": "1" if inc_mem else "0",
+            })
+            res = _svc_get(f"/handoff?{qs}", timeout=2.0)
+            return _format_handoff_text(res, via_hot=True)
+    except _SvcRouteMissing:
+        return None
+    except _SvcClientError as exc:
+        if name == "vault_handoff" and exc.code == 404:
+            return f"未找到可用会话快照: {exc.msg}"
+        raise ValueError(exc.msg) from exc
+    except OSError:  # 连接拒绝/超时/401/403 = 服务失活或未鉴权: 记负缓存, TTL 内不再逐调用重试 (修复3)
         _svc_mark_down()
         return None
-    except Exception:
+    except Exception as exc:
+        if isinstance(exc, ValueError):
+            raise
+        _debug_log("_via_service", exc)
         return None
     return None  # vault_snapshot 等复杂工具直接走本地, 避免双实现漂移
 
 
 TOOLS = [
-    {"name": "vault_search", "description": "在 context-vault 的全部历史会话快照中搜索关键词, 返回命中的快照列表",
+    {"name": "vault_search", "description": "在 context-vault 的全部历史会话快照中搜索关键词, 返回命中的快照列表 (支持 project/agent/since 范围过滤)",
      "inputSchema": {"type": "object", "properties": {
          "query": {"type": "string", "description": "搜索词 (空格分多个词)"},
          "limit": {"type": "integer", "default": 5},
+         "project": {"type": "string", "description": "可选项目名或路径过滤 (如 context-vault)"},
+         "agent": {"type": "string", "description": "可选来源客户端过滤 (如 codex/claude/zcode/antigravity/dsh, 逗号可多选)"},
+         "since": {"type": "string", "description": "可选起始时间下界 (如 2026-11-01 / 7d / 24h)"},
          "budget_tokens": {"type": "integer", "description": "可选 token 预算上限; 超出部分从尾部裁剪"}},
          "required": ["query"]}},
-    {"name": "vault_context", "description": "从历史会话中检索与当前任务相关的上下文摘录 (记忆检索, 建议在新任务/新会话开始时调用)",
+    {"name": "vault_context", "description": "从历史会话中检索与当前任务相关的上下文摘录 (记忆检索, 建议在新任务/新会话开始时调用; 支持 project/agent/since 过滤)",
      "inputSchema": {"type": "object", "properties": {
          "query": {"type": "string", "description": "当前任务/问题关键词"},
          "limit": {"type": "integer", "default": 3},
+         "project": {"type": "string", "description": "可选项目名或路径过滤"},
+         "agent": {"type": "string", "description": "可选来源客户端过滤 (支持 claude 等标准别名)"},
+         "since": {"type": "string", "description": "可选起始时间下界 (如 2026-11-01 / 7d / 24h)"},
          "budget_tokens": {"type": "integer", "description": "可选 token 预算上限 (如 2000/4000); 超出部分从尾部裁剪"}},
          "required": ["query"]}},
     {"name": "vault_recent", "description": "列出 vault 中最近的会话快照",
@@ -519,62 +670,145 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "id": {"type": "string", "description": "快照 id (cv_ 开头)"}},
          "required": ["id"]}},
-    {"name": "vault_remember", "description": "检索跨会话的长期记忆 (历史决策/项目结论/用户偏好/踩坑/架构红线, 由快照自动提取; 默认只返回当前有效记忆, 被推翻的旧记忆不污染上下文) — 新任务开始时先问一句'关于 X 我们之前定过什么'",
+    {"name": "vault_remember", "description": "检索跨会话的长期记忆 (历史决策/项目结论/用户偏好/踩坑/架构红线; 默认只返回当前有效记忆; 支持 project/since/kind 过滤) — 新任务开始时先问一句'关于 X 我们之前定过什么'",
      "inputSchema": {"type": "object", "properties": {
-         "query": {"type": "string", "description": "主题关键词 (如 'RBAC 方案' / 'dataset1 调参')"},
+         "query": {"type": "string", "description": "主题关键词 (如 'RBAC 方案' / 'dataset1 调参'; 空串返回最新)"},
          "limit": {"type": "integer", "default": 6},
+         "kind": {"type": "string", "enum": ["decision", "preference", "pitfall", "constraint", "summary"],
+                  "description": "可选按记忆类型过滤"},
+         "project": {"type": "string", "description": "可选按归属项目名或路径过滤"},
+         "since": {"type": "string", "description": "可选起始时间下界 (如 2026-11-01 / 7d / 24h)"},
          "include_history": {"type": "boolean", "default": False,
                              "description": "true = 追溯决策演变链 (含已 superseded 的旧记忆及其指向)"},
          "budget_tokens": {"type": "integer", "description": "可选 token 预算上限; 超出部分从尾部裁剪"}},
          "required": ["query"]}},
+    {"name": "vault_memorize", "description": "将当前对话达成的高价值决策/架构红线/踩坑教训/用户偏好直接持久化到长期记忆库 (支持置顶与 supersedes 显式推翻旧记忆; 永不修改原快照)",
+     "inputSchema": {"type": "object", "properties": {
+         "content": {"type": "string", "description": "记忆正文结论 (简明清晰, 不超过 2000 字符)"},
+         "kind": {"type": "string", "enum": ["decision", "preference", "pitfall", "constraint", "summary"],
+                  "default": "decision", "description": "记忆类型 (默认 decision)"},
+         "project": {"type": "string", "default": "manual", "description": "归属项目名 (如 context-vault)"},
+         "pinned": {"type": "boolean", "default": False, "description": "true = 置顶优先返回并编入规则编译器"},
+         "supersedes": {"type": "integer", "description": "可选被本条推翻的旧记忆 #id (标记其为 superseded)"}},
+         "required": ["content"]}},
+    {"name": "vault_handoff", "description": "生成带预算的五槽位跨工具交接简报 (目标约束/已定裁决/踩坑/最近动作/活上下文尾部, 并可附带当前项目有效记忆) — 适合将进度带到新会话或其他 agent",
+     "inputSchema": {"type": "object", "properties": {
+         "id": {"type": "string", "description": "可选快照 id (cv_ 开头; 省略时自动选项目最新主对话)"},
+         "project": {"type": "string", "description": "可选项目名或路径 (未指定 id 时用于定位最新会话与项目记忆)"},
+         "budget_tokens": {"type": "integer", "default": 4000, "description": "简报 token 预算 (200..32000, 默认 4000)"},
+         "include_memories": {"type": "boolean", "default": True, "description": "是否在末尾附带当前项目活跃记忆"}}}},
     {"name": "vault_stats", "description": "token 账本汇总 (本地多端直采: 5h/24h 窗口/缓存命中率/快照数)",
      "inputSchema": {"type": "object", "properties": {}}},
 ]
 
 
 def t_remember(vault: Path, query: str, limit: int, include_history: bool = False,
-               budget_tokens: int | None = None) -> str:
-    hist_qs = "&history=1" if include_history else ""
+               budget_tokens: int | None = None, project: str | None = None,
+               since: str | None = None, kind: str | None = None) -> str:
+    limit = max(1, min(int(limit), 200))
     ms = None
     if not _svc_skip():  # 负缓存生效时不重复探活 (修复3)
         try:  # 常驻服务热路径
-            r = _svc_get(f"/memory?q={urllib.parse.quote(query)}&limit={limit}{hist_qs}")
+            qs = _qs({
+                "q": query,
+                "limit": limit,
+                "history": "1" if include_history else None,
+                "kind": kind,
+                "project": project,
+                "since": since,
+            })
+            r = _svc_get(f"/memory?{qs}")
             ms = r["memories"]
-        except OSError:  # 服务失活: 记负缓存再走本地 (修复3)
-            _svc_mark_down()
-        except Exception:
+        except _SvcRouteMissing:
             pass
+        except _SvcClientError as exc:
+            raise ValueError(exc.msg) from exc
+        except OSError:  # 服务失活/401/403: 记负缓存再走本地 (修复3)
+            _svc_mark_down()
+        except Exception as exc:
+            _debug_log("t_remember", exc)
     if ms is None:
-        ms = _local_memory(vault, query, limit, include_history)
+        ms = _local_memory(vault, query, limit, include_history,
+                           project=project, since=since, kind=kind)
     if not ms:
-        return f"vault 中没有关于「{query}」的记忆。可先运行: python tools/cv.py memory extract"
+        return f"vault 中没有关于「{query}」的记忆。可先运行: python tools/cv.py memory extract 或通过 vault_memorize 写入。"
     items = []
     for m in ms:
-        provenance = f"项目 {m.get('project') or '?'} · 快照 {m.get('snapshot', '')[:18]}"
+        snap_raw = str(m.get("snapshot") or "")
+        if snap_raw == "mcp":
+            src_lbl = "Agent 录入"
+        elif snap_raw == "manual":
+            src_lbl = "手动录入"
+        elif snap_raw:
+            src_lbl = f"快照 {snap_raw[:18]}"
+        else:
+            src_lbl = "未知来源"
+        provenance = f"项目 {m.get('project') or '?'} · {src_lbl}"
         if m.get("block_idx") is not None:
             provenance += f" 块#{m['block_idx']}"
         if m.get("event_ts"):
             provenance += f" · {str(m['event_ts'])[:16]}"
         status = m.get("status") or "active"
+        pin_tag = " [置顶]" if m.get("pinned") else ""
         tag = "" if status == "active" else f" [已推翻 ← 见 #{m.get('superseded_by')}]"
         conf = f" · 置信 {m['confidence']:.1f}" if m.get("confidence") else ""
-        items.append(f"  [{m['kind']}]{tag} {m['content'][:200]}\n"
+        id_part = f"#{m['id']} " if m.get("id") is not None else ""
+        items.append(f"  [{id_part}{m['kind']}]{pin_tag}{tag} {m['content'][:200]}\n"
                      f"      ({provenance}{conf})")
-    header = (f"跨会话记忆 ({query}) — 来自 context-vault 历史快照的自动提取"
+    header = (f"跨会话记忆 ({query}) — 来自 context-vault 的长期记忆"
               + (" (含历史演变链):" if include_history else " (仅当前有效记忆):"))
     return _trim_by_budget(
         header,
         items,
-        "引用时注明来源快照; 记忆为规则提取, 关键决策请回读原快照核实。",
+        "引用时注明记忆 #id 或来源快照; 如需纠正旧结论可调用 vault_memorize(supersedes=#id)。",
         budget_tokens,
         hard_cap=9000,
     )
 
 
-def _local_memory(vault: Path, query: str, limit: int, include_history: bool = False) -> list:
+def _local_memory(vault: Path, query: str, limit: int, include_history: bool = False,
+                  project: str | None = None, since: str | None = None,
+                  kind: str | None = None) -> list:
     sys.path.insert(0, str(Path(__file__).parent))
     import cv as _cv
-    return _cv.memory_search_api(vault, query, limit, include_history=include_history)
+    return _cv.memory_search_api(
+        vault, query, limit, kind=kind, include_history=include_history,
+        project=project, since=since,
+    )
+
+
+def t_memorize(args_vault: Path, content: str, kind: str = "decision",
+               project: str = "manual", pinned: bool = False,
+               supersedes: int | None = None) -> str:
+    sys.path.insert(0, str(Path(__file__).parent))
+    import cv as _cv
+    res = _cv.memory_add_manual(
+        args_vault,
+        content,
+        kind=kind,
+        project=project,
+        pinned=pinned,
+        supersedes=supersedes,
+        source="mcp",
+    )
+    return _format_memorize_text(res, via_hot=False)
+
+
+def t_handoff(args_vault: Path, sid: str | None = None, project: str | None = None,
+              budget_tokens: int = 4000, include_memories: bool = True) -> str:
+    sys.path.insert(0, str(Path(__file__).parent))
+    import cv as _cv
+    try:
+        res = _cv.build_handoff_api(
+            args_vault,
+            sid=sid,
+            project=project,
+            budget_tokens=budget_tokens,
+            include_memories=include_memories,
+        )
+    except _cv.SnapshotNotFound as exc:
+        return f"未找到可用会话快照: {exc}"
+    return _format_handoff_text(res, via_hot=False)
 
 
 def dispatch(name: str, args_dict: dict, vault: Path) -> str:
@@ -588,10 +822,16 @@ def dispatch(name: str, args_dict: dict, vault: Path) -> str:
         return svc
     if name == "vault_search":
         return t_search(vault, args_dict.get("query", ""), int(args_dict.get("limit", 5)),
-                        args_dict.get("budget_tokens"))
+                        args_dict.get("budget_tokens"),
+                        project=args_dict.get("project") or None,
+                        agent=args_dict.get("agent") or None,
+                        since=args_dict.get("since") or None)
     if name == "vault_context":
         return t_context(vault, args_dict.get("query", ""), int(args_dict.get("limit", 3)),
-                         args_dict.get("budget_tokens"))
+                         args_dict.get("budget_tokens"),
+                         project=args_dict.get("project") or None,
+                         agent=args_dict.get("agent") or None,
+                         since=args_dict.get("since") or None)
     if name == "vault_recent":
         return t_recent(vault, int(args_dict.get("limit", 5)))
     if name == "vault_snapshot":
@@ -599,7 +839,30 @@ def dispatch(name: str, args_dict: dict, vault: Path) -> str:
     if name == "vault_remember":
         return t_remember(vault, args_dict.get("query", ""), int(args_dict.get("limit", 6)),
                           bool(args_dict.get("include_history", False)),
-                          args_dict.get("budget_tokens"))
+                          args_dict.get("budget_tokens"),
+                          project=args_dict.get("project") or None,
+                          since=args_dict.get("since") or None,
+                          kind=args_dict.get("kind") or None)
+    if name == "vault_memorize":
+        return t_memorize(
+            vault,
+            args_dict.get("content", ""),
+            kind=args_dict.get("kind") or "decision",
+            project=args_dict.get("project") or "manual",
+            pinned=bool(args_dict.get("pinned", False)),
+            supersedes=args_dict.get("supersedes"),
+        )
+    if name == "vault_handoff":
+        raw_bt = args_dict.get("budget_tokens")
+        bt = 4000 if raw_bt is None else _parse_budget_tokens(raw_bt)
+        inc_mem = True if args_dict.get("include_memories") is None else bool(args_dict.get("include_memories"))
+        return t_handoff(
+            vault,
+            sid=args_dict.get("id") or None,
+            project=args_dict.get("project") or None,
+            budget_tokens=bt,
+            include_memories=inc_mem,
+        )
     if name == "vault_stats":
         return t_stats(vault)
     raise ValueError(f"未知工具: {name}")
@@ -626,9 +889,11 @@ def handle(msg: dict, vault: Path) -> dict | None:
     if method == "tools/call":
         params = msg.get("params", {})
         try:
-            text = dispatch(params.get("name", ""), params.get("arguments", {}) or {}, vault)
+            tool_name = params.get("name", "")
+            text = dispatch(tool_name, params.get("arguments", {}) or {}, vault)
+            cap = 131072 if tool_name == "vault_handoff" else 12000
             return {"jsonrpc": "2.0", "id": mid, "result": {
-                "content": [{"type": "text", "text": text[:12000]}], "isError": False}}
+                "content": [{"type": "text", "text": text[:cap]}], "isError": False}}
         except Exception as e:  # 工具错误按 MCP 规范返回 isError, 不炸 server
             return {"jsonrpc": "2.0", "id": mid, "result": {
                 "content": [{"type": "text", "text": f"工具执行失败: {e}"}], "isError": True}}

@@ -37,9 +37,9 @@ def test_mcp_rpc_dispatch(tmp_path, monkeypatch):
 
     tools = mcp_server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
                               vault)["result"]["tools"]
-    assert len(tools) == 6 and {t["name"] for t in tools} >= {
+    assert len(tools) == 8 and {t["name"] for t in tools} >= {
         "vault_search", "vault_context", "vault_recent", "vault_stats",
-        "vault_snapshot", "vault_remember"}
+        "vault_snapshot", "vault_remember", "vault_memorize", "vault_handoff"}
 
     call = lambda name, **kw: mcp_server.handle(
         {"jsonrpc": "2.0", "id": 3, "method": "tools/call",

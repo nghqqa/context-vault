@@ -74,8 +74,14 @@ from cv_rank import (  # noqa: F401
     bm25_tf_norm,
     default_half_life,
     decay_factor,
+    normalize_since,
+    project_match_rank,
+    match_project_scope,
+    match_agent_scope,
+    match_snapshot_scope,
     sort_hits,
     chain_root,
+    chain_leaf_map,
     fold_chains,
     Corpus,
     rank_blocks,
@@ -866,7 +872,10 @@ class VaultIndex:
             return ""
 
     def search(self, query: str, limit: int, decay: bool = True, fold: bool = True,
-               now: float | None = None) -> dict:
+               now: float | None = None, project: str | None = None,
+               agent: str | None = None, since: str | None = None) -> dict:
+        now = now if now is not None else time.time()
+        since_iso = normalize_since(since, now)
         if getattr(self, "_broken", False):
             return {"query": query, "terms": [], "total": 0, "hits": []}
         terms = block_index_terms(query, "text", self.tokenizer, self.code_aware)
@@ -882,9 +891,22 @@ class VaultIndex:
         if not ranked:
             return empty
         scored = snapshot_scores(ranked, lambda d: doc_sid[d], lambda o: sids[o])
-        now = now if now is not None else time.time()
-        triples = (fold_chains(scored, sids, parents, meta) if fold
-                   else sort_hits([(sc, s, 0) for s, sc in scored.items()], meta))
+        if fold:
+            triples = fold_chains(scored, sids, parents, meta)
+            if project or agent or since_iso:
+                triples = [
+                    (sc, sid, folded) for sc, sid, folded in triples
+                    if match_snapshot_scope(meta.get(sid), project, agent, since_iso)
+                ]
+                if not triples:
+                    return empty
+        else:
+            if project or agent or since_iso:
+                scored = {s: sc for s, sc in scored.items()
+                          if match_snapshot_scope(meta.get(s), project, agent, since_iso)}
+                if not scored:
+                    return empty
+            triples = sort_hits([(sc, s, 0) for s, sc in scored.items()], meta)
         hits = []
         for sc, sid, folded in triples:
             row = dict(meta.get(sid) or {})
@@ -898,7 +920,10 @@ class VaultIndex:
         return {"query": query, "terms": terms, "total": len(hits), "hits": hits[:limit]}
 
     def context(self, query: str, limit: int, decay: bool = True, fold: bool = True,
-                now: float | None = None) -> dict:
+                now: float | None = None, project: str | None = None,
+                agent: str | None = None, since: str | None = None) -> dict:
+        now = now if now is not None else time.time()
+        since_iso = normalize_since(since, now)
         if getattr(self, "_broken", False):
             return {"query": query, "terms": [], "total": 0, "results": []}
         terms = block_index_terms(query, "text", self.tokenizer, self.code_aware)
@@ -913,7 +938,20 @@ class VaultIndex:
                              doc_len.__getitem__, doc_w.__getitem__)
         if not ranked:
             return empty
-        now = now if now is not None else time.time()
+        if project or agent or since_iso:
+            leaf_map = chain_leaf_map(sids, parents, meta) if fold else {}
+            ranked = [
+                (sc, doc) for sc, doc in ranked
+                if match_snapshot_scope(
+                    meta.get(
+                        leaf_map.get(sids[doc_sid[doc]], sids[doc_sid[doc]])
+                        if fold else sids[doc_sid[doc]]
+                    ),
+                    project, agent, since_iso,
+                )
+            ]
+            if not ranked:
+                return empty
         all_set = set(sids)
         memo: dict = {}
 

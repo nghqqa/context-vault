@@ -18,7 +18,7 @@ Rules for agents using this tool: never modify source session files (read-only);
 - `cv migrate <file> --target codex|claude|antigravity|dsh|markdown` / `cv import --agent <src> --target <tgt> [--no-skip-migrated] [--apply]` — single-session or full-harness batch migration with honest diff, same-origin & `migrations.jsonl` dedup, and per-item fault isolation (dry-run by default; `--apply` writes real dirs)
 - `cv skills list|inspect|migrate|remove|backups|rollback` — cross-agent `SKILL.md` inventory, unified-diff preview, bulk migration, auto-backed removal & verified rollback across ZCode / Claude Code / Codex / Antigravity / Cursor / DeepSeek Harness (Web Console enforces `connected_only=1` aligned with MCP connections)
 - `cv ingest <file> [--format X]` / `cv export-harness <sid> --to X` — bridged read/write via `session-migrate` (18 formats)
-- `cv memory extract|search|list|dedup` — temporal memory (decisions/preferences/pitfalls/constraints; active-only by default, `--history` traces superseded chains)
+- `cv memory extract|search|list|dedup|compile-rules` — temporal memory (decisions/preferences/pitfalls/constraints; active-only by default, `--history` traces superseded chains, `--project`/`--since`/`--kind` filtering, `compile-rules` builds sentinel-protected `AGENTS.md`/`CLAUDE.md`/`.cursorrules`)
 - `cv semantic status|setup|refine|titles` — optional Ollama / OpenAI-compatible embeddings (`vault/ai_config.json`), LLM memory refinement & session title cleanup
 - `cv ledger sync [--recompute]` / `cv ledger quota [--window 5h|24h|7d|30d]` / `cv ledger stats` — local multi-client token ledger (including DeepSeek V4/Flash pricing), 5h cooldown ETA & real-time IDE/provider quotas
 - `cv backup [--out DIR] [--keep N]` / `cv prune [--apply]` — consistent full-config + DB/snapshot zip backups & daily retention GC
@@ -28,16 +28,18 @@ Rules for agents using this tool: never modify source session files (read-only);
 
 ## MCP tools
 
-- `vault_remember(query[, limit, include_history, budget_tokens])` — long-term memory with snapshot#block + time provenance (pinned-first, active-only by default)
-- `vault_context(query[, limit, budget_tokens])` — relevant history excerpts for the current task
-- `vault_search(query[, limit, budget_tokens])` — full-text search over all snapshots
+- `vault_remember(query[, limit, kind, project, since, include_history, budget_tokens])` — long-term memory with `#id` and snapshot/time provenance (pinned-first, active-only by default)
+- `vault_memorize(content[, kind, project, pinned, supersedes])` — persist a decision/constraint/pitfall/preference directly into `memory_items` (snapshots stay immutable)
+- `vault_handoff([id, project, budget_tokens, include_memories])` — budgeted five-slot handoff brief bundled with active project memories
+- `vault_context(query[, limit, project, agent, since, budget_tokens])` — relevant history excerpts for the current task
+- `vault_search(query[, limit, project, agent, since, budget_tokens])` — full-text search over all snapshots
 - `vault_recent(limit)` / `vault_snapshot(id)` / `vault_stats()`
 
 ## Docs
 
-- [User Manual (ZH)](https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.md): Full Chinese manual — 14.4 MB Windows `.exe` zero-Python guide, 3-minute onboarding, DeepSeek Harness, Web Console Settings & Ops, MCP, Skills, Ledger, AML, Semantic layer, FAQ
+- [User Manual (ZH)](https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.md): Full Chinese manual — 14.5 MB Windows `.exe` zero-Python guide, 3-minute onboarding, DeepSeek Harness, Web Console Settings & Ops, MCP, Skills, Ledger, AML, Semantic layer, FAQ
 - [User Guide (EN)](https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.en.md): Concise English user guide — Windows `.exe` (`--mcp`), CLI quick start, Web Console, playbooks & env vars
 - [Snapshot format spec v0.1](https://github.com/nghqqa/context-vault/blob/main/docs/snapshot-format.md): vendor-neutral envelope, block types, what migrates and what cannot
 - [README](https://github.com/nghqqa/context-vault/blob/main/README.md): fidelity table ("what survives"), comparison with porters/memory layers, dependency boundary
-- [BENCHMARK](https://github.com/nghqqa/context-vault/blob/main/docs/BENCHMARK.md): CodingVault-Bench — 162 gold queries, 5 dimensions + noisy/streaming panels (259 unit tests in CI)
+- [BENCHMARK](https://github.com/nghqqa/context-vault/blob/main/docs/BENCHMARK.md): CodingVault-Bench — 162 gold queries, 5 dimensions + noisy/streaming panels (268 unit tests in CI)
 - [Releases](https://github.com/nghqqa/context-vault/releases): verification receipts (tests, real-machine checks)

@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from cv_core import cv_mod as _cv
+from cv_core import cv_mod as _cv, user_agent
 
 QUOTA_PER_USD = 500000  # new-api 默认换算; 各站倍率不同, 入账标"估算"
 
@@ -236,7 +236,7 @@ def fetch_relay_usage(base: str, key: str, start: str, end: str) -> dict:
         base += "/v1"
     url = f"{base}/dashboard/billing/usage?start_date={start}&end_date={end}"
     req = urllib.request.Request(url, headers={
-        "User-Agent": "ContextVault/0.1",
+        "User-Agent": user_agent(),
         "Authorization": f"Bearer {key}",
     })
     try:
@@ -258,7 +258,7 @@ def fetch_relay_web_logs(base: str, token: str, user_id: str | None,
     while True:
         url = f"{base}{path}?p={page}&page_size={page_size}&type=0&start_timestamp={start_ts}"
         req = urllib.request.Request(url, headers={
-            "User-Agent": "ContextVault/0.1",
+            "User-Agent": user_agent(),
             "Authorization": token,
             **({"New-Api-User": user_id} if user_id else {}),
         })

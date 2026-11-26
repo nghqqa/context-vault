@@ -766,6 +766,7 @@ class TestProjectImprovements(unittest.TestCase):
         self.assertIs(cv_dsh.zstd_backend, cv_dsh_codec.zstd_backend)
         self.assertIsNone(importlib.util.find_spec("cv_dense"))
         self.assertTrue(issubclass(aml_adapter._AMLHTTPServer, cv_core.LocalThreadingHTTPServer))
+        self.assertEqual(cv_core.user_agent(), f"ContextVault/{cv.VERSION}")
 
         console_html = cv_ui.load_console_html()
         self.assertNotIn("<!--__MIG_", console_html)

@@ -18,7 +18,11 @@ def _norm_project_match(cwd: str, query: str) -> bool:
     if not nc:
         return False
     base = nc.rsplit("/", 1)[-1]
-    return nc == nq or base == nq or nq in nc
+    if nc == nq or base == nq or nq in nc:
+        return True
+    if "/" not in nc and "/" in nq:
+        return nq.rsplit("/", 1)[-1] == nc
+    return False
 
 
 def _zcode_refs_matching(db_path: Path, table: str, id_col: str,

@@ -68,6 +68,12 @@ from cv_index import (  # noqa: F401 — re-exported as public engine API
     UNIFORM,
     block_text,
     decay_factor,
+    normalize_since,
+    project_match_rank,
+    match_project_scope,
+    match_agent_scope,
+    match_snapshot_scope,
+    chain_leaf_map,
     fold_chains,
     format_snapshot_messages,
     ident_set,
@@ -78,7 +84,7 @@ from cv_index import (  # noqa: F401 — re-exported as public engine API
 
 FORMAT_VERSION = "0.1"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # noconsole 进程 spawn 控制台程序不弹窗   # context-snapshot 格式版本
-VERSION = "0.13.1"  # 引擎模块化瘦身 / HTTP 与 UI 模板去重 / macOS 零阻塞回环绑定
+VERSION = "0.14.0"  # 双向 MCP (vault_memorize/vault_handoff) / 作用域过滤 / 项目规则编译器
 TOOL_RESULT_LIMIT = 256 * 1024  # spec §8.2 裁决: 单块截断阈值 256KB
 HOME = Path.home()
 HEADROOM_DIR = HOME / ".headroom"
@@ -205,6 +211,7 @@ from cv_migrate import (  # noqa: F401,E402
     _brief_stop_point,
     compress_brief,
     blocks_to_brief,
+    build_handoff_api,
     _record_migration,
     do_import,
     _print_import_result,
@@ -324,10 +331,13 @@ from cv_memory import (  # noqa: F401,E402
     extract_memories_incremental,
     memory_dedup,
     memory_counts_api,
+    memory_projects_api,
     memory_search_api,
     memory_add_manual,
     memory_delete,
     memory_set_pin,
+    RULE_TARGETS,
+    compile_project_rules,
 )
 
 
@@ -352,6 +362,32 @@ def cmd_memory(args):
         print(f"记忆去重完成: 合并 -{res['removed']} 条重复摘录, 剩余 {res['total']} 条 · "
               + " · ".join(f"{k}×{v}" for k, v in sorted(res["by_kind"].items())))
         return
+    if args.memory_cmd == "compile-rules":
+        try:
+            res = compile_project_rules(
+                vault,
+                args.project,
+                target=args.target,
+                out_path=args.out,
+                budget_tokens=args.budget,
+                include_summary=bool(args.include_summary),
+                apply=bool(args.apply),
+            )
+        except (ValueError, OSError) as exc:
+            raise SystemExit(str(exc))
+        if getattr(args, "json", False):
+            print(json.dumps(res, ensure_ascii=False, indent=2))
+            return
+        mode = "已写入" if res["applied"] else ("已最新 (无需更新)" if (args.apply and not res["changed"]) else "dry-run 预览")
+        print(f"项目规则编译 [{mode}]: 项目 {res['project_label']} -> {res['out_path'] or RULE_TARGETS[res['target']]}")
+        print(f"  匹配 {res['total_matched']} 条 · 纳入 {res['included']} 条 (丢弃 {res['dropped']} 条)"
+              f" · 估算 {res['tokens_est']}/{res['budget_tokens']} tokens")
+        if res["backup_path"]:
+            print(f"  修改前备份: {res['backup_path']}")
+        if res["block_markdown"]:
+            print("")
+            print(res["block_markdown"])
+        return
     conn = db(vault)
     try:
         # 老库迁移必须走 ensure_memory_schema (先补列再建索引 — 直接 executescript
@@ -359,8 +395,16 @@ def cmd_memory(args):
         ensure_memory_schema(conn)
         if args.memory_cmd == "search":
             history = bool(getattr(args, "history", False))
-            ms = memory_search_api(vault, args.query, args.limit,
-                                   include_history=history)
+            try:
+                ms = memory_search_api(
+                    vault, args.query, args.limit,
+                    kind=getattr(args, "kind", None),
+                    include_history=history,
+                    project=getattr(args, "project", None),
+                    since=getattr(args, "since", None),
+                )
+            except ValueError as exc:
+                raise SystemExit(str(exc))
             if not ms:
                 print(f"无相关记忆: {args.query}")
                 return
@@ -375,6 +419,30 @@ def cmd_memory(args):
                     prov += f" · {str(m['event_ts'])[:16]}"
                 print(f"[{m['kind']:<10}]{tag} {m['content'][:100]}  ({prov})")
         elif args.memory_cmd == "list":
+            proj_f = getattr(args, "project", None)
+            since_f = getattr(args, "since", None)
+            kind_f = getattr(args, "kind", None)
+            if proj_f or since_f or kind_f:
+                try:
+                    ms = memory_search_api(
+                        vault, "", args.limit,
+                        kind=kind_f,
+                        include_history=bool(getattr(args, "history", False)),
+                        project=proj_f,
+                        since=since_f,
+                    )
+                except ValueError as exc:
+                    raise SystemExit(str(exc))
+                if not ms:
+                    print("(当前筛选条件下无记忆条目)")
+                    return
+                for m in ms:
+                    tag = "" if (m.get("status") or "active") == "active" else f" [已推翻 ← #{m.get('superseded_by')}]"
+                    prov = m.get("project") or "?"
+                    if m.get("block_idx") is not None:
+                        prov += f" · {m.get('snapshot', '')[:18]}#{m['block_idx']}"
+                    print(f"[{m['kind']:<10}]{tag} {m['content'][:90]}  ({prov})")
+                return
             q = "SELECT kind, COUNT(*) n FROM memory_items GROUP BY kind"
             for r in conn.execute(q):
                 print(f"  {r[0]:<10} ×{r[1]}")
@@ -886,15 +954,31 @@ def main(argv=None):
     ms = msub.add_parser("search", help="检索记忆 (默认只回当前有效记忆, 被推翻的不污染)")
     ms.add_argument("query")
     ms.add_argument("--limit", type=int, default=8)
+    ms.add_argument("--kind", help="按类型过滤 (decision/preference/pitfall/constraint/summary)")
+    ms.add_argument("--project", help="按项目名或路径过滤")
+    ms.add_argument("--since", help="按时间下界过滤 (YYYY-MM-DD / ISO 时间戳 / 7d / 24h)")
     ms.add_argument("--history", action="store_true",
                     help="追溯决策演变链 (含已 superseded 的旧记忆及其指向)")
     ms.set_defaults(func=cmd_memory)
     ml = msub.add_parser("list", help="最近记忆 (默认只列 active; --history 含已推翻)")
     ml.add_argument("--limit", type=int, default=20)
+    ml.add_argument("--kind", help="按类型过滤 (decision/preference/pitfall/constraint/summary)")
+    ml.add_argument("--project", help="按项目名或路径过滤")
+    ml.add_argument("--since", help="按时间下界过滤 (YYYY-MM-DD / ISO 时间戳 / 7d / 24h)")
     ml.add_argument("--history", action="store_true", help="包含已推翻记忆")
     ml.set_defaults(func=cmd_memory)
     mdd = msub.add_parser("dedup", help="合并 (kind, content) 完全相同的跨快照重复摘录")
     mdd.set_defaults(func=cmd_memory)
+    mcr = msub.add_parser("compile-rules", help="编译项目活跃记忆为 AGENTS.md / CLAUDE.md / .cursorrules (默认 dry-run)")
+    mcr.add_argument("--project", required=True, help="项目名或项目目录路径")
+    mcr.add_argument("--target", choices=["agents", "claude", "cursor"], default="agents",
+                     help="规则目标文件名: agents=AGENTS.md | claude=CLAUDE.md | cursor=.cursorrules")
+    mcr.add_argument("--out", help="显式覆盖输出文件路径")
+    mcr.add_argument("--budget", type=int, default=2000, help="规则块 token 预算上限 (默认 2000)")
+    mcr.add_argument("--include-summary", action="store_true", help="同时纳入 summary 类型记忆")
+    mcr.add_argument("--apply", action="store_true", help="实际写入目标文件 (覆盖前生成 .bak-cv 备份)")
+    mcr.add_argument("--json", action="store_true", help="输出结构化 JSON")
+    mcr.set_defaults(func=cmd_memory)
 
     mc = sub.add_parser("mcp", help="MCP 记忆后端按需接入与管理")
     msub = mc.add_subparsers(dest="mcp_cmd", required=True)

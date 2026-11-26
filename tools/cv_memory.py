@@ -15,13 +15,16 @@ cv 依赖 (db/SCHEMA/now_iso) 一律函数内惰性获取 — 无论 cv 先导�
 """
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import re
 import sqlite3
 from pathlib import Path
 
-from cv_index import ident_set, tokenize
+from cv_core import atomic_write_text, estimate_text_tokens, truncate_to_tokens
+from cv_index import ident_set, match_project_scope, normalize_since, project_match_rank, tokenize
+from cv_rank import _ts_ge
 
 # 老库迁移顺序: 表 (IF NOT EXISTS 幂等) → 补列 → 索引 (索引引用新列, 必须最后建)
 _MEMORY_ITEMS_DDL = """
@@ -568,11 +571,14 @@ def memory_counts_api(vault: Path) -> dict:
 
 
 def memory_search_api(vault: Path, query: str, limit: int = 8, kind: str | None = None,
-                      include_history: bool = False) -> list:
+                      include_history: bool = False, project: str | None = None,
+                      since: str | None = None) -> list:
     """serve /memory 与 MCP vault_remember 共用。默认只返回 status='active' 的当前有效
     记忆 (过期记忆不污染上下文); include_history=True 追溯决策演变链 (含 superseded,
     带指向新记忆的 superseded_by)。query 为空 = 返回最新 N 条 (去重速览)。"""
     from cv import db, now_iso, SCHEMA
+    since_iso = normalize_since(since)
+    proj_filter = (project or "").strip()
     conn = db(vault)
     try:
         try:
@@ -580,8 +586,11 @@ def memory_search_api(vault: Path, query: str, limit: int = 8, kind: str | None 
             ensure_memory_schema(conn)
         except sqlite3.OperationalError:
             pass  # MCP 修复6: 只读挂载 vault.db 时建表/补列必失败 — 不致命, 表已在则照常检索
+        limit = max(1, int(limit))
         terms = tokenize(query)
         k_norm = (kind or "").strip().lower()
+        if k_norm and k_norm != "all" and k_norm not in VALID_MEMORY_KINDS:
+            raise ValueError(f"不支持的记忆类型: {k_norm} (可选: {', '.join(VALID_MEMORY_KINDS)})")
         status_clause = "" if include_history else " AND status='active'"
         try:
             if k_norm and k_norm != "all":
@@ -591,6 +600,18 @@ def memory_search_api(vault: Path, query: str, limit: int = 8, kind: str | None 
                 rows = conn.execute("SELECT * FROM memory_items WHERE 1=1" + status_clause).fetchall()
         except sqlite3.OperationalError:
             return []  # 只读且零表: 无记忆可检索, 与空库同口径 (修复6)
+        if proj_filter or since_iso:
+            filtered = []
+            for r in rows:
+                if proj_filter and not match_project_scope(r["project"] or "", proj_filter):
+                    continue
+                if since_iso:
+                    keys = r.keys()
+                    ev = r["event_ts"] if ("event_ts" in keys and r["event_ts"]) else r["created_at"]
+                    if not _ts_ge(str(ev or ""), since_iso):
+                        continue
+                filtered.append(r)
+            rows = filtered
         if not terms:  # 速览模式: 置顶优先, 再按 id 倒序取最新且按 (kind, content) 去重
             rows.sort(
                 key=lambda r: (
@@ -644,14 +665,53 @@ def memory_search_api(vault: Path, query: str, limit: int = 8, kind: str | None 
 VALID_MEMORY_KINDS = ("decision", "preference", "pitfall", "constraint", "summary")
 
 
+def memory_projects_api(vault: Path) -> list:
+    """只读统计当前有效记忆涉及的项目清单 (按条数降序), 供规则编译器自动补全。"""
+    from cv import db
+    if not (vault / "vault.db").exists():
+        return []
+    conn = db(vault)
+    try:
+        has_tbl = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_items'"
+        ).fetchone()
+        if not has_tbl:
+            return []
+        try:
+            ensure_memory_schema(conn)
+        except sqlite3.OperationalError:
+            pass
+        try:
+            rows = conn.execute(
+                "SELECT COALESCE(NULLIF(TRIM(project), ''), 'manual') AS proj, COUNT(*) AS n "
+                "FROM memory_items WHERE status='active' GROUP BY proj ORDER BY n DESC, proj ASC"
+            ).fetchall()
+            return [{"project": r["proj"], "count": r["n"]} for r in rows]
+        except sqlite3.OperationalError:
+            try:
+                rows = conn.execute(
+                    "SELECT COALESCE(NULLIF(TRIM(project), ''), 'manual') AS proj, COUNT(*) AS n "
+                    "FROM memory_items GROUP BY proj ORDER BY n DESC, proj ASC"
+                ).fetchall()
+                return [{"project": r["proj"], "count": r["n"]} for r in rows]
+            except sqlite3.OperationalError:
+                return []
+    except sqlite3.OperationalError:
+        return []
+    finally:
+        conn.close()
+
+
 def memory_add_manual(
     vault: Path,
     content: str,
     kind: str = "decision",
     project: str = "manual",
     pinned: bool = False,
+    supersedes: int | None = None,
+    source: str = "manual",
 ) -> dict:
-    """手动写入一条长期记忆 (高置信度, 支持置顶与幂等去重)。"""
+    """手动/Agent 写入一条长期记忆 (高置信度, 支持置顶、显式推翻旧记忆与幂等去重)。"""
     from cv import db, now_iso, SCHEMA
     txt = str(content or "").strip()
     if not txt:
@@ -662,33 +722,75 @@ def memory_add_manual(
     if k not in VALID_MEMORY_KINDS:
         raise ValueError(f"不支持的记忆类型: {k} (可选: {', '.join(VALID_MEMORY_KINDS)})")
     proj = str(project or "manual").strip()[:120] or "manual"
+    src_id = (str(source or "manual").strip() or "manual")[:64]
     pin_i = 1 if pinned else 0
+    sup_id: int | None = None
+    if supersedes is not None:
+        if isinstance(supersedes, bool):
+            raise ValueError("supersedes 必须为正整数")
+        try:
+            sup_id = int(supersedes)
+        except (TypeError, ValueError):
+            raise ValueError("supersedes 必须为正整数")
+        if sup_id <= 0:
+            raise ValueError("supersedes 必须为正整数")
     conn = db(vault)
     try:
         conn.executescript(SCHEMA)
         ensure_memory_schema(conn)
+        if sup_id is not None:
+            target_row = conn.execute(
+                "SELECT id, status FROM memory_items WHERE id=?", (sup_id,)
+            ).fetchone()
+            if target_row is None:
+                raise ValueError(f"supersedes 目标记忆不存在: #{sup_id}")
         dup = conn.execute(
-            "SELECT id, pinned FROM memory_items WHERE kind=? AND content=? AND status='active' LIMIT 1",
-            (k, txt),
+            "SELECT id, pinned, snapshot_id FROM memory_items "
+            "WHERE kind=? AND content=? "
+            "AND lower(COALESCE(NULLIF(TRIM(project), ''), 'manual'))=lower(?) "
+            "AND status='active' LIMIT 1",
+            (k, txt, proj),
         ).fetchone()
         if dup:
+            mid = dup["id"]
+            if sup_id is not None and sup_id == mid:
+                raise ValueError("不能用记忆自身推翻自己")
             new_pin = 1 if (pin_i or (dup["pinned"] or 0)) else 0
             conn.execute(
                 "UPDATE memory_items SET confidence=5.0, pinned=?, project=? WHERE id=?",
-                (new_pin, proj, dup["id"]),
+                (new_pin, proj, mid),
             )
+            superseded_id = None
+            if sup_id is not None:
+                scur = conn.execute(
+                    "UPDATE memory_items SET status='superseded', superseded_by=? "
+                    "WHERE id=? AND status='active'",
+                    (mid, sup_id),
+                )
+                superseded_id = sup_id if scur.rowcount else None
             conn.commit()
-            return {"id": dup["id"], "kind": k, "project": proj, "content": txt,
-                    "pinned": bool(new_pin), "existed": True}
+            return {"id": mid, "kind": k, "project": proj, "content": txt,
+                    "pinned": bool(new_pin), "existed": True,
+                    "source": dup["snapshot_id"] or src_id, "superseded_id": superseded_id}
         now = now_iso()
         cur = conn.execute(
             "INSERT INTO memory_items(created_at,snapshot_id,kind,content,project,"
             "event_ts,status,confidence,pinned) VALUES(?,?,?,?,?,?,'active',5.0,?)",
-            (now, "manual", k, txt, proj, now, pin_i),
+            (now, src_id, k, txt, proj, now, pin_i),
         )
+        mid = cur.lastrowid
+        superseded_id = None
+        if sup_id is not None:
+            scur = conn.execute(
+                "UPDATE memory_items SET status='superseded', superseded_by=? "
+                "WHERE id=? AND status='active'",
+                (mid, sup_id),
+            )
+            superseded_id = sup_id if scur.rowcount else None
         conn.commit()
-        return {"id": cur.lastrowid, "kind": k, "project": proj, "content": txt,
-                "pinned": bool(pin_i), "existed": False}
+        return {"id": mid, "kind": k, "project": proj, "content": txt,
+                "pinned": bool(pin_i), "existed": False,
+                "source": src_id, "superseded_id": superseded_id}
     finally:
         conn.close()
 
@@ -742,3 +844,307 @@ def _memory_row_api(r, score: int) -> dict:
             "topic_key": r["topic_key"], "status": r["status"] or "active",
             "superseded_by": r["superseded_by"], "confidence": r["confidence"],
             "pinned": bool(r["pinned"]) if "pinned" in keys else False}
+
+
+RULE_TARGETS = {
+    "agents": "AGENTS.md",
+    "claude": "CLAUDE.md",
+    "cursor": ".cursorrules",
+}
+_RULE_KIND_ORDER = ("constraint", "decision", "pitfall", "preference", "summary")
+_RULE_KIND_HEADINGS = {
+    "constraint": "### 架构红线与硬约束 (Constraints)",
+    "decision": "### 核心技术决策 (Decisions)",
+    "pitfall": "### 已知踩坑与禁区 (Pitfalls)",
+    "preference": "### 工程与编码偏好 (Preferences)",
+    "summary": "### 阶段摘要 (Summaries)",
+}
+_RULES_SENTINEL_RE = re.compile(
+    r"<!--\s*context-vault:rules:start\b[^>]*-->.*?<!--\s*context-vault:rules:end\s*-->",
+    re.DOTALL,
+)
+
+
+def _resolve_rule_out_file(conn: sqlite3.Connection | None, proj: str, tgt: str,
+                           out_path: str | Path | None) -> Path | None:
+    if out_path is not None and str(out_path).strip():
+        return Path(out_path).expanduser().resolve()
+    cand_dir = Path(proj).expanduser()
+    if cand_dir.is_dir():
+        return cand_dir.resolve() / RULE_TARGETS[tgt]
+    if conn is not None:
+        try:
+            rows = conn.execute(
+                "SELECT cwd, MAX(created_at) AS ts FROM snapshots "
+                "WHERE cwd IS NOT NULL AND cwd != '' GROUP BY cwd ORDER BY ts DESC"
+            ).fetchall()
+            best_key = None
+            best_dir: Path | None = None
+            for r in rows:
+                cwd = str(r["cwd"] or "")
+                rank = project_match_rank(cwd, proj)
+                if rank <= 0:
+                    continue
+                p = Path(cwd).expanduser()
+                if not p.is_dir():
+                    continue
+                cand_key = (rank, str(r["ts"] or ""))
+                if best_key is None or cand_key > best_key:
+                    best_key = cand_key
+                    best_dir = p.resolve()
+            if best_dir is not None:
+                return best_dir / RULE_TARGETS[tgt]
+        except sqlite3.OperationalError:
+            pass
+    return None
+
+
+def _rule_provenance(r) -> str:
+    keys = r.keys()
+    sid = str(r["snapshot_id"] or "")
+    bidx = r["block_idx"] if "block_idx" in keys else None
+    ev = (r["event_ts"] if "event_ts" in keys and r["event_ts"] else r["created_at"]) or ""
+    day = str(ev)[:10]
+    if sid.startswith("cv_"):
+        ref = sid[:11] + (f"#b{bidx}" if bidx is not None else "")
+    else:
+        ref = sid or "manual"
+    return f"{ref} · {day}" if day else ref
+
+
+def _safe_attr(val: str) -> str:
+    return str(val or "").replace('"', "").replace("-->", "").strip()
+
+
+def compile_project_rules(
+    vault: Path,
+    project: str,
+    *,
+    target: str = "agents",
+    out_path: str | Path | None = None,
+    budget_tokens: int = 2000,
+    include_summary: bool = False,
+    apply: bool = False,
+) -> dict:
+    """将项目活跃记忆按优先级与 token 预算编译为受哨兵保护的 AGENTS.md / CLAUDE.md / .cursorrules。
+    默认 dry-run (不触盘); apply=True 时保留哨兵外手写内容并在覆盖前生成 .bak-cv 备份。"""
+    from cv import db
+
+    proj = str(project or "").strip()
+    if not proj:
+        raise ValueError("project 不能为空")
+    tgt = str(target or "agents").strip().lower()
+    if tgt not in RULE_TARGETS:
+        raise ValueError(f"不支持的规则目标: {tgt} (可选: {', '.join(RULE_TARGETS)})")
+    if isinstance(budget_tokens, bool):
+        raise ValueError("budget_tokens 必须为整数")
+    try:
+        bt = int(budget_tokens)
+    except (TypeError, ValueError):
+        raise ValueError("budget_tokens 必须为整数")
+    if bt < 200 or bt > 32000:
+        raise ValueError("budget_tokens 必须在 200..32000 之间")
+
+    proj_label = Path(proj).name if ("/" in proj or "\\" in proj) and Path(proj).name else proj
+    rows = []
+    out_file: Path | None = None
+    db_file = vault / "vault.db"
+    conn = db(vault) if db_file.exists() else None
+    try:
+        if conn is not None:
+            raw_rows = []
+            try:
+                has_tbl = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_items'"
+                ).fetchone()
+            except sqlite3.OperationalError:
+                has_tbl = None
+            if has_tbl:
+                try:
+                    ensure_memory_schema(conn)
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    raw_rows = conn.execute(
+                        "SELECT * FROM memory_items WHERE status='active'"
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    try:
+                        raw_rows = conn.execute("SELECT * FROM memory_items").fetchall()
+                    except sqlite3.OperationalError:
+                        raw_rows = []
+            for r in raw_rows:
+                if not include_summary and r["kind"] == "summary":
+                    continue
+                if match_project_scope(r["project"] or "", proj):
+                    rows.append(r)
+        out_file = _resolve_rule_out_file(conn, proj, tgt, out_path)
+    finally:
+        if conn is not None:
+            conn.close()
+
+    if out_file is not None and out_file.exists() and out_file.is_dir():
+        raise ValueError(f"目标路径是目录而非文件: {out_file}")
+    if apply and out_file is None:
+        raise ValueError(f"无法定位项目 {proj!r} 的本地目录，请通过 out_path / --out 指定目标文件")
+
+    # 同 (kind, content) 去重并按 (pinned, confidence, hits, id) 选最高优一条
+    rank_by_kind = {k: i for i, k in enumerate(_RULE_KIND_ORDER)}
+    best: dict = {}
+    for r in rows:
+        keys = r.keys()
+        k = str(r["kind"] or "decision")
+        txt = re.sub(r"\s+", " ", str(r["content"] or "")).strip()
+        if not txt or k not in rank_by_kind:
+            continue
+        pin = 1 if ("pinned" in keys and r["pinned"]) else 0
+        conf = float(r["confidence"] or 0.0) if "confidence" in keys else 1.0
+        hits = int(r["hits"] or 0) if "hits" in keys else 0
+        score_key = (pin, conf, hits, int(r["id"] or 0))
+        dedup_k = (k, txt)
+        if dedup_k not in best or score_key > best[dedup_k][0]:
+            best[dedup_k] = (score_key, r, txt)
+
+    # 装填优先级: 红线 constraint > 其余类型置顶条目 > decision > pitfall > preference > summary
+    ordered = sorted(
+        best.values(),
+        key=lambda item: (
+            0 if item[1]["kind"] == "constraint" else (1 if item[0][0] else 2),
+            rank_by_kind[item[1]["kind"]],
+            -item[0][0],
+            -item[0][1],
+            -item[0][2],
+            -item[0][3],
+        ),
+    )
+
+    start_tag = f'<!-- context-vault:rules:start project="{_safe_attr(proj_label)}" target="{tgt}" -->'
+    end_tag = "<!-- context-vault:rules:end -->"
+
+    def _render_block(selected_by_kind: dict, total_n: int, kept_n: int) -> str:
+        hdr_note = (
+            f"> Auto-compiled from active project memories "
+            f"(budget: {bt} tok, {kept_n}/{total_n} items). "
+            f"Do not edit inside markers manually; re-run `cv memory compile-rules` to update."
+        )
+        lines = [
+            start_tag,
+            f"## Project Rules — {proj_label} (Compiled by Context Vault)",
+            "",
+            hdr_note,
+        ]
+        if not total_n:
+            lines += ["", f"*(当前项目 `{proj_label}` 暂无有效长期记忆，可在控制台手动录入或通过 MCP `vault_memorize` 写入。)*"]
+        elif not kept_n:
+            lines += ["", f"*(已匹配 {total_n} 条记忆，但当前预算 `{bt}` tokens 过窄，请调大 `--budget`。)*"]
+        else:
+            for k in _RULE_KIND_ORDER:
+                sec_items = selected_by_kind.get(k)
+                if not sec_items:
+                    continue
+                lines += ["", _RULE_KIND_HEADINGS[k], ""]
+                lines.extend(sec_items)
+        lines.append("")
+        lines.append(end_tag)
+        return "\n".join(lines)
+
+    total_matched = len(ordered)
+    selected_by_kind: dict[str, list[str]] = {}
+    by_kind_counts: dict[str, int] = {}
+    included = 0
+    dropped = 0
+
+    for score_key, r, txt in ordered:
+        k = str(r["kind"])
+        safe_txt = txt.replace("<!--", "&lt;!--").replace("-->", "--&gt;")
+        pin_mark = "**[置顶]** " if score_key[0] else ""
+        prov = _rule_provenance(r)
+        bullet = f"- {pin_mark}{safe_txt} *(来源: {prov})*"
+        cand_map = {ck: list(cv_lst) for ck, cv_lst in selected_by_kind.items()}
+        cand_map.setdefault(k, []).append(bullet)
+        cand_md = _render_block(cand_map, total_matched, included + 1)
+        if estimate_text_tokens(cand_md) <= bt:
+            selected_by_kind = cand_map
+            by_kind_counts[k] = by_kind_counts.get(k, 0) + 1
+            included += 1
+        elif included == 0:
+            # 首条就超出严格预算时按真实剩余 token 预算截断单行文本, 保证合法非空输出
+            overhead_md = _render_block({k: [f"- {pin_mark} *(来源: {prov})*"]}, total_matched, 1)
+            avail = bt - estimate_text_tokens(overhead_md)
+            added_trim = False
+            while avail >= 6:
+                trimmed = truncate_to_tokens(safe_txt, avail)
+                b_trim = f"- {pin_mark}{trimmed} *(来源: {prov})*"
+                cand_trim = {k: [b_trim]}
+                if estimate_text_tokens(_render_block(cand_trim, total_matched, 1)) <= bt:
+                    selected_by_kind = cand_trim
+                    by_kind_counts[k] = 1
+                    included = 1
+                    added_trim = True
+                    break
+                avail -= 4
+            if not added_trim:
+                dropped += 1
+        else:
+            dropped += 1
+
+    block_md = _render_block(selected_by_kind, total_matched, included)
+    tokens_est = estimate_text_tokens(block_md)
+
+    old_text = ""
+    exists = bool(out_file is not None and out_file.exists())
+    if exists and out_file is not None:
+        old_text = out_file.read_text(encoding="utf-8", errors="replace")
+
+    if apply and total_matched == 0 and (not exists or not _RULES_SENTINEL_RE.search(old_text)):
+        raise ValueError(f"项目 {proj!r} 暂无有效长期记忆，已取消写入 (dry-run 仍可预览)")
+
+    if exists:
+        if _RULES_SENTINEL_RE.search(old_text):
+            new_text = _RULES_SENTINEL_RE.sub(lambda _m: block_md, old_text, count=1)
+        else:
+            sep = "" if not old_text or old_text.endswith("\n\n") else ("\n" if old_text.endswith("\n") else "\n\n")
+            new_text = old_text + sep + block_md + "\n"
+    else:
+        new_text = block_md + "\n"
+
+    changed = old_text != new_text
+    diff_lines = list(difflib.unified_diff(
+        old_text.splitlines(),
+        new_text.splitlines(),
+        fromfile=f"a/{out_file.name}" if out_file else "a/" + RULE_TARGETS[tgt],
+        tofile=f"b/{out_file.name}" if out_file else "b/" + RULE_TARGETS[tgt],
+        lineterm="",
+        n=2,
+    ))[:200]
+
+    backup_path = None
+    applied = False
+    if apply and out_file is not None and changed:
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        if exists:
+            bak = out_file.with_name(out_file.name + ".bak-cv")
+            atomic_write_text(bak, old_text)
+            backup_path = str(bak)
+        atomic_write_text(out_file, new_text)
+        applied = True
+
+    return {
+        "project": proj,
+        "project_label": proj_label,
+        "target": tgt,
+        "out_path": str(out_file) if out_file else None,
+        "exists": exists,
+        "applied": applied,
+        "changed": changed,
+        "backup_path": backup_path,
+        "budget_tokens": bt,
+        "tokens_est": tokens_est,
+        "total_matched": total_matched,
+        "included": included,
+        "dropped": dropped,
+        "by_kind": by_kind_counts,
+        "block_markdown": block_md,
+        "merged_markdown": new_text,
+        "diff_lines": diff_lines,
+    }

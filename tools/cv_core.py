@@ -229,3 +229,12 @@ class LocalThreadingHTTPServer(ThreadingHTTPServer):
         host, port = self.server_address[:2]
         self.server_name = host or "127.0.0.1"
         self.server_port = port
+
+
+def user_agent() -> str:
+    """统一出站 HTTP User-Agent (动态对齐 cv.VERSION, 避免硬编码旧版本号)."""
+    try:
+        ver = str(getattr(cv_mod(), "VERSION", "")).strip()
+    except Exception:
+        ver = ""
+    return f"ContextVault/{ver}" if ver else "ContextVault"

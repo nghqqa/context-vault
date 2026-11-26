@@ -6,8 +6,8 @@
 
 ## 0. 3 分钟快速上手（90% 用户只需要这 3 步）
 
-> **路径 A · Windows 绿色托盘版（免装 Python，14.4 MB 单文件双击即用）**
-> 1. 前往 [GitHub Releases (v0.13.1)](https://github.com/nghqqa/context-vault/releases/tag/v0.13.1) 下载 [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.13.1/ContextVault.exe)（可用同页 `SHA256SUMS.txt` 校验：`certutil -hashfile ContextVault.exe SHA256`）。
+> **路径 A · Windows 绿色托盘版（免装 Python，14.5 MB 单文件双击即用）**
+> 1. 前往 [GitHub Releases (v0.14.0)](https://github.com/nghqqa/context-vault/releases/tag/v0.14.0) 下载 [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.14.0/ContextVault.exe)（可用同页 `SHA256SUMS.txt` 校验：`certutil -hashfile ContextVault.exe SHA256`）。
 > 2. 双击启动：如首次触发 Windows SmartScreen 未知发布者提示，点击「更多信息 → 仍要运行」即可。托盘图标出现在右下角系统托盘，双击图标打开 Web 控制台 `http://127.0.0.1:8791/`。
 > 3. **免命令行用满全部功能**：首次空库会在概览顶部显示 **3 步引导卡**——点击即可完成全端会话同步、账本同步，并在「设置与运维」页按需勾选将 `ContextVault.exe --mcp` 接入 Claude Code / Codex / Cursor / Antigravity / DeepSeek Harness（全程无需安装 Python）。
 > 4. **数据存放在哪 / 如何卸载**：首次在独立目录运行时自动初始化到 `~/.context-vault/vault`，并在 `~/.context-vault/config.json` 记录正本路径（移动 exe 位置也不丢数据）；右键托盘菜单提供「立即同步」「立即备份」「检查新版本」「开机自启」。如需彻底卸载：先取消勾选「开机自启」→ 退出托盘 → 删除 exe 及 `~/.context-vault/` 即可。
@@ -207,12 +207,13 @@ cv skills rollback skills-20261125-000001-remove --apply                        
 cv memory extract                                      # 增量提取决策/偏好/踩坑/红线/摘要（默认 v2 双时态引擎）
 cv memory extract --snapshot cv_xxxxxxxx               # 仅提取单条快照
 cv memory extract --force --engine rule                # 全量重提或切换引擎
-cv memory search "token 预算" --limit 8                # 仅检索当前有效记忆（被推翻的旧决策自动隐藏）
+cv memory search "token 预算" --limit 8 --project context-vault --since 7d  # 按项目与时间下界检索当前有效记忆
 cv memory search "记忆引擎" --history                  # 追溯决策演变链（含已 superseded 历史记录）
-cv memory list --limit 20 --history                    # 列出最近记忆
+cv memory list --limit 20 --project context-vault      # 按项目/类型/时间列出最近记忆（支持 --kind/--since/--history）
 cv memory dedup                                        # 合并跨快照重复摘录
+cv memory compile-rules --project context-vault --target agents  # 编译为 AGENTS.md/CLAUDE.md/.cursorrules（默认 dry-run；--apply 原地写入并备份 .bak-cv）
 ```
-> 提示：可在 Web 控制台「快照资产 → 记忆库」中直接**手动新增、置顶优先或删除**单条记忆（立即对 MCP `vault_remember` 生效）。
+> 提示：可在 Web 控制台「快照资产 → 记忆库」中直接**手动新增、置顶优先、删除或一键编译项目规则**（立即对 MCP `vault_remember` 生效）。
 
 ### 5.2 按需接入与安全移除 MCP 客户端
 支持 `claude`、`codex`、`cursor`、`antigravity`、`dsh`（DeepSeek Harness 注入 `$DSH_HOME/cordis.patch.yml`，全局跨 profile 生效）：
@@ -223,10 +224,12 @@ cv mcp install --clients claude,dsh      # 或按需显式指定多个客户端�
 cv mcp uninstall --client cursor         # 安全摘除 context-vault 条目（支持 --clients a,b；自动 .bak-cv 备份）
 ```
 
-接入后 Agent 获得 6 个纯本地 MCP 工具（其中检索类工具均支持可选 `budget_tokens` 预算上限，超出自动从尾部精确裁剪）：
-- `vault_remember(query, limit?, include_history?, budget_tokens?)`：跨会话长期记忆（含出处与演变链）
-- `vault_context(query, limit?, budget_tokens?)`：与当前任务相关的历史对话摘录
-- `vault_search(query, limit?, budget_tokens?)`：全库快照搜索
+接入后 Agent 获得 8 个纯本地 MCP 工具（检索类工具均支持 `project` / `agent` / `since` 作用域过滤与可选 `budget_tokens` 预算裁剪）：
+- `vault_remember(query, limit?, kind?, project?, since?, include_history?, budget_tokens?)`：跨会话长期记忆（含 `#id`、出处与演变链）
+- `vault_memorize(content, kind?, project?, pinned?, supersedes?)`：Agent 直接写入长期记忆（支持置顶与显式推翻旧 `#id`）
+- `vault_handoff(id?, project?, budget_tokens?, include_memories?)`：生成带预算的五槽位跨工具交接简报（附当前项目有效记忆）
+- `vault_context(query, limit?, project?, agent?, since?, budget_tokens?)`：与当前任务相关的历史对话摘录
+- `vault_search(query, limit?, project?, agent?, since?, budget_tokens?)`：全库快照搜索
 - `vault_recent(limit?)`：最近快照列表
 - `vault_snapshot(id)`：单快照详情（来源/块分布/活上下文/token）
 - `vault_stats()`：多端 token 账本汇总

@@ -1176,14 +1176,14 @@ def test_zcode_project_from_session_table(env, monkeypatch):
     make_zcode_main_db(db_path, [
         ("u1", "sess_a", "GLM-5.3-Flash", "zcode-agent", "1795248538256",
          "1795248551856", 437504, 594, 0, 768, 436736, "account:bigmodel", "msg_a"),
-    ], sessions=[("sess_a", "proj_x", "D:\goai", "t")])
+    ], sessions=[("sess_a", "proj_x", r"D:\goai", "t")])
     monkeypatch.setattr(cv, "ZCODE_DB", db_path)
     cl.cmd_ledger_sync(SimpleNamespace(vault=str(vault)))
     conn = cv.db(vault)
     r = conn.execute("SELECT project FROM usage_events WHERE event_key=?",
                      (cl._sha("zdb|u1"),)).fetchone()
     conn.close()
-    assert r["project"] == "D:\goai"
+    assert r["project"] == r"D:\goai"
 
 
 def test_zcode_project_backfill_existing(env, monkeypatch):
@@ -1192,14 +1192,14 @@ def test_zcode_project_backfill_existing(env, monkeypatch):
     home, vault = env
     db_path = home / ".zcode" / "cli" / "db" / "db.sqlite"
     make_zcode_main_db(db_path, [], sessions=[
-        ("sess_db", None, "D:\from-session", "t"),
-        ("sess_snap", None, "D:\stale", "older")])
+        ("sess_db", None, r"D:\from-session", "t"),
+        ("sess_snap", None, r"D:\stale", "older")])
     monkeypatch.setattr(cv, "ZCODE_DB", db_path)
     conn = cv.db(vault)
     cl.ensure_schema(conn)
     # snapshots 兜底源: sess_snap 的库行 directory 是过时值, 快照 cwd 更新 → 应以快照兜底
     conn.execute("INSERT INTO snapshots(id, created_at, agent, session_ref, cwd) VALUES"
-                 "('cv_snap1', '2026-11-20T10:00:00+08:00', 'zcode', 'sess_snap', 'D:\fresh')")
+                 r"('cv_snap1', '2026-11-20T10:00:00+08:00', 'zcode', 'sess_snap', 'D:\fresh')")
     for key, ref in (("zdb1", "sess_db"), ("zdb2", "sess_snap")):
         e = {"event_key": key, "source": "zcode", "client": "zcode", "model": None,
              "project": None, "session_ref": ref, "occurred_at": NOW - 600,
@@ -1213,8 +1213,8 @@ def test_zcode_project_backfill_existing(env, monkeypatch):
     p1 = conn.execute("SELECT project FROM usage_events WHERE event_key='zdb1'").fetchone()["project"]
     p2 = conn.execute("SELECT project FROM usage_events WHERE event_key='zdb2'").fetchone()["project"]
     conn.close()
-    assert p1 == "D:\from-session"  # 主源
-    assert p2 == "D:\fresh"  # snapshots 兜底 (快照 cwd 覆盖同 session_ref)
+    assert p1 == r"D:\from-session"  # 主源
+    assert p2 == r"D:\fresh"  # snapshots 兜底 (快照 cwd 覆盖同 session_ref)
 
 
 def test_zcode_modelio_proj_map(env):

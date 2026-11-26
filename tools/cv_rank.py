@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 import math
@@ -335,6 +336,160 @@ def decay_factor(created_at: str, now: float | None, half_life: float) -> float:
     return 0.5 ** (age_days / half_life)
 
 
+_REL_SINCE_RE = re.compile(r"^(\d+)([dh])$", re.IGNORECASE)
+_YM_SINCE_RE = re.compile(r"^(\d{4})-(\d{2})$")
+_YMD_SINCE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+_FULL_ISO_RE = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?(Z|z|[+-]\d{2}:?\d{2})?$"
+)
+_AGENT_SCOPE_ALIASES = {
+    "claude": frozenset({"claude", "claude-code", "claude-transcript"}),
+    "dsh": frozenset({"dsh", "deepseek-harness"}),
+    "antigravity": frozenset({"antigravity", "agy"}),
+}
+
+
+def _parse_iso_dt(val: str) -> dt.datetime | None:
+    """严格解析 YYYY-MM / YYYY-MM-DD / ISO 时间戳 (兼容 Python 3.9+ 无冒号时区与任意小数位)."""
+    s = str(val or "").strip()
+    if not s:
+        return None
+    m = _YM_SINCE_RE.match(s)
+    if m:
+        try:
+            return dt.datetime(int(m.group(1)), int(m.group(2)), 1)
+        except ValueError:
+            return None
+    m = _YMD_SINCE_RE.match(s)
+    if m:
+        try:
+            return dt.datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+    m = _FULL_ISO_RE.match(s)
+    if not m:
+        return None
+    y, mo, d, hh, mm = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)), int(m.group(5))
+    ss = int(m.group(6) or 0)
+    frac = m.group(7) or ""
+    us = int((frac + "000000")[:6]) if frac else 0
+    tz_raw = m.group(8)
+    tz = None
+    if tz_raw:
+        if tz_raw in ("Z", "z"):
+            tz = dt.timezone.utc
+        else:
+            sign = 1 if tz_raw[0] == "+" else -1
+            digits = tz_raw[1:].replace(":", "")
+            th, tm = int(digits[:2]), int(digits[2:4])
+            if th > 23 or tm > 59:
+                return None
+            tz = dt.timezone(sign * dt.timedelta(hours=th, minutes=tm))
+    try:
+        return dt.datetime(y, mo, d, hh, mm, ss, us, tzinfo=tz)
+    except ValueError:
+        return None
+
+
+def normalize_since(since: str | None, now: float | None = None) -> str:
+    """将时间下界规范化为 ISO 字符串 (支持 YYYY-MM / YYYY-MM-DD / ISO 时间戳 / 7d / 24h)。"""
+    raw = str(since or "").strip()
+    if not raw:
+        return ""
+    m = _REL_SINCE_RE.match(raw)
+    if m:
+        val, unit = int(m.group(1)), m.group(2).lower()
+        if val <= 0:
+            raise ValueError(f"invalid since: {since!r} (相对时间必须大于 0)")
+        now_ts = time.time() if now is None else float(now)
+        delta = dt.timedelta(days=val) if unit == "d" else dt.timedelta(hours=val)
+        anchor = dt.datetime.fromtimestamp(now_ts).astimezone() - delta
+        return anchor.isoformat(timespec="seconds")
+    if _parse_iso_dt(raw) is not None:
+        return raw[:10] + ("T" + raw[11:] if len(raw) > 10 and raw[10] == " " else raw[10:])
+    raise ValueError(f"invalid since: {since!r} (支持 YYYY-MM-DD / ISO 时间戳 / 7d / 24h)")
+
+
+def _ts_ge(ts_str: str, since_iso: str) -> bool:
+    if not since_iso:
+        return True
+    ts = str(ts_str or "").strip()
+    if not ts:
+        return False
+    if len(ts) > 10 and ts[10] == " ":
+        ts = ts[:10] + "T" + ts[11:]
+    d1, d2 = _parse_iso_dt(ts), _parse_iso_dt(since_iso)
+    if d1 is not None and d2 is not None:
+        if (d1.tzinfo is None) != (d2.tzinfo is None):
+            local_tz = dt.datetime.now().astimezone().tzinfo
+            if d1.tzinfo is None:
+                d1 = d1.replace(tzinfo=local_tz)
+            if d2.tzinfo is None:
+                d2 = d2.replace(tzinfo=local_tz)
+        return d1 >= d2
+    return ts >= since_iso
+
+
+def project_match_rank(stored: str | None, query: str | None) -> int:
+    """按路径段边界匹配项目作用域 (3=全路径精确, 2=目录基名精确, 1=路径段边界前缀/后缀, 0=不匹配)."""
+    nq = str(query or "").replace("\\", "/").rstrip("/").lower().strip()
+    if not nq:
+        return 3
+    ns = str(stored or "").replace("\\", "/").rstrip("/").lower().strip()
+    if not ns:
+        return 0
+    if ns == nq:
+        return 3
+    s_base = ns.rsplit("/", 1)[-1]
+    q_base = nq.rsplit("/", 1)[-1]
+    if "/" not in nq:
+        return 2 if s_base == nq else 0
+    if "/" not in ns and "/" in nq:
+        return 2 if q_base == ns else 0
+    if ns.endswith("/" + nq) or nq.endswith("/" + ns) or ns.startswith(nq + "/"):
+        return 1
+    return 0
+
+
+def match_project_scope(stored: str | None, query: str | None) -> bool:
+    """跨路径格式与段边界基名匹配项目作用域 (支持项目短名与完整路径双向命中, 避免宽泛子串误伤)."""
+    return project_match_rank(stored, query) > 0
+
+
+def match_agent_scope(row_agent: str | None, agent_filter: str | None) -> bool:
+    """按客户端/agent 过滤 (支持逗号分隔与 claude/dsh/antigravity 标准别名)。"""
+    raw = str(agent_filter or "").strip()
+    if not raw:
+        return True
+    cur = str(row_agent or "").strip().lower()
+    if not cur:
+        return False
+    accepted: set[str] = set()
+    for part in raw.split(","):
+        tok = part.strip().lower()
+        if not tok:
+            continue
+        accepted.update(_AGENT_SCOPE_ALIASES.get(tok, (tok,)))
+    return True if not accepted else (cur in accepted)
+
+
+def match_snapshot_scope(
+    row: dict | None,
+    project: str | None = None,
+    agent: str | None = None,
+    since_iso: str = "",
+) -> bool:
+    """统一快照行作用域判断 (ColdRanker 与 VaultIndex 共用, 保障冷热等价)。"""
+    r = row or {}
+    if project and not match_project_scope(r.get("cwd"), project):
+        return False
+    if agent and not match_agent_scope(r.get("agent"), agent):
+        return False
+    if since_iso and not _ts_ge(str(r.get("created_at") or ""), since_iso):
+        return False
+    return True
+
+
 def sort_hits(pairs: list, meta: dict) -> list:
     """(score, sid, folded) → score 降序, created_at 降序, sid 升序 (v0 同款三级稳定排序)。"""
     pairs.sort(key=lambda t: t[1])
@@ -361,21 +516,13 @@ def chain_root(sid: str, parents: dict, all_sids: set, memo: dict) -> str:
     return root
 
 
-def fold_chains(scored: dict, all_sids: list, parents: dict, meta: dict) -> list:
-    """Lineage 折叠: 演进链 (parent_snapshot 连通分量) 只出一命中 —
-    链记分 = 链内最高分命中成员; 代表 = 链叶子 (沿 parent 正向走到无子, 多叉取最新版,
-    环安全; 叶子无命中时仍作代表 — 折叠语义 = 指到该链最新快照); folded = 链全库成员数
-    - 1 (去重后命中可能集中于首个出现的祖先版, 折叠数按链规模计)。返回 [(score, rep_sid, folded_n)],
-    按 (score 降序, created_at 降序, sid 升序) 确定性排序。"""
-    if not scored:
-        return []
+def chain_leaf_map(all_sids: list, parents: dict, meta: dict) -> dict[str, str]:
+    """将全库每个 sid 映射到所属演进链的代表叶子 sid (环安全, 多叉取最新版)."""
     all_set = set(all_sids)
     child: dict = {}
     for s, p in (parents or {}).items():
         if p and p in all_set and s in all_set:
             child.setdefault(p, []).append(s)
-    memo: dict = {}
-    root_of = lambda s: chain_root(s, parents, all_set, memo)  # noqa: E731
     leaf_cache: dict = {}
 
     def leaf_of(s: str) -> str:
@@ -397,6 +544,21 @@ def fold_chains(scored: dict, all_sids: list, parents: dict, meta: dict) -> list
             leaf_cache[v] = leaf
         return leaf
 
+    return {s: leaf_of(s) for s in all_sids}
+
+
+def fold_chains(scored: dict, all_sids: list, parents: dict, meta: dict) -> list:
+    """Lineage 折叠: 演进链 (parent_snapshot 连通分量) 只出一命中 —
+    链记分 = 链内最高分命中成员; 代表 = 链叶子 (沿 parent 正向走到无子, 多叉取最新版,
+    环安全; 叶子无命中时仍作代表 — 折叠语义 = 指到该链最新快照); folded = 链全库成员数
+    - 1 (去重后命中可能集中于首个出现的祖先版, 折叠数按链规模计)。返回 [(score, rep_sid, folded_n)],
+    按 (score 降序, created_at 降序, sid 升序) 确定性排序。"""
+    if not scored:
+        return []
+    all_set = set(all_sids)
+    memo: dict = {}
+    root_of = lambda s: chain_root(s, parents, all_set, memo)  # noqa: E731
+    leaf_map = chain_leaf_map(all_sids, parents, meta)
     chains: dict = {}
     for sid, sc in scored.items():
         chains.setdefault(root_of(sid), []).append((sc, sid))
@@ -408,7 +570,7 @@ def fold_chains(scored: dict, all_sids: list, parents: dict, meta: dict) -> list
     for root, members in chains.items():
         members.sort(key=lambda t: (-t[0], t[1]))
         best_sc, best_sid = members[0]
-        leaf = leaf_of(best_sid)
+        leaf = leaf_map.get(best_sid, best_sid)
         out.append((round(best_sc, SCORE_DP), leaf, max(sizes.get(root, 1) - 1, 0)))
     return sort_hits(out, meta)
 
@@ -639,14 +801,30 @@ class ColdRanker:
         triples.sort(key=lambda t: -t[0])
         return triples
 
-    def search(self, limit: int) -> dict:
+    def search(self, limit: int, project: str | None = None, agent: str | None = None,
+               since: str | None = None) -> dict:
+        since_iso = normalize_since(since, self.now)
         self._scan()
         empty = {"query": self.query, "terms": self.terms, "total": 0, "hits": []}
         if not self._ranked:
             return empty
         scored = snapshot_scores(self._ranked, lambda d: d[0], self._sid_of)
-        triples = (fold_chains(scored, self._sids, self._parents, self._rows) if self.fold
-                   else self._sort3([(sc, s, 0) for s, sc in scored.items()]))
+        if self.fold:
+            triples = fold_chains(scored, self._sids, self._parents, self._rows)
+            if project or agent or since_iso:
+                triples = [
+                    (sc, sid, folded) for sc, sid, folded in triples
+                    if match_snapshot_scope(self._rows.get(sid), project, agent, since_iso)
+                ]
+                if not triples:
+                    return empty
+        else:
+            if project or agent or since_iso:
+                scored = {s: sc for s, sc in scored.items()
+                          if match_snapshot_scope(self._rows.get(s), project, agent, since_iso)}
+                if not scored:
+                    return empty
+            triples = self._sort3([(sc, s, 0) for s, sc in scored.items()])
         hits = []
         for sc, sid, folded in triples:
             row = dict(self._rows.get(sid) or {})
@@ -661,19 +839,36 @@ class ColdRanker:
         return {"query": self.query, "terms": self.terms, "total": len(hits),
                 "hits": hits[:limit]}
 
-    def context(self, limit: int) -> dict:
+    def context(self, limit: int, project: str | None = None, agent: str | None = None,
+                since: str | None = None) -> dict:
+        since_iso = normalize_since(since, self.now)
         self._scan()
         empty = {"query": self.query, "terms": self.terms, "total": 0, "results": []}
         if not self._ranked:
             return empty
-        results = context_results(self._ranked, limit, lambda d: d[0], self._sid_of,
+        ranked = self._ranked
+        if project or agent or since_iso:
+            leaf_map = chain_leaf_map(self._sids, self._parents, self._rows) if self.fold else {}
+            ranked = [
+                (sc, doc) for sc, doc in ranked
+                if match_snapshot_scope(
+                    self._rows.get(
+                        leaf_map.get(self._sid_of(doc[0]), self._sid_of(doc[0]))
+                        if self.fold else self._sid_of(doc[0])
+                    ),
+                    project, agent, since_iso,
+                )
+            ]
+            if not ranked:
+                return empty
+        results = context_results(ranked, limit, lambda d: d[0], self._sid_of,
                                   lambda d: d[1], self._root_of, self._rows.get,
                                   self._text_of, self.terms, self.now, self.half_life)
         for r in results:
             r["role"] = self._block_role(r["sid"], r["block"])
             if not r["versions"]:
                 r["versions"] = self._chain_sizes.get(self._root_of(r["sid"]), 1)
-        return {"query": self.query, "terms": self.terms, "total": len(self._ranked),
+        return {"query": self.query, "terms": self.terms, "total": len(ranked),
                 "results": results}
 
 

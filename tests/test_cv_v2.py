@@ -315,7 +315,7 @@ def _big_env(tmp_path):
                    "ts": ""})
     blocks.append({"type": "text", "role": "assistant",
                    "content": "最终停靠: 全部 20 模块改造完成, 测试全绿, 待提交", "ts": ""})
-    env = cv.build_envelope({"capture": {"agent": "codex", "cwd": "D:\proj", "session_ref": "s1"},
+    env = cv.build_envelope({"capture": {"agent": "codex", "cwd": r"D:\proj", "session_ref": "s1"},
                              "conversation": blocks, "stats": {**cv.zero_stats(),
                                                                "blocks_total": len(blocks)}})
     (tmp_path / "snapshots").mkdir(parents=True, exist_ok=True)

@@ -20,7 +20,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from cv_core import LocalThreadingHTTPServer, cv_mod as _cv
+from cv_core import LocalThreadingHTTPServer, cv_mod as _cv, user_agent
 from cv_index import VaultIndex, block_text, format_snapshot_messages
 from cv_ui import load_console_html as _load_console_html
 
@@ -353,13 +353,79 @@ def _get_memory(h, ctx: _ServerCtx, q: dict):
     except ValueError:
         return h._json({"error": "invalid limit: 需要整数"}, 400)
     mkind = q.get("kind", "")
+    proj = q.get("project") or None
+    since = q.get("since") or None
+    try:
+        memories = _cv().memory_search_api(
+            ctx.vault, q.get("q", ""), mlim, kind=mkind,
+            include_history=(q.get("history") == "1"),
+            project=proj, since=since,
+        )
+    except ValueError as e:
+        return h._json({"error": str(e)}, 400)
     h._json({
         "query": q.get("q", ""),
         "kind": mkind,
+        "project": proj or "",
+        "since": since or "",
         "counts": _cv().memory_counts_api(ctx.vault),
-        "memories": _cv().memory_search_api(ctx.vault, q.get("q", ""), mlim, kind=mkind,
-                                            include_history=(q.get("history") == "1")),
+        "projects": _cv().memory_projects_api(ctx.vault),
+        "memories": memories,
     })
+
+
+_RULE_OUT_NAMES = frozenset({"agents.md", "claude.md", ".cursorrules", "copilot-instructions.md"})
+_RULE_OUT_EXTS = frozenset({".md", ".mdc", ".cursorrules"})
+
+
+def _validate_rule_out_path(out_raw, apply: bool = False) -> str | None:
+    s = str(out_raw or "").strip()
+    if not s:
+        return None
+    p = Path(s).expanduser()
+    if p.exists() and p.is_dir():
+        raise ValueError("规则文件路径不能是目录")
+    if p.name.lower() not in _RULE_OUT_NAMES and p.suffix.lower() not in _RULE_OUT_EXTS:
+        raise ValueError("规则文件仅允许 AGENTS.md / CLAUDE.md / .cursorrules 或 .md/.mdc 文件")
+    return str(p)
+
+
+def _get_memory_compile_rules(h, ctx: _ServerCtx, q: dict):
+    try:
+        bt = _parse_int_arg(q.get("budget", 2000), "budget_tokens")
+        out_p = _validate_rule_out_path(q.get("out"), apply=False)
+        res = _cv().compile_project_rules(
+            ctx.vault,
+            q.get("project", ""),
+            target=q.get("target") or "agents",
+            out_path=out_p,
+            budget_tokens=bt,
+            include_summary=(q.get("include_summary") == "1"),
+            apply=False,
+        )
+        h._json(res)
+    except (ValueError, OSError) as e:
+        h._json({"error": str(e)}, 400)
+
+
+def _get_handoff(h, ctx: _ServerCtx, q: dict):
+    c = _cv()
+    try:
+        bt = _parse_int_arg(q.get("budget_tokens", 4000), "budget_tokens")
+        inc_raw = str(q.get("include_memories", "1")).strip().lower()
+        inc_mem = inc_raw not in ("0", "false", "no", "off")
+        res = c.build_handoff_api(
+            ctx.vault,
+            sid=q.get("id") or None,
+            project=q.get("project") or None,
+            budget_tokens=bt,
+            include_memories=inc_mem,
+        )
+        h._json(res)
+    except c.SnapshotNotFound as e:
+        h._json({"error": str(e)}, 404)
+    except ValueError as e:
+        h._json({"error": str(e)}, 400)
 
 
 def _get_semantic_status(h, ctx: _ServerCtx, q: dict):
@@ -524,6 +590,9 @@ def _get_search(h, ctx: _ServerCtx, q: dict):
         lim = _parse_int_arg(q.get("limit", 5), "limit")
     except ValueError:
         return h._json({"error": "invalid limit: 需要整数"}, 400)
+    proj = q.get("project") or None
+    ag = q.get("agent") or None
+    since = q.get("since") or None
     hyb = q.get("hybrid")
     use_dense = (hyb == "1")
     if hyb is None:
@@ -536,10 +605,17 @@ def _get_search(h, ctx: _ServerCtx, q: dict):
         try:
             from cv_semantic import DenseProvider, hybrid_search
             return h._json(hybrid_search(
-                ctx.idx, ctx.vault, q.get("q", ""), lim, provider=DenseProvider(vault=ctx.vault)))
+                ctx.idx, ctx.vault, q.get("q", ""), lim,
+                provider=DenseProvider(vault=ctx.vault),
+                project=proj, agent=ag, since=since))
+        except ValueError as e:
+            return h._json({"error": str(e)}, 400)
         except Exception:
             pass
-    h._json(ctx.idx.search(q.get("q", ""), lim))
+    try:
+        h._json(ctx.idx.search(q.get("q", ""), lim, project=proj, agent=ag, since=since))
+    except ValueError as e:
+        h._json({"error": str(e)}, 400)
 
 
 def _get_context(h, ctx: _ServerCtx, q: dict):
@@ -548,7 +624,13 @@ def _get_context(h, ctx: _ServerCtx, q: dict):
         lim = _parse_int_arg(q.get("limit", 3), "limit")
     except ValueError:
         return h._json({"error": "invalid limit: 需要整数"}, 400)
-    h._json(ctx.idx.context(q.get("q", ""), lim))
+    proj = q.get("project") or None
+    ag = q.get("agent") or None
+    since = q.get("since") or None
+    try:
+        h._json(ctx.idx.context(q.get("q", ""), lim, project=proj, agent=ag, since=since))
+    except ValueError as e:
+        h._json({"error": str(e)}, 400)
 
 
 def _get_recent(h, ctx: _ServerCtx, q: dict):
@@ -717,6 +799,8 @@ GET_ROUTES = {
     "/healthz": _get_healthz,
     "/audit": _get_audit,
     "/memory": _get_memory,
+    "/memory/compile_rules": _get_memory_compile_rules,
+    "/handoff": _get_handoff,
     "/semantic/status": _get_semantic_status,
     "/skills/list": _get_skills_list,
     "/skills/inspect": _get_skills_inspect,
@@ -828,13 +912,51 @@ def _post_memory_dedup(h, ctx: _ServerCtx, body: dict):
 
 def _post_memory_add(h, ctx: _ServerCtx, body: dict):
     try:
-        mres = _cv().memory_add_manual(
-            ctx.vault, body.get("content", ""), kind=body.get("kind") or "decision",
-            project=body.get("project") or "manual", pinned=bool(body.get("pinned", False)),
-        )
-        ctx.cache.clear()
+        with ctx._write_lock:
+            mres = _cv().memory_add_manual(
+                ctx.vault,
+                body.get("content", ""),
+                kind=body.get("kind") or "decision",
+                project=body.get("project") or "manual",
+                pinned=bool(body.get("pinned", False)),
+                supersedes=body.get("supersedes"),
+                source=body.get("source") or "manual",
+            )
+            ctx.cache.clear()
         h._json(mres)
-    except ValueError as e:
+    except (TypeError, ValueError) as e:
+        h._json({"error": str(e)}, 400)
+
+
+def _post_memory_compile_rules(h, ctx: _ServerCtx, body: dict):
+    try:
+        apply_flag = bool(body.get("apply", False))
+        raw_bt = body.get("budget_tokens", body.get("budget", 2000))
+        bt = _parse_int_arg(2000 if raw_bt is None else raw_bt, "budget_tokens")
+        out_p = _validate_rule_out_path(body.get("out_path", body.get("out")), apply=apply_flag)
+        if apply_flag:
+            with ctx._write_lock:
+                res = _cv().compile_project_rules(
+                    ctx.vault,
+                    body.get("project", ""),
+                    target=body.get("target") or "agents",
+                    out_path=out_p,
+                    budget_tokens=bt,
+                    include_summary=bool(body.get("include_summary", False)),
+                    apply=True,
+                )
+        else:
+            res = _cv().compile_project_rules(
+                ctx.vault,
+                body.get("project", ""),
+                target=body.get("target") or "agents",
+                out_path=out_p,
+                budget_tokens=bt,
+                include_summary=bool(body.get("include_summary", False)),
+                apply=False,
+            )
+        h._json(res)
+    except (ValueError, OSError) as e:
         h._json({"error": str(e)}, 400)
 
 
@@ -1173,6 +1295,7 @@ POST_ROUTES = {
     "/memory/extract": _post_memory_extract,
     "/memory/dedup": _post_memory_dedup,
     "/memory/add": _post_memory_add,
+    "/memory/compile_rules": _post_memory_compile_rules,
     "/memory/delete": _post_memory_delete,
     "/memory/pin": _post_memory_pin,
     "/aml/add": _post_aml_add,
@@ -1431,7 +1554,7 @@ def _cv_service_alive(port: int) -> bool:
     """该端口上是否已有 Context Vault 服务在应答 (区分"重复实例"与"端口被系统保留/他用")。"""
     try:
         req = urllib.request.Request(f"http://127.0.0.1:{port}/healthz",
-                                     headers={"User-Agent": "ContextVault/0.1"})
+                                     headers={"User-Agent": user_agent()})
         with urllib.request.urlopen(req, timeout=2) as r:
             return json.loads(r.read().decode("utf-8")).get("service") == "context-vault"
     except urllib.error.HTTPError as e:

@@ -408,7 +408,7 @@ def test_memory_extract_and_search(isolated, monkeypatch, tmp_path):
     (vault / "snapshots").mkdir(exist_ok=True)
     (vault / "snapshots" / f"{sid}.json").write_text(json.dumps(env), encoding="utf-8")
     import cv as _cv
-    items = _cv.extract_memories({**env, "_sid": sid, "capture": {"cwd": "D:\proj"}})
+    items = _cv.extract_memories({**env, "_sid": sid, "capture": {"cwd": r"D:\proj"}})
     kinds = {i["kind"] for i in items}
     assert kinds == {"summary", "decision", "preference"}
     dec = [i for i in items if i["kind"] == "decision"]
@@ -533,7 +533,7 @@ def test_export_zcode_session(isolated, tmp_path):
         time_deleted INTEGER, time_created INTEGER);
         CREATE TABLE message(id TEXT, session_id TEXT, data TEXT, time_created INTEGER, sequence INTEGER);
         CREATE TABLE part(id TEXT, message_id TEXT, session_id TEXT, data TEXT, sequence INTEGER);""")
-    db.execute("INSERT INTO session VALUES('sess_t','D:\proj','测试会话',1793000000000,NULL,1793000000000)")
+    db.execute(r"INSERT INTO session VALUES('sess_t','D:\proj','测试会话',1793000000000,NULL,1793000000000)")
     db.execute("INSERT INTO message VALUES('m1','sess_t',?,1000,1)",
                (json.dumps({"role": "user"}),))
     db.execute("INSERT INTO message VALUES('m2','sess_t',?,2000,2)",
@@ -553,7 +553,7 @@ def test_export_zcode_session(isolated, tmp_path):
     types = [b["type"] for b in r["conversation"]]
     assert types == ["text", "thinking", "tool_call", "tool_result"]  # synthetic 被过滤
     assert r["capture"]["agent"] == "zcode" and r["capture"]["model"] == "GLM-5.3"
-    assert r["capture"]["cwd"] == "D:\proj"
+    assert r["capture"]["cwd"] == r"D:\proj"
     tc = r["conversation"][2]; tr = r["conversation"][3]
     assert tc["call_id"] == "call_1" and tr["call_id"] == "call_1"
     assert tr["content"] == "a b c"
@@ -860,7 +860,7 @@ def _mk_snap(vault: Path, sid: str, first_user: str, blocks: int = 3):
     """写一个 VaultIndex 可解析的最小快照文件, 返回其 mtime 前的文件对象。"""
     p = vault / "snapshots" / f"{sid}.json"
     p.parent.mkdir(exist_ok=True)
-    env = {"capture": {"agent": "zcode", "completeness": "full", "cwd": "D:\proj"},
+    env = {"capture": {"agent": "zcode", "completeness": "full", "cwd": r"D:\proj"},
            "created_at": "2026-11-01T00:00:00",
            "stats": {"blocks_total": blocks, "tokens_in": 100 * blocks},
            "conversation": ([{"type": "user", "role": "user", "content": first_user}] +

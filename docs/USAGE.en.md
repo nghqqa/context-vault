@@ -8,8 +8,8 @@ Context Vault is a **100% free, local-first, zero-dependency** asset vault for A
 
 ## 1. 3-Minute Quick Start
 
-### Option A — Windows Ready-to-Run Tray Binary (No Python Required, 14.4 MB)
-1. Download [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.13.1/ContextVault.exe) from [GitHub Releases (v0.13.1)](https://github.com/nghqqa/context-vault/releases/tag/v0.13.1) and optionally verify via `SHA256SUMS.txt`:
+### Option A — Windows Ready-to-Run Tray Binary (No Python Required, 14.5 MB)
+1. Download [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.14.0/ContextVault.exe) from [GitHub Releases (v0.14.0)](https://github.com/nghqqa/context-vault/releases/tag/v0.14.0) and optionally verify via `SHA256SUMS.txt`:
    ```powershell
    certutil -hashfile ContextVault.exe SHA256
    ```
@@ -77,13 +77,14 @@ In the Web Console **Migrate (`3`) → Skill Migration**, source/target availabi
 ### Cross-Session Temporal Memory & MCP
 ```bash
 cv memory extract                        # extract decisions, preferences, pitfalls, constraints with provenance
-cv memory search "SQLite WAL"            # active facts only (superseded decisions hidden by default)
+cv memory search "SQLite WAL" --project my-proj --since 7d  # scoped active facts only
 cv memory search "SQLite WAL" --history  # trace full A -> B -> C evolution chain
+cv memory compile-rules --project my-proj --target agents   # dry-run AGENTS.md/CLAUDE.md/.cursorrules compiler (--apply writes with sentinel + .bak-cv)
 cv mcp status                            # inspect detected binaries vs uninstall residual dirs
 cv mcp install --all                     # register MCP in detected apps (or --clients claude,dsh)
 cv mcp uninstall --client cursor         # remove context-vault safely (supports --clients a,b; writes .bak-cv backup)
 ```
-MCP tools exposed (`cv-mcp` / `ContextVault.exe --mcp`): `vault_remember`, `vault_context`, `vault_search`, `vault_recent`, `vault_snapshot`, `vault_stats` (retrieval tools support `budget_tokens` trimming).
+MCP tools exposed (`cv-mcp` / `ContextVault.exe --mcp`, 8 tools): `vault_remember`, `vault_memorize` (write back with `pinned`/`supersedes`), `vault_handoff` (budgeted 5-slot brief + active memories), `vault_context`, `vault_search`, `vault_recent`, `vault_snapshot`, `vault_stats` (supporting `project`/`agent`/`since` scoped filtering & `budget_tokens` trimming).
 
 ### Local Multi-Client Token Ledger & Quota ETA
 ```bash
