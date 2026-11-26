@@ -78,7 +78,7 @@ from cv_index import (  # noqa: F401 — re-exported as public engine API
 
 FORMAT_VERSION = "0.1"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # noconsole 进程 spawn 控制台程序不弹窗   # context-snapshot 格式版本
-VERSION = "0.13.0"  # 整端全量/批量会话迁移工作台 / HTTP & CLI 批量迁移 / 显隐探针加固
+VERSION = "0.13.1"  # 引擎模块化瘦身 / HTTP 与 UI 模板去重 / macOS 零阻塞回环绑定
 TOOL_RESULT_LIMIT = 256 * 1024  # spec §8.2 裁决: 单块截断阈值 256KB
 HOME = Path.home()
 HEADROOM_DIR = HOME / ".headroom"

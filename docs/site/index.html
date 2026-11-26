@@ -424,11 +424,11 @@ details.cl-item:not([open])::details-content{block-size:0}
   <!-- ============ Hero ============ -->
   <section class="hero" aria-label="简介">
     <div class="wrap">
-      <a class="badge" href="#changelog"><span class="dot" aria-hidden="true"></span>v0.13.0 · 整端批量会话迁移 · Skill 差异回滚 · 14.4 MB 免 Python 托盘</a>
+      <a class="badge" href="#changelog"><span class="dot" aria-hidden="true"></span>v0.13.1 · 26 模块化引擎瘦身 · 整端批量迁移 · 14.4 MB 免 Python 托盘</a>
       <h1>换模型、换工具，<br>会话上下文<em>不再清零</em></h1>
       <p class="lede">Context Vault 把 AI 编程会话导出为<b>你自己机器上的中立快照</b>：内容寻址、不可变、带谱系。双向迁移、深度检索、token 账本、双时态记忆、MCP 后端——agent 来来去去，vault 一直在。</p>
       <div class="cta">
-        <a class="btn primary" href="https://github.com/nghqqa/context-vault/releases/download/v0.13.0/ContextVault.exe">
+        <a class="btn primary" href="https://github.com/nghqqa/context-vault/releases/download/v0.13.1/ContextVault.exe">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19.5h14"/></svg>
           下载 Windows 托盘版 (.exe)
         </a>
@@ -441,7 +441,7 @@ details.cl-item:not([open])::details-content{block-size:0}
           GitHub 仓库
         </a>
       </div>
-      <p class="meta">v0.13.0 · Windows 精简单文件 (14.4 MB, 免配 Python · 内置原生 MCP) · 或 Python 3.9+ 纯标准库零依赖 · MIT 开源免费</p>
+      <p class="meta">v0.13.1 · Windows 精简单文件 (14.4 MB, 免配 Python · 内置原生 MCP) · 或 Python 3.9+ 纯标准库零依赖 · MIT 开源免费</p>
     </div>
   </section>
 
@@ -557,7 +557,7 @@ details.cl-item:not([open])::details-content{block-size:0}
       <div class="sec-head">
         <span class="kicker">03 · 实测</span>
         <h2>真机验证记录</h2>
-        <p class="sub">2026-10-27 ~ 11-25 真机实测；与 docs/BENCHMARK.md、benchmarks/results 同源，不挑选、不修饰。</p>
+        <p class="sub">2026-10-27 ~ 11-26 真机实测；与 docs/BENCHMARK.md、benchmarks/results 同源，不挑选、不修饰。</p>
       </div>
       <div class="stats">
         <div class="stat"><span class="v">259</span><span class="k">自动化单测 · 含整端批量迁移、Skill Diff/回滚、DSH 与并发安全</span></div>
@@ -581,15 +581,15 @@ details.cl-item:not([open])::details-content{block-size:0}
       </div>
       <div class="dl-card">
         <div class="dl-info">
-          <div class="dl-head">Windows 绿色托盘版（免装 Python，双击即用）<span class="dl-tag">v0.13.0 · 14.4 MB</span></div>
+          <div class="dl-head">Windows 绿色托盘版（免装 Python，双击即用）<span class="dl-tag">v0.13.1 · 14.4 MB</span></div>
           <p class="dl-desc">精简单文件可执行程序，内置热索引服务（<code>127.0.0.1:8791</code>，带安全响应头与写互斥锁）、<strong>原生免 Python MCP 服务</strong>、整端全量批量会话迁移、Skill 差异对比/安全移除/一键回滚、DeepSeek Harness / Antigravity 迁移与完整配置 zip 备份。</p>
         </div>
         <div class="dl-acts">
-          <a class="btn primary" href="https://github.com/nghqqa/context-vault/releases/download/v0.13.0/ContextVault.exe">
+          <a class="btn primary" href="https://github.com/nghqqa/context-vault/releases/download/v0.13.1/ContextVault.exe">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19.5h14"/></svg>
             下载 ContextVault.exe
           </a>
-          <a class="dl-sub" href="https://github.com/nghqqa/context-vault/releases/tag/v0.13.0">Release 说明 &amp; SHA256</a>
+          <a class="dl-sub" href="https://github.com/nghqqa/context-vault/releases/tag/v0.13.1">Release 说明 &amp; SHA256</a>
         </div>
       </div>
       <p class="term-label" style="margin-top:0">命令行安装（Windows / Linux / macOS，纯 Python 3.9+ 标准库零依赖）</p>
@@ -644,15 +644,45 @@ details.cl-item:not([open])::details-content{block-size:0}
           <button type="button" id="cl-toggle-all" class="cl-act" commandfor="cl-list" command="--toggle-all" aria-expanded="false">
             <span class="expand">全部展开</span><span class="collapse">全部收起</span>
           </button>
-          <span id="cl-count" class="cl-count" aria-live="polite">显示 11 / 11 个版本</span>
+          <span id="cl-count" class="cl-count" aria-live="polite">显示 12 / 12 个版本</span>
         </div>
       </div>
 
       <div id="cl-list" class="cl-list">
 
-        <details class="cl-item" id="v0.13.0" data-cats="migrate ui" open>
+        <details class="cl-item" id="v0.13.1" data-cats="migrate retrieval ui" open>
           <summary>
-            <span class="cl-ver latest">v0.13.0 <b>最新</b></span>
+            <span class="cl-ver latest">v0.13.1 <b>最新</b></span>
+            <span class="cl-title">引擎模块化瘦身（26 模块零三方依赖）· HTTP / UI 模板消重 · macOS 回环绑定修复</span>
+            <span class="cl-tags"><span class="cl-tag">迁移与 Skill</span><span class="cl-tag">检索与记忆</span><span class="cl-tag">界面与托盘</span></span>
+            <time datetime="2026-11-26">2026-11-26</time>
+          </summary>
+          <div class="cl-body">
+            <p class="cl-lead">维护与架构重构版本：修复 <code>macos-latest</code> 回环绑定卡顿使 CI 全矩阵 6/6 绿灯，将 5 个超千行核心模块无损拆分为 <b>26 个纯标准库模块</b>，并完成回环 HTTP 服务与控制台迁移模板单一信源收敛。</p>
+            <ul class="cl-pts">
+              <li><span class="cl-kind k-fix">修复</span><span><b>共享回环服务类与 macOS CI 修复</b>（<code>cv_core.py</code> / <code>cv_server.py</code> / <code>aml_adapter.py</code>）：抽出 <code>LocalThreadingHTTPServer</code> 跳过 <code>127.0.0.1</code> 上的 <code>socket.getfqdn()</code> 反向 DNS 解析，彻底消除 macOS CI 阻塞，GitHub Actions 6 平台矩阵全数通过。</span></li>
+              <li><span class="cl-kind k-ref">重构</span><span><b>五大引擎模块无损拆分与兼容壳清理</b>：<code>cv.py</code>（2,630→1,125 行）拆出 <code>cv_export.py</code> / <code>cv_projects.py</code> / <code>cv_ledger_cli.py</code> 并归并 <code>cv_ops.py</code>；<code>cv_index.py</code> 拆出 <code>cv_rank.py</code>；<code>cv_dsh.py</code> 拆出 <code>cv_dsh_codec.py</code>；<code>cv_skills.py</code> 拆出 <code>cv_skills_ops.py</code>；<code>cv_antigravity.py</code> 拆出 <code>cv_antigravity_pb.py</code>；保留全量 re-export 与 <code>monkeypatch</code> 兼容，并清理 <code>cv_dense.py</code> 兼容壳。</span></li>
+              <li><span class="cl-kind k-opt">优化</span><span><b>控制台迁移模板单一信源与构建同步</b>（<code>cv_ui.py</code> / <code>console.html</code>）：单条与批量迁移目标卡及 Markdown 预算选项收敛至同一组 SSR 占位符模板（保持单 <code>&lt;style&gt;</code>/<code>&lt;script&gt;</code> 约束），并同步更新 <code>pyproject.toml</code>、<code>pro/build.py</code> 与 CI 检查。</span></li>
+            </ul>
+            <div class="cl-metrics">
+              <span class="cl-m">pytest 259 passed</span>
+              <span class="cl-m">26 模块零三方依赖</span>
+              <span class="cl-m">Chromium 32/32 零溢出</span>
+              <span class="cl-m">Exe 14.43 MiB (15,134,687 B)</span>
+            </div>
+            <div class="cl-links">
+              <a href="https://github.com/nghqqa/context-vault/releases/tag/v0.13.1">GitHub Release</a>
+              <a href="https://github.com/nghqqa/context-vault/blob/main/docs/release-notes-v0.13.1.md">完整发布说明</a>
+              <a href="https://github.com/nghqqa/context-vault/compare/v0.13.0...v0.13.1">代码对比</a>
+              <a href="https://github.com/nghqqa/context-vault/releases/download/v0.13.1/ContextVault.exe">下载 .exe</a>
+              <button type="button" class="cl-copy-link" data-hash="#v0.13.1">复制版本链接</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="cl-item" id="v0.13.0" data-cats="migrate ui">
+          <summary>
+            <span class="cl-ver">v0.13.0</span>
             <span class="cl-title">整端全量 / 批量会话迁移工作台 · HTTP 与 CLI 批量迁出 · 显隐防溢出加固</span>
             <span class="cl-tags"><span class="cl-tag">迁移与 Skill</span><span class="cl-tag">界面与托盘</span></span>
             <time datetime="2026-11-25">2026-11-25</time>
@@ -975,8 +1005,8 @@ details.cl-item:not([open])::details-content{block-size:0}
 
 <footer>
   <div class="wrap foot-in">
-    <div>Context Vault v0.13.0 · 完全免费 · 代码 MIT · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/snapshot-format.md">快照格式规范 CC-BY</a></div>
-    <div><a href="https://github.com/nghqqa/context-vault/releases/download/v0.13.0/ContextVault.exe">下载 Windows 托盘版</a> · <a href="#changelog">更新日志</a> · <a href="https://github.com/nghqqa/context-vault/releases.atom">Atom 订阅</a> · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.md">中文手册</a> · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.en.md">English Guide</a> · <a href="https://github.com/nghqqa/context-vault">GitHub</a> · <a href="https://github.com/nghqqa/context-vault/releases">Releases</a> · <a href="https://raw.githubusercontent.com/nghqqa/context-vault/main/llms.txt">llms.txt</a></div>
+    <div>Context Vault v0.13.1 · 完全免费 · 代码 MIT · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/snapshot-format.md">快照格式规范 CC-BY</a></div>
+    <div><a href="https://github.com/nghqqa/context-vault/releases/download/v0.13.1/ContextVault.exe">下载 Windows 托盘版</a> · <a href="#changelog">更新日志</a> · <a href="https://github.com/nghqqa/context-vault/releases.atom">Atom 订阅</a> · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.md">中文手册</a> · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.en.md">English Guide</a> · <a href="https://github.com/nghqqa/context-vault">GitHub</a> · <a href="https://github.com/nghqqa/context-vault/releases">Releases</a> · <a href="https://raw.githubusercontent.com/nghqqa/context-vault/main/llms.txt">llms.txt</a></div>
   </div>
 </footer>
 
