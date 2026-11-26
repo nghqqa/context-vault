@@ -15,7 +15,6 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import aml_adapter  # noqa: E402
 import cv  # noqa: E402
-import cv_dense  # noqa: E402
 import cv_memory  # noqa: E402
 import cv_semantic  # noqa: E402
 
@@ -40,7 +39,7 @@ class TestSemanticAndModularization(unittest.TestCase):
 
     def test_ai_config_persistence_and_dense_provider_fallback(self):
         # 初始未配置时, DenseProvider 与 LocalLLMClient 均关闭且不发网络请求
-        self.assertFalse(cv_dense.DenseProvider(vault=self.tmp).available)
+        self.assertFalse(cv_semantic.DenseProvider(vault=self.tmp).available)
         self.assertFalse(cv_semantic.LocalLLMClient(vault=self.tmp).available)
 
         # 保存配置到 vault/ai_config.json
@@ -51,7 +50,7 @@ class TestSemanticAndModularization(unittest.TestCase):
             "llm_model": "qwen2.5:7b",
             "llm_key": "secret-should-not-leak",
         })
-        dp = cv_dense.DenseProvider(vault=self.tmp)
+        dp = cv_semantic.DenseProvider(vault=self.tmp)
         self.assertTrue(dp.available)
         self.assertEqual(dp.model, "nomic-embed-text")
 

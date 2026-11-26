@@ -187,28 +187,14 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
           <div class="card-h"><span class="ch-l"><span class="stepno">2</span>目标格式</span><span class="sub">写入去向在右侧第 4 步抉择</span></div>
           <div class="card-b">
             <div class="tgt-cards" id="tgt-cards" role="radiogroup" aria-label="迁移目标">
-              <label class="tgt-card on"><input type="radio" name="tgt" value="codex" checked onchange="onMigTarget()">
-                <span><span class="tt">Codex</span><br><span class="td">rollout 文件 · codex resume</span></span></label>
-              <label class="tgt-card"><input type="radio" name="tgt" value="claude" onchange="onMigTarget()">
-                <span><span class="tt">Claude Code</span><br><span class="td">projects jsonl · --resume</span></span></label>
-              <label class="tgt-card"><input type="radio" name="tgt" value="antigravity" onchange="onMigTarget()">
-                <span><span class="tt">Antigravity</span><br><span class="td">原生 .db（重启 app 生效）</span></span></label>
-              <label class="tgt-card"><input type="radio" name="tgt" value="zcode" onchange="onMigTarget()">
-                <span><span class="tt">ZCode 写回</span><br><span class="td">实验性 · 先备份后写主库</span></span></label>
-              <label class="tgt-card"><input type="radio" name="tgt" value="dsh" onchange="onMigTarget()">
-                <span><span class="tt">DeepSeek Harness</span><br><span class="td">V4 会话 · ~/.dsh/sessions</span></span></label>
-              <label class="tgt-card"><input type="radio" name="tgt" value="markdown" onchange="onMigTarget()">
-                <span><span class="tt">Markdown 交接简报 · 任意 agent</span><br><span class="td">≤48KB 结构化交接简报（停点 / 最近动作 / 活上下文尾部）</span></span></label>
+<!--__MIG_SINGLE_TARGETS__-->
             </div>
             <div class="hint" id="mig-md-note" style="display:none;margin-top:8px">
               Markdown 目标始终导出到 outbox，无写入会话目录语义。</div>
             <div class="mig-budget-row" id="mig-budget-row" style="display:none">
               <label for="mig-budget">Token 预算档位</label>
               <select id="mig-budget" aria-label="Markdown 交接简报 Token 预算">
-                <option value="4000" selected>4,000 tokens（推荐 · 五槽位智能压缩）</option>
-                <option value="2000">2,000 tokens（紧凑速览）</option>
-                <option value="8000">8,000 tokens（详尽交接）</option>
-                <option value="">不限预算（完整简报 ≤48KB）</option>
+<!--__MIG_SINGLE_BUDGETS__-->
               </select>
             </div>
           </div>
@@ -284,18 +270,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
           <div class="card-h"><span class="ch-l"><span class="stepno">2</span>目标格式与选项</span></div>
           <div class="card-b">
             <div class="tgt-cards" id="mb-tgt-cards" role="radiogroup" aria-label="批量迁移目标">
-              <label class="tgt-card on"><input type="radio" name="mb-tgt" value="codex" checked onchange="mbSetTarget('codex')">
-                <span><span class="tt">Codex</span><br><span class="td">rollout 文件 · codex resume</span></span></label>
-              <label class="tgt-card"><input type="radio" name="mb-tgt" value="claude" onchange="mbSetTarget('claude')">
-                <span><span class="tt">Claude Code</span><br><span class="td">projects jsonl · --resume</span></span></label>
-              <label class="tgt-card"><input type="radio" name="mb-tgt" value="antigravity" onchange="mbSetTarget('antigravity')">
-                <span><span class="tt">Antigravity</span><br><span class="td">原生 .db（重启 app 生效）</span></span></label>
-              <label class="tgt-card"><input type="radio" name="mb-tgt" value="zcode" onchange="mbSetTarget('zcode')">
-                <span><span class="tt">ZCode 写回</span><br><span class="td">实验性 · 整批前备份 1 次</span></span></label>
-              <label class="tgt-card"><input type="radio" name="mb-tgt" value="dsh" onchange="mbSetTarget('dsh')">
-                <span><span class="tt">DeepSeek Harness</span><br><span class="td">V4 会话 · ~/.dsh/sessions</span></span></label>
-              <label class="tgt-card"><input type="radio" name="mb-tgt" value="markdown" onchange="mbSetTarget('markdown')">
-                <span><span class="tt">Markdown 交接简报</span><br><span class="td">批量输出结构化简报至 outbox</span></span></label>
+<!--__MIG_BATCH_TARGETS__-->
             </div>
             <div class="hint" id="mb-md-note" style="display:none;margin-top:8px">
               Markdown 目标始终批量输出至 vault/outbox/brief-*.md，不写入任何会话目录。
@@ -303,10 +278,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
             <div class="mig-budget-row" id="mb-budget-row" style="display:none">
               <label for="mb-budget">单条简报预算</label>
               <select id="mb-budget" aria-label="批量 Markdown 简报预算">
-                <option value="4000" selected>4,000 tokens（推荐 · 五槽位压缩）</option>
-                <option value="2000">2,000 tokens（紧凑速览）</option>
-                <option value="8000">8,000 tokens（详尽交接）</option>
-                <option value="">不限预算（单条 ≤48KB）</option>
+<!--__MIG_BATCH_BUDGETS__-->
               </select>
             </div>
           </div>

@@ -729,16 +729,48 @@ class TestProjectImprovements(unittest.TestCase):
         self.assertIn("pricing.json", names)
 
     def test_dashboard_and_toast_html_escaping_and_reexports(self):
+        import importlib.util
         from types import SimpleNamespace
+        import aml_adapter
+        import cv_antigravity
+        import cv_antigravity_pb
+        import cv_core
+        import cv_dsh
+        import cv_dsh_codec
+        import cv_export
+        import cv_index
         import cv_ledger
+        import cv_ledger_cli
         import cv_ledger_collect
         import cv_mcp
         import cv_ops
+        import cv_projects
+        import cv_rank
+        import cv_skills
+        import cv_skills_ops
         import cv_sync
+        import cv_ui
 
         self.assertIs(cv.mcp_install_api, cv_mcp.mcp_install_api)
         self.assertIs(cv.sync_vault, cv_sync.sync_vault)
         self.assertIs(cv_ledger.sync_usage_events, cv_ledger_collect.sync_usage_events)
+        self.assertIs(cv.export_claude_code, cv_export.export_claude_code)
+        self.assertIs(cv.resolve_top_conversations, cv_projects.resolve_top_conversations)
+        self.assertIs(cv.cmd_ledger_stats, cv_ledger_cli.cmd_ledger_stats)
+        self.assertIs(cv.cmd_fork, cv_ops.cmd_fork)
+        self.assertIs(cv.ColdRanker, cv_rank.ColdRanker)
+        self.assertIs(cv_index.ColdRanker, cv_rank.ColdRanker)
+        self.assertIs(cv_skills.migrate_skills, cv_skills_ops.migrate_skills)
+        self.assertIs(cv_antigravity.export_antigravity_db, cv_antigravity_pb.export_antigravity_db)
+        self.assertIs(cv.export_antigravity_db, cv_antigravity_pb.export_antigravity_db)
+        self.assertIs(cv_dsh.zstd_backend, cv_dsh_codec.zstd_backend)
+        self.assertIsNone(importlib.util.find_spec("cv_dense"))
+        self.assertTrue(issubclass(aml_adapter._AMLHTTPServer, cv_core.LocalThreadingHTTPServer))
+
+        console_html = cv_ui.load_console_html()
+        self.assertNotIn("<!--__MIG_", console_html)
+        for token in ('id="tgt-cards"', 'id="mig-budget"', 'id="mb-tgt-cards"', 'id="mb-budget"'):
+            self.assertIn(token, console_html)
 
         vault = self.tmp / "vault_xss"
         (vault / "snapshots").mkdir(parents=True)

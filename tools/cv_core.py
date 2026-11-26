@@ -6,7 +6,9 @@
 """
 from __future__ import annotations
 
+from http.server import ThreadingHTTPServer
 import os
+import socketserver
 import sqlite3
 import sys
 import tempfile
@@ -215,3 +217,15 @@ def truncate_to_tokens(text: str, max_tokens: int) -> str:
         else:
             hi = mid - 1
     return (text[:best] + "…") if best > 0 else "…"
+
+
+class LocalThreadingHTTPServer(ThreadingHTTPServer):
+    """本地回环 HTTP 服务器基类: 跳过 socket.getfqdn 反查 (macOS/离线环境避免 15s+ 阻塞)。"""
+
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host or "127.0.0.1"
+        self.server_port = port

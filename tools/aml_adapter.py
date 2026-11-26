@@ -15,10 +15,9 @@ import hashlib
 import json
 import os
 import re
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 import signal
-import socketserver
 import sys
 import tempfile
 import threading
@@ -30,6 +29,7 @@ if str(HERE) not in sys.path:
 
 import cv  # noqa: E402
 import cv_memory  # noqa: E402
+from cv_core import LocalThreadingHTTPServer  # noqa: E402
 from cv_index import VaultIndex  # noqa: E402
 
 MAX_HTTP_BODY_BYTES = 4 * 1024 * 1024  # 4 MiB 请求体上限
@@ -441,17 +441,8 @@ class AMLMemoryAdapter:
         }
 
 
-class _AMLHTTPServer(ThreadingHTTPServer):
-    # Windows 上关闭地址复用以防端口抢占, POSIX/Linux 容器下启用 SO_REUSEADDR 避免重启撞 TIME_WAIT
-    allow_reuse_address = os.name != "nt"
-
-    def server_bind(self):
-        # 跳过 HTTPServer.server_bind() 的 socket.getfqdn(host) 反向 DNS 查询
-        # (macOS / 离线环境下对 127.0.0.1 反查可能阻塞 15s+)
-        socketserver.TCPServer.server_bind(self)
-        host, port = self.server_address[:2]
-        self.server_name = host or "127.0.0.1"
-        self.server_port = port
+class _AMLHTTPServer(LocalThreadingHTTPServer):
+    """AML HTTP 服务器 (继承 LocalThreadingHTTPServer: 按 OS 设 reuse 并跳过反向 DNS)。"""
 
 
 def serve_aml(vault: Path, host: str = "127.0.0.1", port: int = 8792, token: str | None = None):

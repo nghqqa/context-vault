@@ -1,11 +1,15 @@
 """运维与可视化子系统 — 上游哨兵 (probe)、缓存预热 (warm)、切换守望 (watch) 与静态面板 (dashboard)。"""
 from __future__ import annotations
 
+import datetime as dt
+import hashlib
 import html
 import json
 import os
+import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -387,4 +391,411 @@ def cmd_watch(args):
         conn.commit()
         for agent, f in acts[:5]:
             print(f"  · [{agent}] {f}")
+
+
+# ------------------------------------------------- 运维、分支、审计与备份/裁剪
+
+def storm_relink(conn) -> int:
+    """断链重链 (2026-11-08 风暴修复): 按快照文件 mtime 恢复每会话链条。"""
+    rows = conn.execute("SELECT id, agent, session_ref, parent_snapshot, fork_of, path FROM snapshots").fetchall()
+    groups = {}
+    for r in rows:
+        if not r["session_ref"]:
+            continue
+        try:
+            mt = os.path.getmtime(r["path"]) if r["path"] else 0
+        except OSError:
+            mt = 0
+        groups.setdefault((r["agent"], r["session_ref"], r["fork_of"] or ""), []).append((mt, r))
+    n = 0
+    for lst in groups.values():
+        if len(lst) < 2:
+            continue
+        roots = [x for x in lst if not x[1]["parent_snapshot"]]
+        if roots and len(roots) < 2:
+            continue
+        if not roots:
+            member_ids = {x[1]["id"] for x in lst}
+            if not all(x[1]["parent_snapshot"] in member_ids for x in lst):
+                continue
+        lst = sorted(lst, key=lambda x: x[0])
+        prev = None
+        for _, r in lst:
+            if r["parent_snapshot"] != prev:
+                conn.execute("UPDATE snapshots SET parent_snapshot=? WHERE id=?", (prev, r["id"]))
+                n += 1
+            prev = r["id"]
+    conn.commit()
+    return n
+
+
+def cmd_repair(args):
+    """一次性数据修复的显式入口: 从快照文件回填 lineage 索引列, zcode 历史快照按版本时间回填用量。"""
+    c = _cv()
+    vault = c.vault_dir(args)
+    conn = c.db(vault)
+    n_lin = c.backfill_lineage(conn, force=True)
+    n_zu = c.backfill_zcode_usage(conn, force=True)
+    n_st = storm_relink(conn)
+    own = c.owned_stats(vault)
+    print(f"lineage 回填: {n_lin} 行 · zcode 用量回填: {n_zu} 行 · 断链重链: {n_st} 行")
+    print(f"账本口径: {own['sessions']} 独立会话 / {own['snapshots']} 快照版本 · "
+          f"规范化总输入 {own['input_effective']:,} tok · 命中率 {own['cache_hit_rate']*100:.1f}%")
+
+
+def fork_snapshot(vault: Path, source_sid: str, message: str | None = None) -> dict:
+    """在历史节点开分支: 复制快照为新内容寻址实体, lineage.fork_of 指向原快照 (CLI 与 POST /fork 共用)。"""
+    c = _cv()
+    env = c.load_snapshot(vault, source_sid)
+    env["lineage"]["fork_of"] = source_sid
+    if message:
+        env["capture"]["fork_note"] = message
+    sid = c.snapshot_id(env)
+    (vault / "snapshots").mkdir(parents=True, exist_ok=True)
+    out = vault / "snapshots" / f"{sid}.json"
+    if out.exists():
+        try:
+            existing_fork_of = (json.loads(out.read_text(encoding="utf-8")).get("lineage") or {}).get("fork_of")
+        except (ValueError, OSError):
+            existing_fork_of = None
+        if existing_fork_of != source_sid:
+            sid = "cv_" + hashlib.sha256(
+                c.canonical_bytes(env) + b"|fork_of:" + str(source_sid).encode()
+            ).hexdigest()[:16]
+            out = vault / "snapshots" / f"{sid}.json"
+    existed = out.exists()
+    if not existed:
+        c.atomic_write_text(out, json.dumps(env, ensure_ascii=False, indent=1))
+    conn = c.db(vault)
+    try:
+        conn.executescript(c.SCHEMA)
+        c.register_snapshot(conn, env, sid, out)
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "fork_sid": sid, "source_sid": source_sid, "existed": existed,
+        "message": message or "", "path": str(out),
+    }
+
+
+def cmd_fork(args):
+    """在历史节点开分支: 复制快照为新内容寻址实体, lineage.fork_of 指向原快照。"""
+    c = _cv()
+    vault = c.vault_dir(args)
+    res = fork_snapshot(vault, args.snapshot_id, getattr(args, "message", None))
+    sid = res["fork_sid"]
+    if res["existed"]:
+        print(f"该分叉已存在 (幂等): {sid}.json")
+    else:
+        print(f"已分叉: {args.snapshot_id} → {sid}"
+              + (f" · 备注: {args.message}" if getattr(args, "message", None) else ""))
+    print(f"  续写: python tools/cv.py import {sid} --target codex|claude --apply")
+
+
+def cmd_tree(args):
+    """展示快照的 lineage 链: 向上追 parent (同源演进), 向下展 fork 子树。"""
+    c = _cv()
+    vault = c.vault_dir(args)
+    env = c.load_snapshot(vault, args.snapshot_id)
+    chain = [args.snapshot_id]
+    cur = env
+    while cur["lineage"].get("parent_snapshot"):
+        p = cur["lineage"]["parent_snapshot"]
+        chain.append(p)
+        ppath = vault / "snapshots" / f"{p}.json"
+        if not ppath.exists():
+            break
+        cur = json.loads(ppath.read_text(encoding="utf-8"))
+    chain.reverse()
+    children = {}
+    for f in (vault / "snapshots").glob("cv_*.json"):
+        try:
+            e = json.loads(f.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            continue
+        fo = e.get("lineage", {}).get("fork_of")
+        if fo:
+            children.setdefault(fo, []).append(f.stem)
+    print(f"快照 {args.snapshot_id} 的谱系:")
+    for i, sid in enumerate(chain):
+        mark = " → " if i < len(chain) - 1 else " ● "
+        print(f"  {mark}{sid}" + ("  (本快照)" if sid == args.snapshot_id else ""))
+
+    def show_forks(sid, depth=0):
+        for ch in children.get(sid, []):
+            print("  " + "    " * depth + f"↳ fork {ch}")
+            show_forks(ch, depth + 1)
+
+    show_forks(args.snapshot_id)
+
+
+def audit_summary_and_timeline(vault: Path, since: str, kind: str, limit: int = 200,
+                               summary_only: bool = False) -> dict:
+    """统一事件流: probe/switch/warm + 汇总。"""
+    c = _cv()
+    conn = c.db(vault)
+    rows = []
+    try:
+        agg = conn.execute(
+            "SELECT COUNT(*),"
+            " COALESCE(SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END), 0),"
+            " COALESCE(SUM(CASE WHEN status='switch' THEN 1 ELSE 0 END), 0),"
+            " COALESCE(SUM(CASE WHEN status='prune' THEN 1 ELSE 0 END), 0),"
+            " COALESCE(SUM(CASE WHEN missing_models IS NOT NULL AND missing_models != '[]' THEN 1 ELSE 0 END), 0)"
+            " FROM probe_events"
+        ).fetchone()
+        total, ok_probes, switches, prune_n, model_missing = (int(x or 0) for x in agg)
+        if not summary_only:
+            q = "SELECT * FROM probe_events WHERE 1=1"
+            params = []
+            if since:
+                q += " AND ts >= ?"
+                params.append(since)
+            rows = conn.execute(q + " ORDER BY id DESC LIMIT ?", (*params, limit)).fetchall()
+            if kind != "all":
+                rows = [r for r in rows if kind in (r["status"],)]
+    except sqlite3.OperationalError:
+        conn.close()
+        return {
+            "since": since or "(全部)", "total_events": 0,
+            "summary": {"ok_probes": 0, "abnormal": 0, "switches": 0, "model_missing_events": 0},
+            "timeline": [],
+        }
+    conn.close()
+    err_probes = total - ok_probes - switches - prune_n
+    by_day = {}
+    for r in rows:
+        day = str(r["ts"])[:10]
+        by_day.setdefault(day, []).append(r)
+    timeline = []
+    for day in sorted(by_day, reverse=True):
+        events = [
+            {
+                "ts": str(r["ts"])[11:19], "profile": r["profile"], "status": r["status"],
+                "http": r["http_code"], "latency_ms": r["latency_ms"],
+                "missing": r["missing_models"] if r["missing_models"] not in ("[]", None) else None,
+                "detail": (r["models"] or "")[:80],
+            }
+            for r in by_day[day]
+        ]
+        timeline.append({"day": day, "events": events})
+    return {
+        "since": since or "(全部)", "total_events": total,
+        "summary": {
+            "ok_probes": ok_probes, "abnormal": err_probes,
+            "switches": switches, "model_missing_events": model_missing,
+        },
+        "timeline": timeline,
+    }
+
+
+def cmd_audit(args):
+    c = _cv()
+    vault = c.vault_dir(args)
+    r = audit_summary_and_timeline(vault, args.since, args.kind)
+    s = r["summary"]
+    print(f"== 审计时间线 ({r['since']} 起, 库内共 {r['total_events']} 事件) ==")
+    print(f"  探测正常 {s['ok_probes']} · 异常 {s['abnormal']} · 切换检测 {s['switches']}"
+          f" · 模型消失事件 {s['model_missing_events']}")
+    for day in r["timeline"][:args.days]:
+        print(f"  {day['day']}  ({len(day['events'])} 事件)")
+        for e in day["events"][:8]:
+            mark = {"ok": "·", "switch": "⇄", "warm": "🔥"}.get(e["status"], "!")
+            extra = f" 消失{e['missing']}" if e["missing"] else (f" {e['detail'][:40]}" if e["status"] == "switch" else "")
+            print(f"    {mark} {e['ts']} [{e['profile']}] {e['status']}{extra}")
+        if len(day["events"]) > 8:
+            print(f"    … 其余 {len(day['events']) - 8} 条 (cv audit --days 更多)")
+
+
+def backup_vault_api(vault: Path, keep: int = 10, out_dir: Path | None = None) -> dict:
+    """结构化一致性备份接口: sqlite 在线快照 + snapshots + 配置文件打包 + 轮换保留 (不写 stdout)。"""
+    import zipfile
+    c = _cv()
+    if not (vault / "vault.db").exists():
+        raise ValueError(f"vault 未初始化: {vault} (先 cv init / cv export)")
+    keep_n = max(1, min(int(keep or 10), 50))
+    dest_dir = Path(out_dir).expanduser() if out_dir is not None else (vault / "backups")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S") + ("-f%03d" % (dt.datetime.now().microsecond // 1000))
+    out = dest_dir / f"cv-backup-{ts}.zip"
+    tmp_db = dest_dir / f".backup-tmp-{os.getpid()}-{threading.get_ident()}.db"
+    n_snap = 0
+    try:
+        src = c.db(vault)
+        try:
+            dst = sqlite3.connect(tmp_db)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+            z.write(tmp_db, "vault.db")
+            snaps_dir = vault / "snapshots"
+            if snaps_dir.is_dir():
+                for f in sorted(snaps_dir.glob("cv_*.json")):
+                    z.write(f, f"snapshots/{f.name}")
+                    n_snap += 1
+            for name in ("probe_baseline.json", "relay_watermark.json",
+                         "migrations.jsonl", "accounts.json", "semantic.json",
+                         "pricing.json", "prices.json"):
+                p = vault / name
+                if p.exists():
+                    z.write(p, name)
+    finally:
+        tmp_db.unlink(missing_ok=True)
+    backups = sorted(dest_dir.glob("cv-backup-*.zip"))
+    for old in backups[:-keep_n] if len(backups) > keep_n else []:
+        old.unlink(missing_ok=True)
+    backups = sorted(dest_dir.glob("cv-backup-*.zip"))
+    size_mb = out.stat().st_size / 1048576
+    msg = f"备份完成: {out} ({n_snap} 快照, {size_mb:.1f} MB, 留存 {len(backups)}/{keep_n} 份)"
+    logs = [msg, "  恢复: 解压到空目录, 以 --vault 指向它 (vault.db + snapshots/ 完整可用)"]
+    return {
+        "ok": True,
+        "name": out.name,
+        "path": str(out),
+        "size_mb": round(size_mb, 2),
+        "snapshots_count": n_snap,
+        "backups_count": len(backups),
+        "keep": keep_n,
+        "message": msg,
+        "logs": logs,
+    }
+
+
+def prune_snapshots_api(vault: Path, apply: bool = False) -> dict:
+    """中间版本 GC 纯数据接口: 每会话每天保留最后一版 + 每会话最新版本 (叶子), 保留集按时间重链。"""
+    c = _cv()
+    conn = c.db(vault)
+    logs: list[str] = []
+    try:
+        conn.executescript(c.SCHEMA + c.SYNC_TABLE)
+        rows = conn.execute(
+            "SELECT id, agent, session_ref, created_at, path, parent_snapshot, fork_of FROM snapshots"
+        ).fetchall()
+        parents = {r["parent_snapshot"] for r in rows if r["parent_snapshot"]}
+        zalive = None
+        if c.ZCODE_DB.exists():
+            z = sqlite3.connect(f"file:{c.ZCODE_DB}?mode=ro", uri=True)
+            try:
+                zalive = {x[0] for x in z.execute("SELECT id FROM session WHERE time_deleted IS NULL")}
+            finally:
+                z.close()
+        srcmap = {r[0]: r[1] for r in conn.execute("SELECT snapshot_id, path FROM sync_sources")}
+        sess_rows = {}
+        for r in rows:
+            sess_rows.setdefault((r["agent"], r["session_ref"]), []).append(r)
+        sess_alive = {}
+        for key, lst in sess_rows.items():
+            alive = False
+            for r in lst:
+                if key[0] == "zcode":
+                    alive = zalive is not None and r["session_ref"] in zalive
+                else:
+                    sp = srcmap.get(r["id"])
+                    alive = bool(sp) and Path(sp).exists()
+                if alive:
+                    break
+            sess_alive[key] = alive
+        dead_sessions = {k[1] for k, alive in sess_alive.items() if not alive}
+        keep = set()
+        for r in rows:
+            if r["id"] not in parents:
+                keep.add(r["id"])
+            if r["fork_of"] or r["session_ref"] in dead_sessions:
+                keep.add(r["id"])
+        day_last = {}
+        for r in rows:
+            k = (r["agent"], r["session_ref"], (r["created_at"] or "")[:10])
+            if k not in day_last or (r["created_at"] or "") > (day_last[k]["created_at"] or ""):
+                day_last[k] = r
+        for r in day_last.values():
+            keep.add(r["id"])
+        drop = [r for r in rows if r["id"] not in keep]
+        reclaim = sum((os.path.getsize(r["path"]) if r["path"] and os.path.exists(r["path"]) else 0) for r in drop)
+        kept_cnt = len(rows) - len(drop)
+        summary = (
+            f"保留 {kept_cnt} / {len(rows)} 版 (叶子 {sum(1 for r in rows if r['id'] in keep and r['id'] not in parents)} · "
+            f"每日记录 {len(day_last)} · fork/孤本整链 {sum(1 for r in rows if r['fork_of'] or r['session_ref'] in dead_sessions)}) · "
+            f"回收 {len(drop)} 版 / {reclaim/1e6:.0f} MB"
+        )
+        logs.append(summary)
+        removed = 0
+        if not drop:
+            return {
+                "applied": False, "kept": kept_cnt, "total": len(rows),
+                "drop_count": 0, "reclaim_mb": 0.0, "removed": 0,
+                "message": summary, "logs": logs,
+            }
+        if not apply:
+            logs.append("dry-run — 加 --apply 执行 (执行前自动做一次 vault 备份)")
+            return {
+                "applied": False, "kept": kept_cnt, "total": len(rows),
+                "drop_count": len(drop), "reclaim_mb": round(reclaim / 1e6, 1), "removed": 0,
+                "message": "\n".join(logs), "logs": logs,
+            }
+        bres = backup_vault_api(vault, keep=10)
+        logs.extend(bres.get("logs", []))
+        kept = {}
+        for r in rows:
+            if r["id"] in keep:
+                kept.setdefault((r["agent"], r["session_ref"]), []).append(r)
+        for lst in kept.values():
+            lst.sort(key=lambda r: (r["created_at"] or "", r["id"]))
+            prev = None
+            for r in lst:
+                if r["parent_snapshot"] != prev:
+                    conn.execute("UPDATE snapshots SET parent_snapshot=? WHERE id=?", (prev, r["id"]))
+                prev = r["id"]
+        for r in drop:
+            try:
+                os.unlink(r["path"])
+            except OSError:
+                continue
+            conn.execute("DELETE FROM snapshots WHERE id=?", (r["id"],))
+            removed += 1
+        conn.execute(
+            "INSERT INTO probe_events(ts,profile,endpoint,status,http_code,latency_ms,models,missing_models)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            (c.now_iso(), "vault", "gc", "prune", None, None,
+             json.dumps({"dropped": removed, "reclaimed_mb": round(reclaim / 1e6, 1),
+                         "kept": kept_cnt, "backup": "vault/backups 最新一份"}, ensure_ascii=False), None),
+        )
+        conn.commit()
+        done_msg = (
+            f"已回收 {removed} 版 / {reclaim/1e6:.0f} MB"
+            + (f" ({len(drop) - removed} 版因文件被占用跳过, 下次 prune 再试)" if removed != len(drop) else "")
+            + " (GC 事件已写入审计时间线)"
+        )
+        logs.append(done_msg)
+        return {
+            "applied": True, "kept": kept_cnt, "total": len(rows),
+            "drop_count": len(drop), "reclaim_mb": round(reclaim / 1e6, 1), "removed": removed,
+            "message": "\n".join(logs), "logs": logs,
+        }
+    finally:
+        conn.close()
+
+
+def cmd_prune(args):
+    """中间版本 GC CLI 包装。"""
+    vault = _cv().vault_dir(args)
+    res = prune_snapshots_api(vault, apply=bool(getattr(args, "apply", False)))
+    for ln in res["logs"]:
+        print(ln)
+
+
+def cmd_backup(args):
+    """vault 一致性备份 CLI 包装。"""
+    vault = _cv().vault_dir(args)
+    out_dir = Path(args.out).expanduser() if getattr(args, "out", None) else None
+    try:
+        res = backup_vault_api(vault, keep=int(getattr(args, "keep", 10) or 10), out_dir=out_dir)
+    except ValueError as e:
+        raise SystemExit(str(e))
+    for ln in res["logs"]:
+        print(ln)
 

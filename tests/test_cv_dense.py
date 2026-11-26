@@ -1,7 +1,7 @@
 """审核修复验收测试: 精确原写词项 / V1≠V2 区分度 / MCP 只读索引冷路径 /
 cv_dense 接线 (stub 缓存 + 故障回退) / cmd_memory 老库迁移。
 
-运行: python -m pytest tests/test_cv_dense.py -v
+运行: python -m pytest tests/test_cv_semantic.py -v
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 import cv  # noqa: E402
-import cv_dense  # noqa: E402
+import cv_semantic  # noqa: E402
 import mcp_server  # noqa: E402
 from cv_index import ColdRanker, VaultIndex, tokenize  # noqa: E402
 
@@ -146,14 +146,14 @@ def test_dense_hybrid_cache_and_fallback(tmp_path, monkeypatch):
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
-        provider = cv_dense.DenseProvider(url=f"http://127.0.0.1:{port}/v1/embeddings",
+        provider = cv_semantic.DenseProvider(url=f"http://127.0.0.1:{port}/v1/embeddings",
                                           model="stub-embed")
-        cache = cv_dense.EmbeddingCache(tmp_path)
-        r1 = cv_dense.hybrid_search(idx, tmp_path, "幂等键", 5,
+        cache = cv_semantic.EmbeddingCache(tmp_path)
+        r1 = cv_semantic.hybrid_search(idx, tmp_path, "幂等键", 5,
                                     provider=provider, cache=cache)
         assert r1.get("hybrid") is True and r1["hits"]
         calls_after_first = _EmbedStub.calls
-        r2 = cv_dense.hybrid_search(idx, tmp_path, "幂等键", 5,
+        r2 = cv_semantic.hybrid_search(idx, tmp_path, "幂等键", 5,
                                     provider=provider, cache=cache)
         assert r2["hits"][0]["sid"] == r1["hits"][0]["sid"]
         assert _EmbedStub.calls == calls_after_first + 1, \
@@ -165,8 +165,8 @@ def test_dense_hybrid_cache_and_fallback(tmp_path, monkeypatch):
         srv.server_close()
 
     # 故障回退: 端点不可达 → 优雅回退纯结构化结果, 绝不抛异常
-    bad = cv_dense.DenseProvider(url="http://127.0.0.1:1/v1/embeddings")
-    r3 = cv_dense.hybrid_search(idx, tmp_path, "幂等键", 5, provider=bad)
+    bad = cv_semantic.DenseProvider(url="http://127.0.0.1:1/v1/embeddings")
+    r3 = cv_semantic.hybrid_search(idx, tmp_path, "幂等键", 5, provider=bad)
     assert r3.get("hybrid") is False and r3["hits"], "故障必须回退纯 BM25 结果"
 
 
@@ -178,13 +178,13 @@ def test_dense_hybrid_fallback_respects_limit_and_closes_cache(tmp_path):
                [{"type": "text", "role": "user", "content": f"共同锚词 fallbacklimit7 快照 {i}"}])
     idx = VaultIndex(tmp_path)
     try:
-        unconfigured = cv_dense.DenseProvider(url="")
-        r_unconf = cv_dense.hybrid_search(idx, tmp_path, "fallbacklimit7", 2, provider=unconfigured)
+        unconfigured = cv_semantic.DenseProvider(url="")
+        r_unconf = cv_semantic.hybrid_search(idx, tmp_path, "fallbacklimit7", 2, provider=unconfigured)
         assert r_unconf["hybrid"] is False
         assert len(r_unconf["hits"]) == 2, f"未配置回退不得越过 limit=2, 实得 {len(r_unconf['hits'])}"
 
-        bad = cv_dense.DenseProvider(url="http://127.0.0.1:1/v1/embeddings")
-        r_err = cv_dense.hybrid_search(idx, tmp_path, "fallbacklimit7", 2, provider=bad)
+        bad = cv_semantic.DenseProvider(url="http://127.0.0.1:1/v1/embeddings")
+        r_err = cv_semantic.hybrid_search(idx, tmp_path, "fallbacklimit7", 2, provider=bad)
         assert r_err["hybrid"] is False
         assert len(r_err["hits"]) == 2, f"故障回退不得越过 limit=2, 实得 {len(r_err['hits'])}"
         emb_db = tmp_path / "embeddings.db"

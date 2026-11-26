@@ -21,6 +21,51 @@ _CONSOLE_JS_PARTS = (
     "console_skills.js",
     "console_ops.js",
 )
+_MIG_TARGETS = (
+    ("codex", "Codex", "rollout 文件 · codex resume", "Codex", "rollout 文件 · codex resume"),
+    ("claude", "Claude Code", "projects jsonl · --resume", "Claude Code", "projects jsonl · --resume"),
+    ("antigravity", "Antigravity", "原生 .db（重启 app 生效）", "Antigravity", "原生 .db（重启 app 生效）"),
+    ("zcode", "ZCode 写回", "实验性 · 先备份后写主库", "ZCode 写回", "实验性 · 整批前备份 1 次"),
+    ("dsh", "DeepSeek Harness", "V4 会话 · ~/.dsh/sessions", "DeepSeek Harness", "V4 会话 · ~/.dsh/sessions"),
+    (
+        "markdown",
+        "Markdown 交接简报 · 任意 agent",
+        "≤48KB 结构化交接简报（停点 / 最近动作 / 活上下文尾部）",
+        "Markdown 交接简报",
+        "批量输出结构化简报至 outbox",
+    ),
+)
+_MIG_BUDGET_OPTS = (
+    ("4000", "4,000 tokens（推荐 · 五槽位智能压缩）", "4,000 tokens（推荐 · 五槽位压缩）"),
+    ("2000", "2,000 tokens（紧凑速览）", "2,000 tokens（紧凑速览）"),
+    ("8000", "8,000 tokens（详尽交接）", "8,000 tokens（详尽交接）"),
+    ("", "不限预算（完整简报 ≤48KB）", "不限预算（单条 ≤48KB）"),
+)
+
+
+def _render_mig_targets(batch: bool) -> str:
+    name = "mb-tgt" if batch else "tgt"
+    rows = []
+    for val, s_title, s_desc, b_title, b_desc in _MIG_TARGETS:
+        title, desc = (b_title, b_desc) if batch else (s_title, s_desc)
+        on_cls = " on" if val == "codex" else ""
+        chk = " checked" if val == "codex" else ""
+        cb = f"mbSetTarget('{val}')" if batch else "onMigTarget()"
+        rows.append(
+            f'              <label class="tgt-card{on_cls}">'
+            f'<input type="radio" name="{name}" value="{val}"{chk} onchange="{cb}">\n'
+            f'                <span><span class="tt">{title}</span><br><span class="td">{desc}</span></span></label>'
+        )
+    return "\n".join(rows)
+
+
+def _render_mig_budgets(batch: bool) -> str:
+    rows = []
+    for val, s_label, b_label in _MIG_BUDGET_OPTS:
+        sel = " selected" if val == "4000" else ""
+        lbl = b_label if batch else s_label
+        rows.append(f'                <option value="{val}"{sel}>{lbl}</option>')
+    return "\n".join(rows)
 
 
 def ui_dir() -> Path:
@@ -56,7 +101,14 @@ def load_console_html() -> str:
     shell = (d / "console.html").read_text(encoding="utf-8")
     css = (d / "console.css").read_text(encoding="utf-8")
     js = _read_console_js(d)
-    out = shell.replace("/*__CONSOLE_CSS__*/", css).replace("/*__CONSOLE_JS__*/", js)
+    out = (
+        shell.replace("<!--__MIG_SINGLE_TARGETS__-->", _render_mig_targets(False))
+        .replace("<!--__MIG_SINGLE_BUDGETS__-->", _render_mig_budgets(False))
+        .replace("<!--__MIG_BATCH_TARGETS__-->", _render_mig_targets(True))
+        .replace("<!--__MIG_BATCH_BUDGETS__-->", _render_mig_budgets(True))
+        .replace("/*__CONSOLE_CSS__*/", css)
+        .replace("/*__CONSOLE_JS__*/", js)
+    )
     if _is_frozen():
         _FROZEN_CACHE["console"] = out
     return out

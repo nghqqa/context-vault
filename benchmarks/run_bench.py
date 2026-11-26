@@ -155,7 +155,7 @@ def build_search_variant(tmp: Path, name: str):
     fold = name in ("V3", "Ours")
     decay = name == "Ours"
     if name == "Ours+Dense":
-        from cv_dense import DenseProvider, EmbeddingCache, hybrid_search
+        from cv_semantic import DenseProvider, EmbeddingCache, hybrid_search
         from pathlib import Path as _P
 
         def search(query, limit):
@@ -201,7 +201,7 @@ def run_search_panel(tmp: Path, queries: dict, variants: list) -> list:
     dim_qs = {d: queries.get(d, []) for d in SEARCH_DIMS}
     # abstention 校准阈值分位 (每变体自校准 — 用 single_session 正例 top1 分数的 P25)
     names = list(variants)
-    from cv_dense import DenseProvider
+    from cv_semantic import DenseProvider
     if DenseProvider().available:
         names.append("Ours+Dense")  # CV_EMBEDDINGS_URL 配置时自动加跑, 缺省零外发
     idx_ref = None
