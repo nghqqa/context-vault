@@ -721,7 +721,12 @@ def memory_add_manual(
     k = str(kind or "decision").strip().lower()
     if k not in VALID_MEMORY_KINDS:
         raise ValueError(f"不支持的记忆类型: {k} (可选: {', '.join(VALID_MEMORY_KINDS)})")
-    proj = str(project or "manual").strip()[:120] or "manual"
+    proj_raw = str(project or "manual").strip() or "manual"
+    if len(proj_raw) <= 512:
+        proj = proj_raw
+    else:
+        base = proj_raw.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].strip()
+        proj = (base[:120] if base else proj_raw[-512:])
     src_id = (str(source or "manual").strip() or "manual")[:64]
     pin_i = 1 if pinned else 0
     sup_id: int | None = None

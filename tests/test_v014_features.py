@@ -807,3 +807,39 @@ def test_compile_rules_security_truncation_sentinel_and_legacy_db(tmp_path):
         assert comp["included"] == 1 and "保持零依赖" in comp["block_markdown"]
     finally:
         os.chmod(legacy_vault / "vault.db", stat.S_IWRITE | stat.S_IREAD)
+
+
+def test_memory_add_manual_and_compile_rules_long_project_path(tmp_path):
+    """超过 120 字符的深层项目路径 (含 macOS Runner /private/var/... 形态) 不得截断丢失目录基名。"""
+    vault = tmp_path / "vault"
+    long_proj_dir = tmp_path / ("seg_" + "a" * 35) / ("seg_" + "b" * 35) / "deep-proj"
+    long_proj_dir.mkdir(parents=True)
+    assert len(str(long_proj_dir)) > 130
+
+    _write_snapshot(
+        vault,
+        agent="codex",
+        cwd=str(long_proj_dir),
+        created_at="2026-11-26T10:00:00+08:00",
+        blocks=[{"type": "text", "role": "user", "content": "init deep project"}],
+    )
+    _index_vault(vault)
+
+    r_short = cv_memory.memory_add_manual(vault, "规则一：短名称写入", kind="constraint", project="deep-proj", pinned=True)
+    r_long = cv_memory.memory_add_manual(vault, "规则二：深路径完整保留", kind="decision", project=str(long_proj_dir))
+    mega_path = "/" + "/".join(["nested_workspace_segment"] * 24) + "/deep-proj"
+    assert len(mega_path) > 512
+    r_mega = cv_memory.memory_add_manual(vault, "规则三：超长路径保底基名", kind="pitfall", project=mega_path)
+
+    assert r_long["project"] == str(long_proj_dir)
+    assert r_mega["project"] == "deep-proj"
+    assert r_short["project"] == "deep-proj"
+
+    found = cv_memory.memory_search_api(vault, "规则", project="deep-proj")
+    assert len(found) == 3
+
+    compiled = cv_memory.compile_project_rules(vault, "deep-proj", target="agents", budget_tokens=2000, apply=False)
+    assert compiled["included"] == 3
+    assert compiled["out_path"] == str((long_proj_dir / "AGENTS.md").resolve())
+    assert "深路径完整保留" in compiled["block_markdown"]
+    assert "超长路径保底基名" in compiled["block_markdown"]
