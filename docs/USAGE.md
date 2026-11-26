@@ -7,7 +7,7 @@
 ## 0. 3 分钟快速上手（90% 用户只需要这 3 步）
 
 > **路径 A · Windows 绿色托盘版（免装 Python，14.5 MB 单文件双击即用）**
-> 1. 前往 [GitHub Releases (v0.15.0)](https://github.com/nghqqa/context-vault/releases/tag/v0.15.0) 下载 [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.15.0/ContextVault.exe)（可用同页 `SHA256SUMS.txt` 校验：`certutil -hashfile ContextVault.exe SHA256`）。
+> 1. 前往 [GitHub Releases (v0.15.1)](https://github.com/nghqqa/context-vault/releases/tag/v0.15.1) 下载 [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.15.1/ContextVault.exe)（可用同页 `SHA256SUMS.txt` 校验：`certutil -hashfile ContextVault.exe SHA256`）。
 > 2. 双击启动：如首次触发 Windows SmartScreen 未知发布者提示，点击「更多信息 → 仍要运行」即可。托盘图标出现在右下角系统托盘，双击图标打开 Web 控制台 `http://127.0.0.1:8791/`。
 > 3. **免命令行用满全部功能**：首次空库会在概览顶部显示 **3 步引导卡**——点击即可完成全端会话同步、账本同步，并在「设置与运维」页按需勾选将 `ContextVault.exe --mcp` 接入 Claude Code / Codex / Cursor / Antigravity / DeepSeek Harness（全程无需安装 Python）。
 > 4. **数据存放在哪 / 如何卸载**：首次在独立目录运行时自动初始化到 `~/.context-vault/vault`，并在 `~/.context-vault/config.json` 记录正本路径（移动 exe 位置也不丢数据）；右键托盘菜单提供「立即同步」「立即备份」「检查新版本」（Windows 冻结版支持 SHA-256 校验后自动更新重启）「开机自启」。如需彻底卸载：先取消勾选「开机自启」→ 退出托盘 → 删除 exe 及 `~/.context-vault/` 即可。

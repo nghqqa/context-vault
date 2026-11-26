@@ -9,7 +9,7 @@ Context Vault is a **100% free, local-first, zero-dependency** asset vault for A
 ## 1. 3-Minute Quick Start
 
 ### Option A — Windows Ready-to-Run Tray Binary (No Python Required, 14.5 MB)
-1. Download [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.15.0/ContextVault.exe) from [GitHub Releases (v0.15.0)](https://github.com/nghqqa/context-vault/releases/tag/v0.15.0) and optionally verify via `SHA256SUMS.txt`:
+1. Download [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.15.1/ContextVault.exe) from [GitHub Releases (v0.15.1)](https://github.com/nghqqa/context-vault/releases/tag/v0.15.1) and optionally verify via `SHA256SUMS.txt`:
    ```powershell
    certutil -hashfile ContextVault.exe SHA256
    ```

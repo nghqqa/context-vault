@@ -47,7 +47,7 @@
 
 ## 🚀 快速开始
 
-> **Windows 绿色托盘版（免装 Python，14.5 MB 单文件双击即用）**：直接下载 [ContextVault.exe (v0.15.0)](https://github.com/nghqqa/context-vault/releases/download/v0.15.0/ContextVault.exe)（校验见 [Release 页](https://github.com/nghqqa/context-vault/releases/tag/v0.15.0)），内置 Web 控制台（`127.0.0.1:8791`）、**免 Python 原生 MCP 服务（`--mcp`）**、定时同步全端会话、每日自动备份与 SHA-256 自更新。
+> **Windows 绿色托盘版（免装 Python，14.5 MB 单文件双击即用）**：直接下载 [ContextVault.exe (v0.15.1)](https://github.com/nghqqa/context-vault/releases/download/v0.15.1/ContextVault.exe)（校验见 [Release 页](https://github.com/nghqqa/context-vault/releases/tag/v0.15.1)），内置 Web 控制台（`127.0.0.1:8791`）、**免 Python 原生 MCP 服务（`--mcp`）**、定时同步全端会话、每日自动备份与 SHA-256 自更新。
 
 ```bash
 pip install -e .                   # 可选：注册全局命令 cv / cv-mcp / cv-aml (零第三方依赖)
@@ -121,7 +121,7 @@ vault/
 - 195MB Codex rollout → **1.5 秒**导出 → 12MB 快照；39 个压缩边界、2.24 亿 token 用量、838 对工具调用全部保真。
 - **双向迁移真机验证全部通过**：Codex→Claude 在 2.1.181 里 resume 续写；Claude→Codex 在 0.153.4 里恢复 **373,160 tokens 全量上下文**。
 - 逆向并规避 codex 两代格式陷阱（`ordinal` 数字/字符串互不兼容、resume 走 SQLite thread-store、"rollout is empty" 误导性报错）。
-- 测试 **273 项用例**，含有界分化时间衰减（`DEFAULT_DECAY_FLOOR` / `no_decay`）、冷热三路等价与 `project`/`agent`/`since` 作用域过滤（及演进链叶子 `since`）、双向 MCP（`vault_memorize` 推翻链 / `vault_handoff` / 401 与旧版 404 回退保护）、`cv memory compile-rules`（哨兵保护/预算裁剪/`.bak-cv` 备份/HTTP 白名单校验）、账本 CSV/Markdown 导出、备份 ZIP CRC+SQLite 校验与路径穿越防护、审计 SQL 过滤、托盘 SHA-256 自更新、SWR 非阻塞缓存、DeepSeek Harness V4/Zstd/Cordis 全链路、整端全量批量会话迁移（`plan_batch_migration` / `run_batch_migration` / `/migrate/batch` / `cv import --agent`）、MCP 按需自选与卸载残留隔离、Skill 工作台（Diff 预览 / 路径安全移除 / 备份一键回滚 / `connected_only` 与自失效缓存）、HTTP 安全响应头与 IPv6 `[::1]` 守卫、`/stats` 与数据库迁移缓存、POST 413 限流与 gzip 压测——常驻索引与文件扫描回退必须结果一致；并在 **DeepSeek Harness Desktop**（MCP 工具调用、V4 压缩会话渲染、`/tdd` Skill 识别）、**Claude Code 2.1.181** 与 **Codex 0.153.4** 完成真机实测；CI 另有控制台 JS 执行/单元回归（`S1-S8`、`MB1-MB4`、`MR1a-MR1d`、`B07`、`Q7`、`O4-O5`）、真实浏览器多视口显隐与布局探针（380–2560px × 8 面板 32/32 零溢出）、26 模块纯标准库导入校验与安装包冒烟测试。
+- 测试 **274 项用例**，含有界分化时间衰减（`DEFAULT_DECAY_FLOOR` / `no_decay`）、长项目路径匹配（`<=512` 字符完整保留与跨平台基名兜底）、冷热三路等价与 `project`/`agent`/`since` 作用域过滤（及演进链叶子 `since`）、双向 MCP（`vault_memorize` 推翻链 / `vault_handoff` / 401 与旧版 404 回退保护）、`cv memory compile-rules`（哨兵保护/预算裁剪/`.bak-cv` 备份/HTTP 白名单校验）、账本 CSV/Markdown 导出、备份 ZIP CRC+SQLite 校验与路径穿越防护、审计 SQL 过滤、托盘 SHA-256 自更新、SWR 非阻塞缓存、DeepSeek Harness V4/Zstd/Cordis 全链路、整端全量批量会话迁移（`plan_batch_migration` / `run_batch_migration` / `/migrate/batch` / `cv import --agent`）、MCP 按需自选与卸载残留隔离、Skill 工作台（Diff 预览 / 路径安全移除 / 备份一键回滚 / `connected_only` 与自失效缓存）、HTTP 安全响应头与 IPv6 `[::1]` 守卫、`/stats` 与数据库迁移缓存、POST 413 限流与 gzip 压测——常驻索引与文件扫描回退必须结果一致；并在 **DeepSeek Harness Desktop**（MCP 工具调用、V4 压缩会话渲染、`/tdd` Skill 识别）、**Claude Code 2.1.181** 与 **Codex 0.153.4** 完成真机实测；CI 另有控制台 JS 执行/单元回归（`S1-S8`、`MB1-MB4`、`MR1a-MR1d`、`B07`、`Q7`、`O4-O5`）、真实浏览器多视口显隐与布局探针（380–2560px × 8 面板 32/32 零溢出）、26 模块纯标准库导入校验与安装包冒烟测试。
 
 ## 设计原则
 
