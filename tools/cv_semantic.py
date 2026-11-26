@@ -274,10 +274,11 @@ def _snapshot_repr(env: dict) -> str:
 def hybrid_search(idx, vault: Path, query: str, limit: int,
                   provider: DenseProvider | None = None, cache: EmbeddingCache | None = None,
                   project: str | None = None, agent: str | None = None,
-                  since: str | None = None) -> dict:
+                  since: str | None = None, decay: bool = True) -> dict:
     """RRF 混合检索: BM25 候选池 × 稠密语义排序 → 融合。任何环节失败都优雅回退纯 BM25。"""
     lim = max(1, int(limit))
-    base = idx.search(query, max(lim, RRF_CANDIDATES), project=project, agent=agent, since=since)
+    base = idx.search(query, max(lim, RRF_CANDIDATES), project=project, agent=agent,
+                      since=since, decay=decay)
     fallback_hits = base["hits"][:lim]
     provider = provider or DenseProvider(vault=vault)
     if not provider.available or not base["hits"]:

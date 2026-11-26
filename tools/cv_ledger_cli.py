@@ -154,6 +154,11 @@ def cv_ledger_quota_cmd(args):
     cv_ledger.cmd_ledger_quota(args)
 
 
+def cv_ledger_export_cmd(args):
+    import cv_ledger
+    cv_ledger.cmd_ledger_export(args)
+
+
 def cv_ledger_limit_cmd(args):
     import cv_ledger
     cv_ledger.cmd_ledger_limit(args)

@@ -64,10 +64,13 @@ from cv_index import (  # noqa: F401 — re-exported as public engine API
     VaultIndex,
     ColdRanker,
     DEFAULT_WEIGHTS,
+    DEFAULT_DECAY_FLOOR,
     IDENT_BOOST,
     UNIFORM,
     block_text,
     decay_factor,
+    default_decay_floor,
+    query_decay_floor,
     normalize_since,
     project_match_rank,
     match_project_scope,
@@ -84,7 +87,7 @@ from cv_index import (  # noqa: F401 — re-exported as public engine API
 
 FORMAT_VERSION = "0.1"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # noconsole 进程 spawn 控制台程序不弹窗   # context-snapshot 格式版本
-VERSION = "0.14.0"  # 双向 MCP (vault_memorize/vault_handoff) / 作用域过滤 / 项目规则编译器
+VERSION = "0.15.0"  # 有界时间衰减 / 账本 CSV·MD 导出 / 备份校验与审计 / 托盘 SHA-256 自更新
 TOOL_RESULT_LIMIT = 256 * 1024  # spec §8.2 裁决: 单块截断阈值 256KB
 HOME = Path.home()
 HEADROOM_DIR = HOME / ".headroom"
@@ -241,15 +244,18 @@ from cv_ops import (  # noqa: F401,E402
     cmd_watch,
     fetch_models,
     fork_snapshot,
+    list_backups_api,
     load_profiles,
     models_url,
     notify,
     post_chat,
     probe_once,
     prune_snapshots_api,
+    resolve_backup_file,
     resolve_key,
     storm_relink,
     toast,
+    verify_backup_api,
     warm_messages,
 )
 
@@ -263,6 +269,7 @@ from cv_ledger_cli import (  # noqa: F401,E402
     cmd_ledger_stats,
     cv_ledger_limit_cmd,
     cv_ledger_plan_token_cmd,
+    cv_ledger_export_cmd,
     cv_ledger_quota_cmd,
     cv_ledger_sync_cmd,
     fetch_relay_usage,
@@ -940,7 +947,7 @@ def main(argv=None):
     tr.set_defaults(func=cmd_tree)
     au = sub.add_parser("audit", help="审计时间线回放 (探测/切换/模型消失 全留痕)")
     au.add_argument("--since", help="起始时间 (ISO 前缀)")
-    au.add_argument("--kind", default="all", help="过滤: all|ok|switch|warm|model_missing")
+    au.add_argument("--kind", default="all", help="过滤: all|ok|switch|warm|model_missing|error|abnormal")
     au.add_argument("--days", type=int, default=7)
     au.set_defaults(func=cmd_audit)
 
@@ -1050,6 +1057,14 @@ def main(argv=None):
     _lst.add_argument("--legacy-headroom", action="store_true",
                       help="补印旧 headroom 通路层 lifetime/按模型节省 (默认彻底隐藏)")
     _lst.set_defaults(func=cmd_ledger_stats)
+    _lexp = lsub.add_parser("export", help="导出用量账本报表 (CSV / Markdown)")
+    _lexp.add_argument("--format", default="csv", choices=("csv", "markdown", "md"),
+                       help="导出格式 (默认 csv)")
+    _lexp.add_argument("--window", default="30d", choices=("5h", "24h", "7d", "30d", "all"),
+                       help="统计时间窗口 (默认 30d)")
+    _lexp.add_argument("--account", default=None, help="仅导出指定账号 (含 client:codex 等)")
+    _lexp.add_argument("--out", default=None, help="输出文件路径 (默认打印到标准输出)")
+    _lexp.set_defaults(func=cv_ledger_export_cmd)
 
     w = sub.add_parser("warm", help="缓存预热: 切换上游前预发历史前缀 (M2/Pro)")
     w.add_argument("--snapshot", required=True, help="快照 id (活上下文作前缀)")
@@ -1083,6 +1098,9 @@ def main(argv=None):
     b = sub.add_parser("backup", help="vault 一致性备份 (sqlite 在线快照 + snapshots 打包, 轮换保留)")
     b.add_argument("--out", default=None, help="备份目录 (默认 vault/backups; 建议定期指向外部盘)")
     b.add_argument("--keep", type=int, default=10, help="保留份数 (默认 10, 旧的自动清理)")
+    b.add_argument("--list", action="store_true", help="列出现有本地备份")
+    b.add_argument("--verify", nargs="?", const="", default=None,
+                   help="校验备份 CRC 与内嵌 vault.db 一致性 (不填文件名时校验最新一份)")
     b.set_defaults(func=cmd_backup)
 
     sub.add_parser("doctor").set_defaults(func=cmd_doctor)

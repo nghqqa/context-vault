@@ -78,11 +78,81 @@ function renderMcpClients(mcp){
     '<div id="ops-mcp-out"></div>';
   opsSyncMcpBtn();
 }
+let opsAuditKind="all";
+function renderOpsBackupsList(bk){
+  const items=(bk&&Array.isArray(bk.backups))?bk.backups:[];
+  if(!items.length)return '<div class="hint" style="margin-top:8px">暂无历史 zip 备份</div>';
+  return '<details class="ops-mcp-more ops-bk-more"><summary>历史备份清单（'+num(items.length)+' 份 · 校验与下载）</summary>'+
+    '<div class="ops-mcp-more-body">'+
+    items.slice(0,20).map(it=>{
+      const ok=it.valid_zip&&it.has_db;
+      const st=ok?'<span class="pill ok">完整</span>':'<span class="pill err">异常</span>';
+      const qn=encodeURIComponent(it.name);
+      return '<div class="ops-bk-row">'+
+        '<div class="ops-bk-meta">'+st+' <code>'+esc(it.name)+'</code> · '+(it.size_mb||0)+' MB · '+num(it.snapshots_count||0)+' 快照</div>'+
+        '<div class="ops-bk-acts">'+
+          '<button class="btn xs" type="button" data-bk="'+esc(it.name)+'" onclick="opsVerifyBackup(this.dataset.bk)">校验</button>'+
+          '<button class="btn xs" type="button" data-bk="'+esc(it.name)+'" onclick="opsDownloadBackup(this.dataset.bk)" data-dl="'+qn+'">下载</button>'+
+        '</div></div>';
+    }).join("")+
+    '</div></details>';
+}
+function renderOpsAudit(audit){
+  const box=$("#ops-audit-box");if(!box)return;
+  $$("#ops-audit-filters button").forEach(b=>b.classList.toggle("on",(b.dataset.k||"all")===opsAuditKind));
+  if(!audit){box.innerHTML='<div class="hint">审计数据暂不可用</div>';return}
+  const s=audit.summary||{};
+  const tl=Array.isArray(audit.timeline)?audit.timeline:[];
+  const stPill=st=>{
+    const v=String(st||"").toLowerCase();
+    if(v==="ok"||v==="prune")return '<span class="pill ok">'+esc(st)+'</span>';
+    if(v==="switch"||v==="warm")return '<span class="pill warn">'+esc(st)+'</span>';
+    return '<span class="pill err">'+esc(st||"error")+'</span>';
+  };
+  let html='<div class="ops-audit-sum">'+
+    '<span class="pill muted">总事件 '+num(audit.total_events||0)+'</span>'+
+    '<span class="pill ok">正常 '+num(s.ok_probes||0)+'</span>'+
+    '<span class="pill '+((s.abnormal||0)>0?"err":"muted")+'">异常 '+num(s.abnormal||0)+'</span>'+
+    '<span class="pill '+((s.switches||0)>0?"warn":"muted")+'">切换 '+num(s.switches||0)+'</span>'+
+    '<span class="pill '+((s.model_missing_events||0)>0?"warn":"muted")+'">模型缺失 '+num(s.model_missing_events||0)+'</span>'+
+    '</div>';
+  if(!tl.length){
+    box.innerHTML=html+'<div class="hint">当前筛选条件暂无审计记录</div>';
+    return;
+  }
+  html+=tl.slice(0,7).map(day=>{
+    const evs=(day.events||[]).slice(0,12).map(ev=>{
+      const detail=(ev.detail||(ev.missing_models&&ev.missing_models.length?("缺失模型: "+ev.missing_models.join(", ")):""))||"";
+      return '<div class="ops-audit-ev">'+
+        '<span class="ops-audit-ts">'+esc(ev.ts||"")+'</span>'+
+        stPill(ev.status)+
+        (ev.profile?'<code>'+esc(ev.profile)+'</code>':"")+
+        (detail?'<span class="ops-audit-detail">'+esc(detail)+'</span>':"")+
+        '</div>';
+    }).join("");
+    return '<div class="ops-audit-day"><div class="ops-audit-day-h">'+esc(day.day||"")+
+      ' ('+num((day.events||[]).length)+' 条)</div>'+evs+'</div>';
+  }).join("");
+  box.innerHTML=html;
+}
+async function loadOpsAudit(kind){
+  if(kind)opsAuditKind=kind;
+  $$("#ops-audit-filters button").forEach(b=>b.classList.toggle("on",(b.dataset.k||"all")===opsAuditKind));
+  try{
+    const audit=await api("/audit?limit=80&kind="+encodeURIComponent(opsAuditKind));
+    renderOpsAudit(audit);
+  }catch(e){
+    const box=$("#ops-audit-box");
+    if(box)box.innerHTML='<div class="hint">审计时间线加载失败：'+esc((e&&e.message)||e)+'</div>';
+  }
+}
 async function loadOps(probeSem){
   try{
-    const [mcp,st]=await opsSeq(()=>Promise.all([
+    const [mcp,st,bk,audit]=await opsSeq(()=>Promise.all([
       api("/ops/mcp"),
       api("/ops/status"+(probeSem?"?probe=1":"")),
+      api("/ops/backups").catch(()=>null),
+      api("/audit?limit=80&kind="+encodeURIComponent(opsAuditKind)).catch(()=>null),
     ]));
     renderMcpClients(mcp);
     const sb=$("#ops-sem-box");
@@ -134,8 +204,9 @@ async function loadOps(probeSem){
           '<button class="btn sm primary" id="ops-bk-btn" onclick="opsBackupNow()">立即备份 (zip)</button>'+
           '<button class="btn sm" onclick="opsPrune(false)">预览可裁剪版本</button>'+
           '<button class="btn sm danger" onclick="opsPrune(true)">执行裁剪 (自动先备份)</button>'+
-        '</div><div id="ops-maint-out"></div>';
+        '</div>'+renderOpsBackupsList(bk)+'<div id="ops-maint-out"></div>';
     }
+    renderOpsAudit(audit);
   }catch(e){
     if(e&&e.stale)return;
     const mb=$("#ops-mcp-box");
@@ -220,6 +291,47 @@ async function opsLedgerSync(jumpOv){
     if(jumpOv)setTab("ov");
   }catch(e){toast("账本同步失败："+e.message,1)}
   if(btn)btn.disabled=false;
+}
+async function opsVerifyBackup(name){
+  const out=$("#ops-maint-out");
+  if(out)out.innerHTML='<div class="ops-out">正在校验 '+esc(name)+'…</div>';
+  try{
+    const r=await api("/ops/backup/verify?name="+encodeURIComponent(name));
+    const msg=(r.ok?"校验通过: ":"校验失败: ")+esc(r.name)+
+      " | CRC="+(r.crc_ok?"OK":"BAD")+
+      " | vault.db="+esc(r.db_check||"unknown")+
+      " | 快照="+num(r.zip_snapshots||0)+
+      (r.sha256?"\nSHA-256: "+esc(r.sha256):"")+
+      (r.error?"\n错误: "+esc(r.error):"");
+    if(out)out.innerHTML='<div class="ops-out">'+msg+'</div>';
+    toast(r.ok?("备份完整: "+r.name):("备份异常: "+(r.error||r.name)),!r.ok);
+  }catch(e){
+    if(out)out.innerHTML='<div class="ops-out">'+esc((e&&e.message)||e)+'</div>';
+    toast("校验失败："+((e&&e.message)||e),1);
+  }
+}
+async function opsDownloadBackup(name){
+  const url="/ops/backup/download?name="+encodeURIComponent(name);
+  try{
+    if(typeof URL!=="undefined"&&typeof URL.createObjectURL==="function"&&typeof Blob!=="undefined"&&typeof document!=="undefined"&&typeof document.createElement==="function"){
+      const r=await fetch(url);
+      if(!r.ok){
+        const j=await r.json().catch(()=>({}));
+        throw new ApiError((j&&j.error)||("HTTP "+r.status),r.status);
+      }
+      const blob=await r.blob();
+      const a=document.createElement("a");
+      const objUrl=URL.createObjectURL(blob);
+      a.href=objUrl;a.download=name;
+      if(document.body&&document.body.appendChild)document.body.appendChild(a);
+      a.click();
+      if(a.remove)a.remove();
+      setTimeout(()=>{try{URL.revokeObjectURL(objUrl)}catch(e){}},1000);
+      toast("开始下载备份："+name);
+      return;
+    }
+    toast("下载就绪："+url);
+  }catch(e){toast("下载失败："+((e&&e.message)||e),1)}
 }
 async function opsBackupNow(){
   const btn=$("#ops-bk-btn");if(btn){btn.disabled=true;btn.textContent="备份中…"}

@@ -341,10 +341,53 @@ def _get_healthz(h, ctx: _ServerCtx, q: dict):
 
 def _get_audit(h, ctx: _ServerCtx, q: dict):
     since = q.get("since", "")
+    kind = (q.get("kind") or "all").strip().lower() or "all"
+    try:
+        limit = max(1, min(int(q.get("limit") or 200), 500))
+    except (ValueError, TypeError):
+        limit = 200
     sum_only = (q.get("summary_only") == "1")
-    akey = ("audit", _db_stamp(ctx.vault / "vault.db"), since, sum_only)
+    akey = ("audit", _db_stamp(ctx.vault / "vault.db"), since, kind, limit, sum_only)
     h._json(ctx.cache.get_or_compute(
-        akey, lambda: _cv().audit_summary_and_timeline(ctx.vault, since, "all", summary_only=sum_only)))
+        akey,
+        lambda: _cv().audit_summary_and_timeline(
+            ctx.vault, since, kind, limit=limit, summary_only=sum_only),
+    ))
+
+
+def _get_ops_backups(h, ctx: _ServerCtx, q: dict):
+    h._json(_cv().list_backups_api(ctx.vault))
+
+
+def _get_ops_backup_verify(h, ctx: _ServerCtx, q: dict):
+    name = (q.get("name") or "").strip() or None
+    try:
+        res = _cv().verify_backup_api(ctx.vault, name)
+    except ValueError as e:
+        h._json({"error": str(e)}, 400)
+        return
+    except FileNotFoundError as e:
+        h._json({"error": str(e)}, 404)
+        return
+    h._json(res)
+
+
+def _get_ops_backup_download(h, ctx: _ServerCtx, q: dict):
+    name = (q.get("name") or "").strip() or None
+    try:
+        p = _cv().resolve_backup_file(ctx.vault, name)
+    except ValueError as e:
+        h._json({"error": str(e)}, 400)
+        return
+    except FileNotFoundError as e:
+        h._json({"error": str(e)}, 404)
+        return
+    safe_name = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in p.name)
+    h._send(
+        p.read_bytes(),
+        "application/zip",
+        extra_headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+    )
 
 
 def _get_memory(h, ctx: _ServerCtx, q: dict):
@@ -559,6 +602,26 @@ def _get_ledger_usage(h, ctx: _ServerCtx, q: dict):
     h._json(payload)
 
 
+def _get_ledger_export(h, ctx: _ServerCtx, q: dict):
+    fmt = q.get("format") or q.get("fmt") or "csv"
+    win = q.get("window") or "30d"
+    acct = q.get("account") or None
+    try:
+        res = ctx.cv_ledger.export_ledger_report(ctx.vault, fmt=fmt, window=win, account=acct)
+    except ValueError as e:
+        h._json({"error": str(e)}, 400)
+        return
+    if q.get("json") == "1":
+        h._json(res)
+        return
+    fname = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(res["filename"]))
+    h._send(
+        res["content"].encode("utf-8"),
+        res["content_type"],
+        extra_headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 def _get_preview(h, ctx: _ServerCtx, q: dict):
     qid = q.get("id", "")
     if not _sid_ok(qid):
@@ -593,6 +656,10 @@ def _get_search(h, ctx: _ServerCtx, q: dict):
     proj = q.get("project") or None
     ag = q.get("agent") or None
     since = q.get("since") or None
+    no_decay = (
+        str(q.get("no_decay") or "").strip().lower() in ("1", "true", "yes")
+        or str(q.get("decay") or "").strip().lower() in ("0", "false", "no")
+    )
     hyb = q.get("hybrid")
     use_dense = (hyb == "1")
     if hyb is None:
@@ -607,13 +674,14 @@ def _get_search(h, ctx: _ServerCtx, q: dict):
             return h._json(hybrid_search(
                 ctx.idx, ctx.vault, q.get("q", ""), lim,
                 provider=DenseProvider(vault=ctx.vault),
-                project=proj, agent=ag, since=since))
+                project=proj, agent=ag, since=since, decay=(not no_decay)))
         except ValueError as e:
             return h._json({"error": str(e)}, 400)
         except Exception:
             pass
     try:
-        h._json(ctx.idx.search(q.get("q", ""), lim, project=proj, agent=ag, since=since))
+        h._json(ctx.idx.search(q.get("q", ""), lim, project=proj, agent=ag,
+                               since=since, decay=(not no_decay)))
     except ValueError as e:
         h._json({"error": str(e)}, 400)
 
@@ -627,8 +695,13 @@ def _get_context(h, ctx: _ServerCtx, q: dict):
     proj = q.get("project") or None
     ag = q.get("agent") or None
     since = q.get("since") or None
+    no_decay = (
+        str(q.get("no_decay") or "").strip().lower() in ("1", "true", "yes")
+        or str(q.get("decay") or "").strip().lower() in ("0", "false", "no")
+    )
     try:
-        h._json(ctx.idx.context(q.get("q", ""), lim, project=proj, agent=ag, since=since))
+        h._json(ctx.idx.context(q.get("q", ""), lim, project=proj, agent=ag,
+                                since=since, decay=(not no_decay)))
     except ValueError as e:
         h._json({"error": str(e)}, 400)
 
@@ -807,9 +880,13 @@ GET_ROUTES = {
     "/skills/backups": _get_skills_backups,
     "/ops/mcp": _get_ops_mcp,
     "/ops/status": _get_ops_status,
+    "/ops/backups": _get_ops_backups,
+    "/ops/backup/verify": _get_ops_backup_verify,
+    "/ops/backup/download": _get_ops_backup_download,
     "/probe_events": _get_probe_events,
     "/ledger": _get_ledger,
     "/ledger/usage": _get_ledger_usage,
+    "/ledger/export": _get_ledger_export,
     "/preview": _get_preview,
     "/search": _get_search,
     "/context": _get_context,
@@ -1348,8 +1425,9 @@ def _make_handler(ctx: _ServerCtx):
             except OSError:
                 pass
 
-        def _send(self, body: bytes, ctype: str, code: int = 200):
+        def _send(self, body: bytes, ctype: str, code: int = 200, extra_headers: dict | None = None):
             use_gzip = (len(body) >= GZIP_MIN_BYTES
+                        and ctype != "application/zip"
                         and "gzip" in (self.headers.get("Accept-Encoding") or "").lower())
             out_body = gzip.compress(body, compresslevel=5) if use_gzip else body
             self.send_response(code)
@@ -1361,6 +1439,9 @@ def _make_handler(ctx: _ServerCtx):
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "DENY")
             self.send_header("Referrer-Policy", "no-referrer")
+            if extra_headers:
+                for hk, hv in extra_headers.items():
+                    self.send_header(str(hk), str(hv).replace("\r", "").replace("\n", ""))
             if getattr(self, "close_connection", False):
                 self.send_header("Connection", "close")
             if use_gzip:

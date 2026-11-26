@@ -32,7 +32,7 @@ import urllib.request
 from pathlib import Path
 
 SERVER_NAME = "context-vault"
-SERVER_VERSION = "0.14.0"
+SERVER_VERSION = "0.15.0"
 PROTO = "2025-06-18"
 SEARCH_CONTEXT_CHARS = 400  # vault_context 每个命中块返回的摘录长度
 MAX_TEXT_LEN = 2000
@@ -182,7 +182,7 @@ def _trim_by_budget(header: str, items: list[str], footer: str,
 
 def t_search(args_vault, query: str, limit: int, budget_tokens: int | None = None,
              project: str | None = None, agent: str | None = None,
-             since: str | None = None) -> str:
+             since: str | None = None, no_decay: bool = False) -> str:
     """冷回退搜索 — 三级路径: 常驻服务热索引 > 只读 search_index.db 直查 (毫秒级)
     > 全量文件扫描 ColdRanker。三级共用同一评分/折叠/衰减数学, 命中集一致
     (铁律: 常驻只是加速, 不是依赖)。"""
@@ -194,13 +194,16 @@ def t_search(args_vault, query: str, limit: int, budget_tokens: int | None = Non
     idx = _readonly_index(args_vault)
     if idx is not None:
         try:
-            r = idx.search(query, limit, project=project, agent=agent, since=since)
+            r = idx.search(query, limit, project=project, agent=agent,
+                           since=since, decay=(not no_decay))
         finally:
             idx._close()  # 立即释放 Windows SQLite 只读句柄
         via = " (via 本地索引)"
     else:
         snaps = load_all_snapshots(args_vault)
-        r = _cv.ColdRanker(snaps, query).search(limit, project=project, agent=agent, since=since)
+        r = _cv.ColdRanker(snaps, query, decay=(not no_decay)).search(
+            limit, project=project, agent=agent, since=since, decay=(not no_decay),
+        )
         via = ""
     if not r["hits"]:
         return f"未命中: {query}"
@@ -216,7 +219,7 @@ def t_search(args_vault, query: str, limit: int, budget_tokens: int | None = Non
 
 def t_context(args_vault, query: str, limit: int, budget_tokens: int | None = None,
               project: str | None = None, agent: str | None = None,
-              since: str | None = None) -> str:
+              since: str | None = None, no_decay: bool = False) -> str:
     """记忆检索: 跨快照找最相关的上下文摘录, 供当前会话引用。
     三级路径同 t_search (同分词/评分/折叠), 保证启停常驻服务不改变命中集合。"""
     import cv as _cv
@@ -227,13 +230,16 @@ def t_context(args_vault, query: str, limit: int, budget_tokens: int | None = No
     idx = _readonly_index(args_vault)
     if idx is not None:
         try:
-            r = idx.context(query, limit, project=project, agent=agent, since=since)
+            r = idx.context(query, limit, project=project, agent=agent,
+                            since=since, decay=(not no_decay))
         finally:
             idx._close()  # 立即释放 Windows SQLite 只读句柄
         via = " (via 本地索引)"
     else:
         snaps = load_all_snapshots(args_vault)
-        r = _cv.ColdRanker(snaps, query).context(limit, project=project, agent=agent, since=since)
+        r = _cv.ColdRanker(snaps, query, decay=(not no_decay)).context(
+            limit, project=project, agent=agent, since=since, decay=(not no_decay),
+        )
         via = ""
     if not r["results"]:
         return f"vault 中无相关上下文: {query}"
@@ -541,6 +547,7 @@ def _via_service(name: str, args_dict: dict):
                 "project": args_dict.get("project"),
                 "agent": args_dict.get("agent"),
                 "since": args_dict.get("since"),
+                "no_decay": "1" if args_dict.get("no_decay") else None,
             })
             r = _svc_get(f"/search?{qs}")
             if not r.get("terms"):
@@ -568,6 +575,7 @@ def _via_service(name: str, args_dict: dict):
                 "project": args_dict.get("project"),
                 "agent": args_dict.get("agent"),
                 "since": args_dict.get("since"),
+                "no_decay": "1" if args_dict.get("no_decay") else None,
             })
             r = _svc_get(f"/context?{qs}")
             if not r.get("terms"):
@@ -652,6 +660,7 @@ TOOLS = [
          "project": {"type": "string", "description": "可选项目名或路径过滤 (如 context-vault)"},
          "agent": {"type": "string", "description": "可选来源客户端过滤 (如 codex/claude/zcode/antigravity/dsh, 逗号可多选)"},
          "since": {"type": "string", "description": "可选起始时间下界 (如 2026-11-01 / 7d / 24h)"},
+         "no_decay": {"type": "boolean", "default": False, "description": "true = 关闭时间衰减，按纯相关性检索远期历史"},
          "budget_tokens": {"type": "integer", "description": "可选 token 预算上限; 超出部分从尾部裁剪"}},
          "required": ["query"]}},
     {"name": "vault_context", "description": "从历史会话中检索与当前任务相关的上下文摘录 (记忆检索, 建议在新任务/新会话开始时调用; 支持 project/agent/since 过滤)",
@@ -661,6 +670,7 @@ TOOLS = [
          "project": {"type": "string", "description": "可选项目名或路径过滤"},
          "agent": {"type": "string", "description": "可选来源客户端过滤 (支持 claude 等标准别名)"},
          "since": {"type": "string", "description": "可选起始时间下界 (如 2026-11-01 / 7d / 24h)"},
+         "no_decay": {"type": "boolean", "default": False, "description": "true = 关闭时间衰减，按纯相关性检索远期历史"},
          "budget_tokens": {"type": "integer", "description": "可选 token 预算上限 (如 2000/4000); 超出部分从尾部裁剪"}},
          "required": ["query"]}},
     {"name": "vault_recent", "description": "列出 vault 中最近的会话快照",
@@ -825,13 +835,15 @@ def dispatch(name: str, args_dict: dict, vault: Path) -> str:
                         args_dict.get("budget_tokens"),
                         project=args_dict.get("project") or None,
                         agent=args_dict.get("agent") or None,
-                        since=args_dict.get("since") or None)
+                        since=args_dict.get("since") or None,
+                        no_decay=bool(args_dict.get("no_decay", False)))
     if name == "vault_context":
         return t_context(vault, args_dict.get("query", ""), int(args_dict.get("limit", 3)),
                          args_dict.get("budget_tokens"),
                          project=args_dict.get("project") or None,
                          agent=args_dict.get("agent") or None,
-                         since=args_dict.get("since") or None)
+                         since=args_dict.get("since") or None,
+                         no_decay=bool(args_dict.get("no_decay", False)))
     if name == "vault_recent":
         return t_recent(vault, int(args_dict.get("limit", 5)))
     if name == "vault_snapshot":

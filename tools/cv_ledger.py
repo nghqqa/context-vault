@@ -41,8 +41,10 @@ from __future__ import annotations
 
 import datetime as dt
 import bisect
+import csv
 import fnmatch
 import hashlib
+import io
 import json
 import os
 import re
@@ -1413,6 +1415,249 @@ def usage_stats_summary(vault: Path) -> dict:
         "estimated_share": p["precision"]["estimated_share"],
         "accounts_configured": p["accounts_configured"],
     }
+
+
+def _report_rows_from_all(vault: Path, account: str | None = None) -> dict:
+    """当 window=='all' 时直接汇总全量 usage_events, 口径与 usage_payload 对齐。"""
+    if not (vault / "vault.db").exists():
+        return {
+            "window": "all",
+            "account": account,
+            "events_total": 0,
+            "totals": _round_totals(_zero_totals()),
+            "by_model": [],
+            "by_project": [],
+            "by_account": [],
+            "by_day": [],
+            "cache_hit_rate": None,
+            "cache_save_est_usd": 0.0,
+            "precision": {"exact_events": 0, "estimated_events": 0, "estimated_share": 0.0},
+        }
+    conn = cv.db(vault)
+    try:
+        ensure_schema(conn)
+        cond, cargs = _account_filter_sql(account)
+        rows = conn.execute(
+            "SELECT source, account, client, model, project, occurred_at,"
+            " tokens_in, tokens_out, reasoning_tokens, cache_read, cache_write,"
+            " cost_est_usd, is_estimated"
+            f" FROM usage_events WHERE 1=1{cond} ORDER BY occurred_at ASC",
+            cargs,
+        ).fetchall()
+    finally:
+        conn.close()
+
+    tot = _zero_totals()
+    est_events = 0
+    by_day_map = {}
+    for r in rows:
+        _add_total(tot, r)
+        if r["is_estimated"]:
+            est_events += 1
+        ts = r["occurred_at"]
+        if ts is not None:
+            day = local_day(ts)
+            if day not in by_day_map:
+                by_day_map[day] = _zero_totals()
+                by_day_map[day]["estimated_events"] = 0
+            _add_total(by_day_map[day], r)
+            if r["is_estimated"]:
+                by_day_map[day]["estimated_events"] += 1
+
+    def _proj_name(r):
+        p = r["project"]
+        if not p:
+            return "(未知)"
+        base = Path(str(p)).name
+        return base or str(p)
+
+    def _model_name(r):
+        if r["model"]:
+            return r["model"]
+        return "antigravity · 估算" if r["source"] == "antigravity" else "(未知)"
+
+    total_inp = tot["total_input"]
+    hit_rate = round(tot["cache_read"] / total_inp, 4) if total_inp else None
+    n_tot = len(rows)
+    return {
+        "window": "all",
+        "account": account,
+        "events_total": n_tot,
+        "totals": _round_totals(tot),
+        "by_model": _agg_rows(rows, _model_name),
+        "by_project": _agg_rows(rows, _proj_name),
+        "by_account": _agg_rows(rows, _account_of),
+        "by_day": [
+            {"day": d, **_round_totals(v)}
+            for d, v in sorted(by_day_map.items())
+        ],
+        "cache_hit_rate": hit_rate,
+        "cache_save_est_usd": 0.0,
+        "precision": {
+            "exact_events": n_tot - est_events,
+            "estimated_events": est_events,
+            "estimated_share": round(est_events / n_tot, 4) if n_tot else 0.0,
+        },
+    }
+
+
+def _md_cell(val) -> str:
+    return str(val if val is not None else "").replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+
+def export_ledger_report(
+    vault: Path,
+    fmt: str = "csv",
+    window: str = "30d",
+    account: str | None = None,
+    now: float | None = None,
+) -> dict:
+    """导出用量账本报表 (CSV / Markdown), 复用现有窗口聚合同口径。"""
+    fmt_raw = str(fmt or "csv").strip().lower()
+    if fmt_raw == "md":
+        fmt_norm = "markdown"
+    elif fmt_raw in ("csv", "markdown"):
+        fmt_norm = fmt_raw
+    else:
+        raise ValueError(f"不支持的导出格式: {fmt} (可选: csv, markdown)")
+
+    win_norm = str(window or "30d").strip().lower()
+    if win_norm not in WINDOW_CHOICES and win_norm != "all":
+        raise ValueError(f"不支持的时间窗口: {window} (可选: 5h, 24h, 7d, 30d, all)")
+
+    acct = str(account).strip() if account else None
+    if win_norm == "all":
+        payload = _report_rows_from_all(vault, account=acct)
+    else:
+        payload = usage_payload(vault, window=win_norm, account=acct, now=now)
+
+    totals = dict(payload.get("totals") or _round_totals(_zero_totals()))
+    by_day = list(payload.get("by_day") or [])
+    by_model = list(payload.get("by_model") or [])
+    by_project = list(payload.get("by_project") or [])
+    by_account = list(payload.get("by_account") or [])
+    generated_at = cv.now_iso()
+
+    if fmt_norm == "csv":
+        buf = io.StringIO(newline="")
+        w = csv.writer(buf, lineterminator="\n")
+        cols = [
+            "section", "name", "events", "tokens_in", "tokens_out",
+            "reasoning_tokens", "cache_read", "cache_write",
+            "total_input", "total_output", "cost_est_usd", "estimated_events",
+        ]
+        w.writerow(cols)
+
+        def _write_row(sec: str, name: str, d: dict, est_override=None):
+            est_val = d.get("estimated_events", 0) if est_override is None else est_override
+            w.writerow([
+                sec,
+                name,
+                int(d.get("events", 0) or 0),
+                int(d.get("tokens_in", 0) or 0),
+                int(d.get("tokens_out", 0) or 0),
+                int(d.get("reasoning_tokens", 0) or 0),
+                int(d.get("cache_read", 0) or 0),
+                int(d.get("cache_write", 0) or 0),
+                int(d.get("total_input", 0) or 0),
+                int(d.get("total_output", 0) or 0),
+                round(float(d.get("cost_est_usd", 0.0) or 0.0), 4),
+                int(est_val or 0),
+            ])
+
+        pre = payload.get("precision") or {}
+        _write_row("summary", "total", totals, est_override=pre.get("estimated_events", 0))
+        for item in by_day:
+            _write_row("by_day", str(item.get("day") or ""), item)
+        for item in by_model:
+            _write_row("by_model", str(item.get("name") or ""), item)
+        for item in by_project:
+            _write_row("by_project", str(item.get("name") or ""), item)
+        for item in by_account:
+            _write_row("by_account", str(item.get("name") or ""), item)
+        content = buf.getvalue()
+        ext = "csv"
+        ctype = "text/csv; charset=utf-8"
+    else:
+        pre = payload.get("precision") or {}
+        hit = payload.get("cache_hit_rate")
+        hit_s = f"{hit * 100:.1f}%" if hit is not None else "n/a"
+        title_acct = f" · 账号 `{acct}`" if acct else ""
+        lines = [
+            f"# Context Vault 用量账本报表 ({win_norm}{title_acct})",
+            "",
+            f"- 生成时间: `{generated_at}`",
+            f"- 账本事件数: {int(totals.get('events', 0) or 0):,} "
+            f"(估算事件 {int(pre.get('estimated_events', 0) or 0):,})",
+            f"- 总输入 tokens: {int(totals.get('total_input', 0) or 0):,} "
+            f"(cache read {int(totals.get('cache_read', 0) or 0):,}, "
+            f"write {int(totals.get('cache_write', 0) or 0):,})",
+            f"- 净输出 tokens: {int(totals.get('total_output', 0) or 0):,} · Cache Hit Rate: {hit_s}",
+            f"- 估算费用: {fmt_usd(totals.get('cost_est_usd'))} "
+            f"(Cache 节省估算: {fmt_usd(payload.get('cache_save_est_usd'))})",
+            "",
+        ]
+
+        def _append_table(heading: str, rows_data: list[dict], key_field: str = "name", empty_msg: str = "无数据"):
+            lines.append(f"## {heading}")
+            lines.append("")
+            if not rows_data:
+                lines.append(f"_{empty_msg}_")
+                lines.append("")
+                return
+            lines.append("| 名称 | 事件数 | 总输入 tokens | 净输出 tokens | 估算费用 |")
+            lines.append("| :--- | ---: | ---: | ---: | ---: |")
+            for it in rows_data:
+                nm = _md_cell(it.get(key_field) or "(未知)")
+                ev = int(it.get("events", 0) or 0)
+                ti = int(it.get("total_input", 0) or 0)
+                to = int(it.get("total_output", 0) or 0)
+                cu = fmt_usd(it.get("cost_est_usd"))
+                lines.append(f"| {nm} | {ev:,} | {ti:,} | {to:,} | {cu} |")
+            lines.append("")
+
+        _append_table("按日趋势 (by_day)", by_day, key_field="day")
+        _append_table("按模型分布 (by_model)", by_model)
+        _append_table("按项目分布 (by_project)", by_project)
+        _append_table("按账号分布 (by_account)", by_account)
+        content = "\n".join(lines).rstrip() + "\n"
+        ext = "md"
+        ctype = "text/markdown; charset=utf-8"
+
+    return {
+        "ok": True,
+        "format": fmt_norm,
+        "window": win_norm,
+        "account": acct,
+        "generated_at": generated_at,
+        "filename": f"context-vault-ledger-{win_norm}.{ext}",
+        "content_type": ctype,
+        "events": int(totals.get("events", 0) or 0),
+        "totals": totals,
+        "content": content,
+    }
+
+
+def cmd_ledger_export(args):
+    """CLI 导出用量账本为 CSV 或 Markdown。"""
+    vault = cv.vault_dir(args)
+    try:
+        res = export_ledger_report(
+            vault,
+            fmt=getattr(args, "format", "csv"),
+            window=getattr(args, "window", "30d"),
+            account=getattr(args, "account", None),
+        )
+    except ValueError as e:
+        raise SystemExit(str(e))
+    out = getattr(args, "out", None)
+    if out:
+        out_p = Path(out).expanduser()
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        cv.atomic_write_text(out_p, res["content"])
+        print(f"已导出账本报表: {out_p} ({res['format']}, window={res['window']}, {res['events']} 条事件)")
+    else:
+        print(res["content"], end="" if res["content"].endswith("\n") else "\n")
 
 
 if __name__ == "__main__":

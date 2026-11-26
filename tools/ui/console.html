@@ -131,6 +131,8 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
       <button class="btn" id="snap-sort" onclick="snapSort()">时间 ↓</button>
       <button class="btn" id="snap-leaves" onclick="snapLeavesToggle()" aria-pressed="true"
         title="每个会话只列演进链的最新版本; 再点显示全部历史版本">仅最新版本</button>
+      <button class="btn" id="snap-nodecay" onclick="snapNoDecayToggle()" aria-pressed="false"
+        title="按相关度排序，不因年代久远降低旧记忆/老代码权重">不衰减</button>
     </div>
     <div class="snap-subbar">
       <div class="agent-pills" id="snap-agent-bar" role="group" aria-label="按来源筛选">
@@ -429,6 +431,18 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
           <button class="btn sm" onclick="loadOps(false)">刷新</button>
         </div>
         <div class="card-b" id="ops-maint-box"><div class="skel" style="width:70%"></div></div>
+      </div>
+      <div class="card ops-audit-card">
+        <div class="card-h">
+          <span class="ch-l">审计与运维时间线</span>
+          <div class="ops-audit-filters" id="ops-audit-filters" role="group" aria-label="审计事件筛选">
+            <button class="btn xs on" type="button" data-k="all" onclick="loadOpsAudit('all')">全部</button>
+            <button class="btn xs" type="button" data-k="error" onclick="loadOpsAudit('error')">异常/失败</button>
+            <button class="btn xs" type="button" data-k="switch" onclick="loadOpsAudit('switch')">模型切换</button>
+            <button class="btn xs" type="button" data-k="ok" onclick="loadOpsAudit('ok')">正常探测</button>
+          </div>
+        </div>
+        <div class="card-b" id="ops-audit-box"><div class="skel" style="width:70%"></div></div>
       </div>
     </div>
   </section>

@@ -6,14 +6,19 @@ import hashlib
 import html
 import json
 import os
+import re
+import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
+import zipfile
 from pathlib import Path
 
 from cv_ui import load_dashboard_html as _load_dashboard_html
@@ -552,9 +557,17 @@ def audit_summary_and_timeline(vault: Path, since: str, kind: str, limit: int = 
             if since:
                 q += " AND ts >= ?"
                 params.append(since)
+            k = str(kind or "all").strip().lower()
+            if k in ("error", "abnormal"):
+                q += (" AND (COALESCE(status,'') NOT IN ('ok','switch','prune')"
+                      " OR (missing_models IS NOT NULL AND missing_models != '[]'))")
+            elif k == "model_missing":
+                q += (" AND (status = 'model_missing'"
+                      " OR (missing_models IS NOT NULL AND missing_models != '[]'))")
+            elif k and k != "all":
+                q += " AND LOWER(COALESCE(status,'')) = ?"
+                params.append(k)
             rows = conn.execute(q + " ORDER BY id DESC LIMIT ?", (*params, limit)).fetchall()
-            if kind != "all":
-                rows = [r for r in rows if kind in (r["status"],)]
     except sqlite3.OperationalError:
         conn.close()
         return {
@@ -788,10 +801,392 @@ def cmd_prune(args):
         print(ln)
 
 
+def _backup_dir(vault: Path, out_dir: Path | None = None) -> Path:
+    return Path(out_dir).expanduser() if out_dir is not None else (vault / "backups")
+
+
+def resolve_backup_file(vault: Path, name: str | None = None, out_dir: Path | None = None) -> Path:
+    """安全解析备份 zip 路径 (拒绝路径穿越; name 为空时取最新一份)。"""
+    dest_dir = _backup_dir(vault, out_dir)
+    if not name or not str(name).strip():
+        files = sorted(dest_dir.glob("cv-backup-*.zip")) if dest_dir.is_dir() else []
+        if not files:
+            raise FileNotFoundError(f"未找到任何备份文件: {dest_dir}")
+        return files[-1]
+    raw_name = str(name).strip()
+    if (
+        "\x00" in raw_name
+        or "/" in raw_name
+        or "\\" in raw_name
+        or ".." in raw_name
+        or raw_name.startswith(".")
+        or Path(raw_name).name != raw_name
+        or not raw_name.endswith(".zip")
+    ):
+        raise ValueError(f"非法备份文件名: {name}")
+    base = dest_dir.resolve()
+    target = (dest_dir / raw_name).resolve()
+    if target.parent != base:
+        raise ValueError(f"非法备份文件名: {name}")
+    if not target.is_file():
+        raise FileNotFoundError(f"备份文件不存在: {raw_name}")
+    return target
+
+
+def list_backups_api(vault: Path, out_dir: Path | None = None) -> dict:
+    """列出全部本地备份压缩包 (按时间倒序, 附快照数与 zip 合法性预览)。"""
+    dest_dir = _backup_dir(vault, out_dir)
+    files = sorted(dest_dir.glob("cv-backup-*.zip"), reverse=True) if dest_dir.is_dir() else []
+    items = []
+    for p in files:
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        valid_zip = False
+        has_db = False
+        snaps_cnt = 0
+        try:
+            with zipfile.ZipFile(p, "r") as z:
+                names = z.namelist()
+                valid_zip = True
+                has_db = "vault.db" in names
+                snaps_cnt = sum(1 for n in names if n.startswith("snapshots/") and n.endswith(".json"))
+        except (zipfile.BadZipFile, OSError):
+            valid_zip = False
+        items.append({
+            "name": p.name,
+            "size_bytes": int(st.st_size),
+            "size_mb": round(st.st_size / 1048576, 2),
+            "mtime": dt.datetime.fromtimestamp(st.st_mtime).astimezone().isoformat(timespec="seconds"),
+            "has_db": has_db,
+            "snapshots_count": snaps_cnt,
+            "valid_zip": valid_zip,
+        })
+    return {
+        "backup_dir": str(dest_dir),
+        "count": len(items),
+        "backups": items,
+    }
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(1024 * 256)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def verify_backup_api(vault: Path, name: str | None = None, out_dir: Path | None = None) -> dict:
+    """校验备份 zip 的 CRC-32 与内置 vault.db SQLite quick_check 一致性。"""
+    target = resolve_backup_file(vault, name, out_dir=out_dir)
+    st = target.stat()
+    zip_sha = _sha256_file(target)
+    crc_ok = False
+    bad_member = None
+    has_db = False
+    db_ok = False
+    db_check = "not_checked"
+    db_snaps = None
+    zip_snaps = 0
+    files_cnt = 0
+    err_msg = None
+
+    try:
+        with zipfile.ZipFile(target, "r") as z:
+            names = z.namelist()
+            files_cnt = len(names)
+            has_db = "vault.db" in names
+            zip_snaps = sum(1 for n in names if n.startswith("snapshots/") and n.endswith(".json"))
+            bad_member = z.testzip()
+            crc_ok = bad_member is None
+            if not crc_ok:
+                err_msg = f"ZIP CRC 损坏: {bad_member}"
+            elif not has_db:
+                err_msg = "备份缺少 vault.db"
+            else:
+                with tempfile.TemporaryDirectory(prefix="cv-verify-") as td:
+                    tmp_db = Path(td) / "vault.db"
+                    with z.open("vault.db", "r") as src, tmp_db.open("wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    conn = None
+                    try:
+                        conn = sqlite3.connect(str(tmp_db))
+                        row = conn.execute("PRAGMA quick_check(1)").fetchone()
+                        db_check = str(row[0]) if row else "unknown"
+                        db_ok = (db_check.lower() == "ok")
+                        if db_ok:
+                            try:
+                                cnt_r = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()
+                                db_snaps = int(cnt_r[0]) if cnt_r else 0
+                            except sqlite3.DatabaseError:
+                                db_snaps = None
+                        else:
+                            err_msg = f"SQLite quick_check 异常: {db_check}"
+                    except sqlite3.DatabaseError as e:
+                        db_check = f"error: {e}"
+                        db_ok = False
+                        err_msg = f"SQLite 读取失败: {e}"
+                    finally:
+                        if conn is not None:
+                            conn.close()
+    except (zipfile.BadZipFile, OSError) as e:
+        err_msg = f"ZIP 无法读取: {e}"
+
+    return {
+        "ok": bool(crc_ok and has_db and db_ok),
+        "name": target.name,
+        "path": str(target),
+        "size_bytes": int(st.st_size),
+        "size_mb": round(st.st_size / 1048576, 2),
+        "sha256": zip_sha,
+        "crc_ok": crc_ok,
+        "bad_member": bad_member,
+        "has_db": has_db,
+        "db_ok": db_ok,
+        "db_check": db_check,
+        "db_snapshots": db_snaps,
+        "zip_snapshots": zip_snaps,
+        "files_count": files_cnt,
+        "error": err_msg,
+    }
+
+
+def _validate_update_url(url: str) -> str:
+    parsed = urllib.parse.urlparse(str(url or "").strip())
+    if parsed.scheme not in ("https", "http"):
+        raise ValueError(f"不支持的下载协议: {parsed.scheme or '(空)'}")
+    if parsed.scheme == "http" and parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
+        raise ValueError("非本机回环更新源必须使用 HTTPS")
+    return url
+
+
+def parse_sha256sums(text: str) -> dict[str, str]:
+    """解析 SHA256SUMS.txt / BSD SHA256 输出为 {basename: hex_digest}。"""
+    out = {}
+    for raw_ln in str(text or "").splitlines():
+        ln = raw_ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        m_std = re.match(r"^([0-9a-fA-F]{64})\s+[* ]?(.+?)\s*$", ln)
+        if m_std:
+            digest = m_std.group(1).lower()
+            fname = Path(m_std.group(2).strip()).name
+            if fname:
+                out[fname] = digest
+            continue
+        m_bsd = re.match(r"^SHA256\s*\((.+?)\)\s*=\s*([0-9a-fA-F]{64})\s*$", ln, re.I)
+        if m_bsd:
+            fname = Path(m_bsd.group(1).strip()).name
+            digest = m_bsd.group(2).lower()
+            if fname:
+                out[fname] = digest
+    return out
+
+
+def select_release_assets(
+    release_data: dict,
+    exe_name: str = "ContextVault.exe",
+    checksum_names: tuple[str, ...] = ("SHA256SUMS.txt", "SHA256SUMS"),
+) -> dict:
+    """从 GitHub Release API 响应中提取版本、安装包和 SHA256SUMS 资产。"""
+    assets = release_data.get("assets") if isinstance(release_data, dict) else None
+    if not isinstance(assets, list):
+        assets = []
+    exe_asset = None
+    exe_fallback = None
+    chk_asset = None
+    want_exe = str(exe_name or "ContextVault.exe").lower()
+    want_chks = {n.lower() for n in checksum_names}
+
+    for a in assets:
+        if not isinstance(a, dict):
+            continue
+        name = str(a.get("name") or "").strip()
+        low = name.lower()
+        if low == want_exe and exe_asset is None:
+            exe_asset = a
+        elif low.endswith(".exe") and want_exe == "contextvault.exe" and exe_fallback is None:
+            exe_fallback = a
+        if (low in want_chks or low.endswith("sha256sums.txt")) and chk_asset is None:
+            chk_asset = a
+
+    chosen_exe = exe_asset or exe_fallback
+    exe_digest = None
+    if isinstance(chosen_exe, dict):
+        raw_d = str(chosen_exe.get("digest") or "").strip()
+        if raw_d.lower().startswith("sha256:"):
+            cand = raw_d.split(":", 1)[1].strip().lower()
+            if re.fullmatch(r"[0-9a-f]{64}", cand):
+                exe_digest = cand
+
+    return {
+        "version": str((release_data or {}).get("tag_name") or "").lstrip("vV"),
+        "html_url": str((release_data or {}).get("html_url") or ""),
+        "exe_name": str(chosen_exe.get("name") or exe_name) if chosen_exe else exe_name,
+        "exe_url": str(chosen_exe.get("browser_download_url") or "") if chosen_exe else "",
+        "exe_digest": exe_digest,
+        "checksum_name": str(chk_asset.get("name") or "") if chk_asset else "",
+        "checksum_url": str(chk_asset.get("browser_download_url") or "") if chk_asset else "",
+    }
+
+
+def download_and_verify_exe(
+    exe_url: str,
+    dest_dir: Path,
+    expected_sha256: str | None = None,
+    checksum_url: str | None = None,
+    filename: str = "ContextVault.exe.new",
+    match_name: str = "ContextVault.exe",
+    timeout: float = 30.0,
+) -> dict:
+    """流式下载更新包并强制校验 SHA-256，校验通过才落盘目标文件名。"""
+    dest = Path(dest_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    _validate_update_url(exe_url)
+    expected = str(expected_sha256 or "").strip().lower()
+    if expected and not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ValueError("expected_sha256 格式无效 (需 64 位十六进制)")
+
+    if not expected:
+        if not checksum_url:
+            raise ValueError("缺少 SHA-256 校验值或 checksum_url，已拒绝无校验更新")
+        _validate_update_url(checksum_url)
+        req_c = urllib.request.Request(
+            checksum_url,
+            headers={"User-Agent": user_agent()},
+        )
+        with urllib.request.urlopen(req_c, timeout=timeout) as r:
+            chk_text = r.read().decode("utf-8", errors="replace")
+        sums = parse_sha256sums(chk_text)
+        m_low = str(match_name or "ContextVault.exe").lower()
+        for k, v in sums.items():
+            if k.lower() == m_low:
+                expected = v
+                break
+        if not expected:
+            raise ValueError(f"校验文件中未找到 {match_name} 的 SHA-256 条目")
+
+    safe_fn = Path(str(filename or "ContextVault.exe.new")).name
+    part_path = dest / f".{safe_fn}.{os.getpid()}.part"
+    target_path = dest / safe_fn
+    h = hashlib.sha256()
+    size_bytes = 0
+    try:
+        req_e = urllib.request.Request(
+            exe_url,
+            headers={"User-Agent": user_agent()},
+        )
+        with urllib.request.urlopen(req_e, timeout=timeout) as r, part_path.open("wb") as fh:
+            while True:
+                chunk = r.read(1024 * 128)
+                if not chunk:
+                    break
+                fh.write(chunk)
+                h.update(chunk)
+                size_bytes += len(chunk)
+        actual = h.hexdigest().lower()
+        if actual != expected:
+            try:
+                part_path.unlink()
+            except OSError:
+                pass
+            raise ValueError(
+                f"SHA-256 校验失败: 期望 {expected[:16]}..., 实际 {actual[:16]}..."
+            )
+        os.replace(part_path, target_path)
+    except Exception:
+        if part_path.exists():
+            try:
+                part_path.unlink()
+            except OSError:
+                pass
+        raise
+
+    return {
+        "ok": True,
+        "path": str(target_path),
+        "sha256": actual,
+        "size_bytes": size_bytes,
+    }
+
+
+def _safe_cmd_path(p: Path) -> str:
+    s = str(p)
+    if any(ch in s for ch in ('"', "\r", "\n", "%", "&", "|", "<", ">", "^", "\x00")):
+        raise ValueError(f"路径包含不安全字符，无法写入更新脚本: {s}")
+    return s
+
+
+def write_windows_update_script(
+    current_exe: Path,
+    new_exe: Path,
+    pid: int,
+    script_path: Path | None = None,
+    relaunch: bool = True,
+) -> Path:
+    """生成 Windows 自替换批处理脚本 (等待进程退出后覆盖 exe 并可选重拉)。"""
+    cur_s = _safe_cmd_path(Path(current_exe))
+    new_s = _safe_cmd_path(Path(new_exe))
+    pid_i = int(pid)
+    if pid_i < 0:
+        raise ValueError(f"非法 PID: {pid}")
+    out_p = Path(script_path) if script_path is not None else (Path(new_exe).parent / f"cv-apply-update-{pid_i}.cmd")
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+    relaunch_line = f'if exist "%TARGET%" start "" "%TARGET%"\n' if relaunch else ""
+    body = (
+        "@echo off\n"
+        "setlocal\n"
+        f'set "TARGET={cur_s}"\n'
+        f'set "STAGED={new_s}"\n'
+        f'set "PID={pid_i}"\n'
+        "for /L %%i in (1,1,30) do (\n"
+        '  tasklist /FI "PID eq %PID%" 2>nul | find "%PID%" >nul\n'
+        "  if errorlevel 1 goto apply\n"
+        "  ping -n 2 127.0.0.1 >nul\n"
+        ")\n"
+        ":apply\n"
+        "for /L %%r in (1,1,10) do (\n"
+        '  move /Y "%STAGED%" "%TARGET%" >nul 2>nul\n'
+        "  if not errorlevel 1 goto done\n"
+        "  ping -n 2 127.0.0.1 >nul\n"
+        ")\n"
+        ":done\n"
+        f"{relaunch_line}"
+        '(goto) 2>nul & del "%~f0"\n'
+    )
+    _cv().atomic_write_text(out_p, body)
+    return out_p
+
+
 def cmd_backup(args):
-    """vault 一致性备份 CLI 包装。"""
+    """vault 一致性备份 CLI 包装 (含列表/校验与创建)。"""
     vault = _cv().vault_dir(args)
     out_dir = Path(args.out).expanduser() if getattr(args, "out", None) else None
+    if getattr(args, "list", False):
+        res = list_backups_api(vault, out_dir=out_dir)
+        print(f"备份目录: {res['backup_dir']} (共 {res['count']} 份)")
+        for it in res["backups"]:
+            mark = "OK" if it["valid_zip"] and it["has_db"] else "损坏"
+            print(f"  [{mark}] {it['name']}  {it['size_mb']:.2f} MB  "
+                  f"{it['snapshots_count']} 快照  {it['mtime']}")
+        return
+    verify_arg = getattr(args, "verify", None)
+    if verify_arg is not None:
+        try:
+            res = verify_backup_api(vault, verify_arg or None, out_dir=out_dir)
+        except (ValueError, FileNotFoundError) as e:
+            raise SystemExit(str(e))
+        mark = "OK" if res["ok"] else "FAILED"
+        print(f"校验 [{mark}]: {res['name']} ({res['size_mb']:.2f} MB · sha256={res['sha256'][:12]}...)")
+        print(f"  ZIP CRC={res['crc_ok']} · vault.db={res['db_check']} · 快照={res['zip_snapshots']}")
+        if not res["ok"]:
+            raise SystemExit(res.get("error") or "备份校验失败")
+        return
     try:
         res = backup_vault_api(vault, keep=int(getattr(args, "keep", 10) or 10), out_dir=out_dir)
     except ValueError as e:

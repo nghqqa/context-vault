@@ -56,6 +56,7 @@ from cv_rank import (  # noqa: F401
     UNIFORM,
     IDENT_BOOST,
     DEFAULT_HALF_LIFE_DAYS,
+    DEFAULT_DECAY_FLOOR,
     _weight_key,
     block_weight,
     BM25_K1,
@@ -73,6 +74,8 @@ from cv_rank import (  # noqa: F401
     bm25_idf,
     bm25_tf_norm,
     default_half_life,
+    default_decay_floor,
+    query_decay_floor,
     decay_factor,
     normalize_since,
     project_match_rank,
@@ -907,11 +910,12 @@ class VaultIndex:
                 if not scored:
                     return empty
             triples = sort_hits([(sc, s, 0) for s, sc in scored.items()], meta)
+        d_floor = query_decay_floor(terms)
         hits = []
         for sc, sid, folded in triples:
             row = dict(meta.get(sid) or {})
             if decay:
-                sc = round(sc * decay_factor(row.get("created_at") or "", now, self.half_life),
+                sc = round(sc * decay_factor(row.get("created_at") or "", now, self.half_life, floor=d_floor),
                            SCORE_DP)
             hits.append({"sid": sid, "score": sc, "folded": folded, **row})
         order = sort_hits([(h["score"], h["sid"], h.get("folded", 0)) for h in hits], meta)
@@ -971,10 +975,13 @@ class VaultIndex:
             except (IndexError, KeyError, TypeError):
                 return "text"
 
+        d_floor = query_decay_floor(terms)
         results = context_results(ranked, limit, lambda d: doc_sid[d],
                                   lambda o: sids[o], doc_bidx.__getitem__,
                                   root_of, meta_row,
-                                  lambda d: self._text_of(d, st), terms, now, self.half_life)
+                                  lambda d: self._text_of(d, st), terms, now,
+                                  self.half_life if decay else 0.0,
+                                  decay=decay, decay_floor=d_floor)
         for r in results:
             r["role"] = block_role(r["sid"], r["block"])
             if fold and not r["versions"]:

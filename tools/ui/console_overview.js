@@ -179,6 +179,34 @@ async function setUsageWindow(w){
   try{const u=await usageSeq(()=>api("/ledger/usage?window="+encodeURIComponent(usageWindow)+"&fast=1"));
     if(u){renderQuota(u,usageLedger);if(u.quota_pending)scheduleQuotaRefresh(ovGen,usageWindow)}}catch(e){}
 }
+async function exportLedgerReport(fmt){
+  const kind=(fmt==="markdown"||fmt==="md")?"markdown":"csv";
+  const win=usageWindow||"30d";
+  const url="/ledger/export?format="+encodeURIComponent(kind)+"&window="+encodeURIComponent(win);
+  try{
+    if(typeof URL!=="undefined"&&typeof URL.createObjectURL==="function"&&typeof Blob!=="undefined"&&typeof document!=="undefined"&&typeof document.createElement==="function"){
+      const r=await fetch(url);
+      if(!r.ok){
+        const j=await r.json().catch(()=>({}));
+        throw new ApiError((j&&j.error)||("HTTP "+r.status),r.status);
+      }
+      const blob=await r.blob();
+      const ext=kind==="markdown"?"md":"csv";
+      const fname="context-vault-ledger-"+win+"."+ext;
+      const a=document.createElement("a");
+      const objUrl=URL.createObjectURL(blob);
+      a.href=objUrl;a.download=fname;
+      if(document.body&&document.body.appendChild)document.body.appendChild(a);
+      a.click();
+      if(a.remove)a.remove();
+      setTimeout(()=>{try{URL.revokeObjectURL(objUrl)}catch(e){}},1000);
+      toast("已导出账本报表："+fname);
+      return;
+    }
+    const res=await api(url+"&json=1");
+    toast("已生成报表："+((res&&res.filename)||kind));
+  }catch(e){toast("导出报表失败："+((e&&e.message)||e),1)}
+}
 function renderQuota(u,ledger){
   const el=$("#ov-quota");if(!el)return;
   usageLedger=ledger||usageLedger;
@@ -203,6 +231,8 @@ function renderQuota(u,ledger){
     '<div class="q-head-r"><span>精确 '+(pre.exact_events||0)+" / 估算 "+(pre.estimated_events||0)+
     " ("+((pre.estimated_share||0)*100).toFixed(0)+"%)</span>"+
     (u.accounts_configured?'<span class="mini-tag">accounts.json 已配</span>':'<span class="mini-tag" title="运行 cv ledger limit --list 配置额度上限">未配上限</span>')+
+    '<button class="btn xs" type="button" onclick="exportLedgerReport(\'csv\')" title="导出当前统计窗口为 CSV">导出 CSV</button>'+
+    '<button class="btn xs" type="button" onclick="exportLedgerReport(\'markdown\')" title="导出当前统计窗口为 Markdown">导出 MD</button>'+
     "</div></div>";
   // 4 列紧凑 KPI 条 (一行排开, 避免和下方配额卡视觉混淆)
   h+='<div class="q-kpi-strip">'+

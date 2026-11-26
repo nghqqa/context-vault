@@ -9,7 +9,7 @@ Context Vault is a **100% free, local-first, zero-dependency** asset vault for A
 ## 1. 3-Minute Quick Start
 
 ### Option A — Windows Ready-to-Run Tray Binary (No Python Required, 14.5 MB)
-1. Download [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.14.0/ContextVault.exe) from [GitHub Releases (v0.14.0)](https://github.com/nghqqa/context-vault/releases/tag/v0.14.0) and optionally verify via `SHA256SUMS.txt`:
+1. Download [`ContextVault.exe`](https://github.com/nghqqa/context-vault/releases/download/v0.15.0/ContextVault.exe) from [GitHub Releases (v0.15.0)](https://github.com/nghqqa/context-vault/releases/tag/v0.15.0) and optionally verify via `SHA256SUMS.txt`:
    ```powershell
    certutil -hashfile ContextVault.exe SHA256
    ```
@@ -36,7 +36,7 @@ cv serve --open                      # start resident hot-index server & open We
 - **`1` – `4`**: Switch between **Overview**, **Snapshots**, **Migrate**, and **Settings & Ops**.
 - **`Ctrl+K` / `Cmd+K`**: Open the global command palette (instant live search across both cross-session memories and snapshots).
 - **`/`**: Focus global search; **`Esc`**: close drawer or palette.
-- **Settings & Ops (`4`)**: Selective MCP detection, per-client installation & safe removal (distinguishes real client binaries from uninstall residual dirs, collapses undetected entries, creates `.bak-cv` backups), local Ollama embeddings/LLM setup & distillation, quota token config & ledger sync, and consistent zip backup / snapshot pruning.
+- **Settings & Ops (`4`)**: Selective MCP detection, per-client installation & safe removal (distinguishes real client binaries from uninstall residual dirs, collapses undetected entries, creates `.bak-cv` backups), local Ollama embeddings/LLM setup & distillation, quota token config & ledger sync, consistent zip backup list / CRC+SQLite verification / download, snapshot pruning, and the full-width **Audit Timeline** filterable by `all` / `error` / `switch` / `ok`. (In **Overview**, export CSV/Markdown quota reports; in **Snapshots**, toggle **不衰减 (`no_decay`)**.)
 
 ![Context Vault Settings & Ops](assets/console-ops-dark.png)
 
@@ -84,12 +84,13 @@ cv mcp status                            # inspect detected binaries vs uninstal
 cv mcp install --all                     # register MCP in detected apps (or --clients claude,dsh)
 cv mcp uninstall --client cursor         # remove context-vault safely (supports --clients a,b; writes .bak-cv backup)
 ```
-MCP tools exposed (`cv-mcp` / `ContextVault.exe --mcp`, 8 tools): `vault_remember`, `vault_memorize` (write back with `pinned`/`supersedes`), `vault_handoff` (budgeted 5-slot brief + active memories), `vault_context`, `vault_search`, `vault_recent`, `vault_snapshot`, `vault_stats` (supporting `project`/`agent`/`since` scoped filtering & `budget_tokens` trimming).
+MCP tools exposed (`cv-mcp` / `ContextVault.exe --mcp`, 8 tools): `vault_remember`, `vault_memorize` (write back with `pinned`/`supersedes`), `vault_handoff` (budgeted 5-slot brief + active memories), `vault_context`, `vault_search` (supporting `project`/`agent`/`since` scoped filtering, `no_decay`, & `budget_tokens` trimming), `vault_recent`, `vault_snapshot`, `vault_stats`.
 
-### Local Multi-Client Token Ledger & Quota ETA
+### Local Multi-Client Token Ledger, Quota ETA & Export
 ```bash
 cv ledger sync                       # read-only harvest from Claude / Codex / ZCode / Antigravity / DeepSeek Harness
 cv ledger quota --window 5h          # rolling 5h window, cooldown ETA, per-model/project/client rankings
+cv ledger export --format csv --window 30d --out ledger.csv  # export CSV / Markdown across 5h|24h|7d|30d|all
 cv ledger limit --list               # optional custom quota caps in vault/accounts.json
 ```
 
@@ -109,9 +110,12 @@ cv semantic refine --limit 10        # distill cross-session memories with local
 cv semantic titles --limit 30        # generate concise session titles
 ```
 
-### Backup, Pruning & Diagnostics
+### Backup, Verification, Pruning & Diagnostics
 ```bash
 cv backup --keep 10                  # consistent online SQLite backup + snapshots zip rotation
+cv backup --list                     # list local backups & ZIP integrity
+cv backup --verify                   # verify ZIP CRC-32 & embedded vault.db PRAGMA quick_check
+cv audit --kind error --days 7       # filter probe/switch/model_missing audit timeline
 cv prune                             # dry-run: keep daily last + leaves + forks + orphaned chains
 cv prune --apply                     # auto-backup first, then prune intermediate versions
 cv doctor                            # inspect Python, local agent dirs, DSH Zstd backend, MCP summary & DB health
@@ -133,5 +137,6 @@ cv doctor                            # inspect Python, local agent dirs, DSH Zst
 | `CV_EMBEDDINGS_URL` / `CV_EMBEDDINGS_MODEL` | Optional OpenAI-compatible embeddings endpoint for hybrid reranking |
 | `CV_LLM_URL` / `CV_LLM_MODEL` | Optional OpenAI-compatible LLM endpoint for memory refinement & titles |
 | `CV_PLAN_TOKEN` | Optional Coding Plan token for live remote quota bars |
+| `CV_DECAY_FLOOR` | Optional floor for search decay (`0.65` default; identifiers auto-lift to `0.80`) |
 | `CV_RELAY_PROFILES` / `CV_RELAY_KEY` | Optional upstream relay endpoints for `cv probe` sentinel |
 | `DSH_HOME` | Override DeepSeek Harness home dir (defaults to `~/.dsh`) |

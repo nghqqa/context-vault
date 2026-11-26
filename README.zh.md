@@ -32,22 +32,22 @@
 
 - **快照资产库**——把 Codex / Claude Code / ZCode / Antigravity / DeepSeek Harness (`dsh`) / 18 种桥接 harness 的会话导出为供应商中立的 [context-snapshot](docs/snapshot-format.md) 格式：内容寻址、不可变、幂等、自动 lineage（会话树与 fork），并支持按天保留裁剪（`cv prune`）。
 - **交接简报档**——`--target markdown --budget-tokens 4000` 在显式 token 预算下按五槽位效用装配（停靠态/关键裁决/已证伪死路/触碰文件拓扑/活上下文尾部），自动折叠重复读文件与重复报错，附压缩统计。
-- **vault 备份**——`cv backup`：一致性快照 + 轮换 zip；常驻控制台可选 `CV_SERVE_TOKEN` 鉴权。
+- **vault 备份与校验**——`cv backup`（新增 `--list`、`--verify` 校验 ZIP CRC 与 SQLite `PRAGMA quick_check`）：一致性快照 + 轮换 zip，支持审计筛选（`cv audit --kind`）与托盘 SHA-256 自动更新；常驻控制台可选 `CV_SERVE_TOKEN` 鉴权。
 - **诚实迁移与双向同步**——Codex ⇄ Claude Code 双向（双端真机验证）、Antigravity 原生 `.db`/Proto 双向迁回与项目树批量清理/补齐、DeepSeek Harness 原生 V4 拼接式 `.jsonl.zstd` 迁入与 `workspace.json` 工作区自动登记、实验性 ZCode 写回（自动备份），以及**整端全量 / 批量会话迁移**（控制台「迁移工作台 → 会话迁移 → 整端批量迁移」与 `cv import --agent <src> --target <tgt> [--no-skip-migrated]`，支持按源 Harness/项目/关键词筛选、同源与 `migrations.jsonl` 已迁会话自动去重、单条失败隔离与 ZCode 整批仅备份 1 次主库），默认 dry-run，每次迁移产出"什么保住了/什么丢了"的完整报告。
 - **跨工具 Skill 技能工作台**——`cv skills`（`list|inspect|migrate|remove|backups|rollback`）与控制台「迁移工作台 → Skill 技能迁移」支持在 ZCode / Claude Code / Codex / Antigravity / Cursor / DeepSeek Harness 间批量扫描、对比差异并迁移 `SKILL.md` 技能包（Web 控制台与已接入 MCP 后端强一致，自动隐藏 0 Skill 与未接入工具、切源自动切换同源目标），迁入前可逐行预览 unified diff 与附属文件变化，移除/覆盖前自动保留完整备份并支持一键回滚，迁往 Antigravity 支持「直写全局目录」与「打包为可一键开关的独立插件」双模式切换。
-- **深度检索内核**——代码感知分词（camel/snake/路径/错误码复合+子词双索引）、块角色加权 BM25（全局 IDF + 长度归一）、Lineage 折叠（演进链命中折叠到最新版）、时间衰减与可选稠密向量 RRF；SQLite 紧凑倒排取代巨型 pickle。
-- **公开可复现 Benchmark**——`python benchmarks/run_bench.py` 30 秒复现 162 题五维度消融（v0→v2 全演进链），见 [docs/BENCHMARK.md](docs/BENCHMARK.md)。
-- **token 账本**——从你自己会话文件内嵌的 usage 记录聚合出按模型成本、缓存命中率，不需要任何代理。`cv ledger sync` 直接只读采集 Claude Code / Codex / ZCode / Antigravity / DeepSeek Harness（内置 DeepSeek V4/Flash 费率）本地日志（幂等去重）形成 `usage_events` 事件流，`cv ledger quota` 输出 5 小时滚动窗口、恢复 ETA、7d/月跑道（可选 `vault/accounts.json` 账号额度池）与按模型/项目/账号排行——纯本地离线，无需 headroom。
+- **深度检索内核**——代码感知分词（camel/snake/路径/错误码复合+子词双索引）、块角色加权 BM25（全局 IDF + 长度归一）、Lineage 折叠（演进链命中折叠到最新版）、有界分化时间衰减（自然语言 `0.65` / 标识符 `0.80` + `no_decay` 开关，`Ours Recall@1` 达 `0.9298`）与可选稠密向量 RRF；SQLite 紧凑倒排取代巨型 pickle。
+- **公开可复现 Benchmark**——`python benchmarks/run_bench.py` 30 秒复现 162 题五维度消融（v0→v2+ 全演进链），见 [docs/BENCHMARK.md](docs/BENCHMARK.md)。
+- **token 账本与报表导出**——从你自己会话文件内嵌的 usage 记录聚合出按模型成本、缓存命中率，不需要任何代理。`cv ledger sync` 直接只读采集 Claude Code / Codex / ZCode / Antigravity / DeepSeek Harness（内置 DeepSeek V4/Flash 费率）本地日志形成 `usage_events` 事件流，`cv ledger quota` 输出 5 小时滚动窗口、恢复 ETA 与多维排行，`cv ledger export --format csv|markdown`（含 Web 控制台一键导出）可输出多窗口统计报表——纯本地离线，无需 headroom。
 - **跨会话双时态记忆与规则编译器**——从历史自动提取决策/偏好/摘要/踩坑/架构红线，每条带精确出处（快照#块 + 会话真实时间）与主题签名；方案被推翻时旧记忆自动标记 `superseded` 并默认不再返回，`include_history` 可追溯完整演变链。`cv memory compile-rules`（及 Web 控制台「记忆库 → 编译项目规则」）可将项目有效记忆按 token 预算编译为受哨兵保护的 `AGENTS.md` / `CLAUDE.md` / `.cursorrules`，保留手写段落。
-- **双向 MCP 记忆后端**——8 个工具（`vault_remember`、`vault_memorize`、`vault_handoff`、`vault_context`、`vault_search`、`vault_recent`、`vault_snapshot`、`vault_stats`）让任意 MCP 客户端（Claude Code / Codex / Cursor / Antigravity / DeepSeek Harness `cordis.patch.yml`）既能按 `project`/`agent`/`since` 过滤检索历史，也能在工作中直接写入决策/红线与拉取交接简报，并支持 `budget_tokens` 预算裁剪；精确识别卸载残留目录，支持 `--clients` 多选接入与 `.bak-cv` 安全移除（`cv mcp uninstall`）。
+- **双向 MCP 记忆后端**——8 个工具（`vault_remember`、`vault_memorize`、`vault_handoff`、`vault_context`、`vault_search`、`vault_recent`、`vault_snapshot`、`vault_stats`）让任意 MCP 客户端（Claude Code / Codex / Cursor / Antigravity / DeepSeek Harness `cordis.patch.yml`）既能按 `project`/`agent`/`since` 过滤检索历史（支持 `no_decay` 关衰减），也能在工作中直接写入决策/红线与拉取交接简报，并支持 `budget_tokens` 预算裁剪；精确识别卸载残留目录，支持 `--clients` 多选接入与 `.bak-cv` 安全移除（`cv mcp uninstall`）。
 - **AML 标准 Add/Search 适配**——内置 `cv-aml` / [tools/aml_adapter.py](tools/aml_adapter.py)（及挂载于 `cv serve` 的 `/aml/add`、`/aml/search`），支持多租户隔离、`request_id` 幂等重放与 `409 Conflict` 冲突检测，附带零依赖 [Dockerfile.aml](Dockerfile.aml)。
 - **可选敏感信息脱敏**——`cv export --redact` 或 `CV_REDACT_SECRETS=1` 在入库前自动对常见 API Key / GitHub Token / AWS Key / JWT / PEM 私钥打码。
 - **可选本地语义增强（Ollama / LLM）**——`cv semantic`（及控制台「设置与运维」页）支持接入本地 Ollama 做向量混合重排、LLM 记忆精炼与自动会话标题；默认关闭零外发。
-- **开箱即用 Web 控制台**——支持 `Ctrl/Cmd+K` 全局联想、空库 3 步新手向导、记忆手动置顶与项目规则一键编译、Markdown 预算简报一键复制、MCP 按需运维/备份/裁剪与 SWR 异步秒开。
+- **开箱即用 Web 控制台**——支持 `Ctrl/Cmd+K` 全局联想、空库 3 步新手向导、快照「不衰减」开关、概览账本「导出 CSV/MD」、记忆手动置顶与项目规则一键编译、Markdown 预算简报一键复制、运维备份校验下载与审计时间线筛查，以及 SWR 异步秒开。
 
 ## 🚀 快速开始
 
-> **Windows 绿色托盘版（免装 Python，14.5 MB 单文件双击即用）**：直接下载 [ContextVault.exe (v0.14.0)](https://github.com/nghqqa/context-vault/releases/download/v0.14.0/ContextVault.exe)（校验见 [Release 页](https://github.com/nghqqa/context-vault/releases/tag/v0.14.0)），内置 Web 控制台（`127.0.0.1:8791`）、**免 Python 原生 MCP 服务（`--mcp`）**、定时同步全端会话与每日自动备份。
+> **Windows 绿色托盘版（免装 Python，14.5 MB 单文件双击即用）**：直接下载 [ContextVault.exe (v0.15.0)](https://github.com/nghqqa/context-vault/releases/download/v0.15.0/ContextVault.exe)（校验见 [Release 页](https://github.com/nghqqa/context-vault/releases/tag/v0.15.0)），内置 Web 控制台（`127.0.0.1:8791`）、**免 Python 原生 MCP 服务（`--mcp`）**、定时同步全端会话、每日自动备份与 SHA-256 自更新。
 
 ```bash
 pip install -e .                   # 可选：注册全局命令 cv / cv-mcp / cv-aml (零第三方依赖)
@@ -96,8 +96,8 @@ python tools/cv.py import --agent claude --target codex     # 整端全量批量
 | `vault_remember(query[, kind, project, since, include_history])` | 长期记忆检索：返回带 `#id` 与快照/时间出处的有效记忆（支持历史演变链） |
 | `vault_memorize(content[, kind, project, pinned, supersedes])` | Agent 直接写入决策/红线/踩坑/偏好（支持置顶与 `supersedes` 推翻旧记忆，永不改快照） |
 | `vault_handoff([id, project, budget_tokens, include_memories])` | 生成带预算的五槽位跨工具交接简报（自动附带项目有效记忆） |
-| `vault_context(query[, project, agent, since, budget_tokens])` | 与当前任务相关的历史摘录 |
-| `vault_search(query[, project, agent, since, budget_tokens])` | 全库文本搜索（热索引与冷扫严格等价） |
+| `vault_context(query[, project, agent, since, no_decay, budget_tokens])` | 与当前任务相关的历史摘录 |
+| `vault_search(query[, project, agent, since, no_decay, budget_tokens])` | 全库文本搜索（热索引与冷扫严格等价） |
 | `vault_recent(limit)` | 最近快照列表 |
 | `vault_snapshot(id)` | 单快照详情（块分布/活上下文/token） |
 | `vault_stats()` | token 账本汇总 |
@@ -121,7 +121,7 @@ vault/
 - 195MB Codex rollout → **1.5 秒**导出 → 12MB 快照；39 个压缩边界、2.24 亿 token 用量、838 对工具调用全部保真。
 - **双向迁移真机验证全部通过**：Codex→Claude 在 2.1.181 里 resume 续写；Claude→Codex 在 0.153.4 里恢复 **373,160 tokens 全量上下文**。
 - 逆向并规避 codex 两代格式陷阱（`ordinal` 数字/字符串互不兼容、resume 走 SQLite thread-store、"rollout is empty" 误导性报错）。
-- 测试 **268 项用例**，含冷热三路等价与 `project`/`agent`/`since` 作用域过滤（及演进链叶子 `since`）、双向 MCP（`vault_memorize` 推翻链 / `vault_handoff` / 401 与旧版 404 回退保护）、`cv memory compile-rules`（哨兵保护/预算裁剪/`.bak-cv` 备份/HTTP 白名单校验）、SWR 非阻塞缓存、DeepSeek Harness V4/Zstd/Cordis 全链路、整端全量批量会话迁移（`plan_batch_migration` / `run_batch_migration` / `/migrate/batch` / `cv import --agent`）、MCP 按需自选与卸载残留隔离、Skill 工作台（Diff 预览 / 路径安全移除 / 备份一键回滚 / `connected_only` 与自失效缓存）、HTTP 安全响应头与 IPv6 `[::1]` 守卫、`/stats` 与数据库迁移缓存、POST 413 限流与 gzip 压测——常驻索引与文件扫描回退必须结果一致；并在 **DeepSeek Harness Desktop**（MCP 工具调用、V4 压缩会话渲染、`/tdd` Skill 识别）、**Claude Code 2.1.181** 与 **Codex 0.153.4** 完成真机实测；CI 另有控制台 JS 执行/单元回归（`S1-S8`、`MB1-MB4`、`MR1a-MR1d`）、真实浏览器多视口显隐与布局探针（380–2560px × 8 面板 32/32 零溢出）、26 模块纯标准库导入校验与安装包冒烟测试。
+- 测试 **273 项用例**，含有界分化时间衰减（`DEFAULT_DECAY_FLOOR` / `no_decay`）、冷热三路等价与 `project`/`agent`/`since` 作用域过滤（及演进链叶子 `since`）、双向 MCP（`vault_memorize` 推翻链 / `vault_handoff` / 401 与旧版 404 回退保护）、`cv memory compile-rules`（哨兵保护/预算裁剪/`.bak-cv` 备份/HTTP 白名单校验）、账本 CSV/Markdown 导出、备份 ZIP CRC+SQLite 校验与路径穿越防护、审计 SQL 过滤、托盘 SHA-256 自更新、SWR 非阻塞缓存、DeepSeek Harness V4/Zstd/Cordis 全链路、整端全量批量会话迁移（`plan_batch_migration` / `run_batch_migration` / `/migrate/batch` / `cv import --agent`）、MCP 按需自选与卸载残留隔离、Skill 工作台（Diff 预览 / 路径安全移除 / 备份一键回滚 / `connected_only` 与自失效缓存）、HTTP 安全响应头与 IPv6 `[::1]` 守卫、`/stats` 与数据库迁移缓存、POST 413 限流与 gzip 压测——常驻索引与文件扫描回退必须结果一致；并在 **DeepSeek Harness Desktop**（MCP 工具调用、V4 压缩会话渲染、`/tdd` Skill 识别）、**Claude Code 2.1.181** 与 **Codex 0.153.4** 完成真机实测；CI 另有控制台 JS 执行/单元回归（`S1-S8`、`MB1-MB4`、`MR1a-MR1d`、`B07`、`Q7`、`O4-O5`）、真实浏览器多视口显隐与布局探针（380–2560px × 8 面板 32/32 零溢出）、26 模块纯标准库导入校验与安装包冒烟测试。
 
 ## 设计原则
 

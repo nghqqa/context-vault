@@ -424,11 +424,11 @@ details.cl-item:not([open])::details-content{block-size:0}
   <!-- ============ Hero ============ -->
   <section class="hero" aria-label="简介">
     <div class="wrap">
-      <a class="badge" href="#changelog"><span class="dot" aria-hidden="true"></span>v0.14.0 · 双向 MCP 8 工具 · 项目规则编译器 · 14.5 MB 免 Python 托盘</a>
+      <a class="badge" href="#changelog"><span class="dot" aria-hidden="true"></span>v0.15.0 · Recall@1 0.93 · 账本导出 · 备份校验 · 托盘自更新</a>
       <h1>换模型、换工具，<br>会话上下文<em>不再清零</em></h1>
       <p class="lede">Context Vault 把 AI 编程会话导出为<b>你自己机器上的中立快照</b>：内容寻址、不可变、带谱系。双向迁移、深度检索、token 账本、双时态记忆、MCP 后端——agent 来来去去，vault 一直在。</p>
       <div class="cta">
-        <a class="btn primary" href="https://github.com/nghqqa/context-vault/releases/download/v0.14.0/ContextVault.exe">
+        <a class="btn primary" href="https://github.com/nghqqa/context-vault/releases/download/v0.15.0/ContextVault.exe">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19.5h14"/></svg>
           下载 Windows 托盘版 (.exe)
         </a>
@@ -441,7 +441,7 @@ details.cl-item:not([open])::details-content{block-size:0}
           GitHub 仓库
         </a>
       </div>
-      <p class="meta">v0.14.0 · Windows 精简单文件 (14.5 MB, 免配 Python · 内置原生 MCP) · 或 Python 3.9+ 纯标准库零依赖 · MIT 开源免费</p>
+      <p class="meta">v0.15.0 · Windows 精简单文件 (14.5 MB, 免配 Python · 内置原生 MCP) · 或 Python 3.9+ 纯标准库零依赖 · MIT 开源免费</p>
     </div>
   </section>
 
@@ -462,7 +462,7 @@ details.cl-item:not([open])::details-content{block-size:0}
         <article class="card">
           <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/><path d="M8 10.5h5m-2.5-2.5v5"/></svg></div>
           <h3>深度检索内核</h3>
-          <p>代码感知分词（<code>camelCase</code> / <code>snake_case</code> / 路径 / 错误码 复合+子词双索引）× 块角色加权 BM25 × Lineage 折叠——同一演进链只回最新版命中。SQLite 紧凑倒排让千级快照索引体积降 <strong>87%</strong>，检索 P95 <strong>39ms</strong>。</p>
+          <p>代码感知分词（<code>camelCase</code> / <code>snake_case</code> / 路径 / 错误码 复合+子词双索引）× 块角色加权 BM25 × 有界分化时间衰减（<code>0.65</code>/标识符 <code>0.80</code> + <code>no_decay</code> 开关，<code>Recall@1</code> 达 <strong>0.93</strong>）× Lineage 折叠。SQLite 紧凑倒排让千级快照索引体积降 <strong>87%</strong>，检索 P95 <strong>39ms</strong>。</p>
         </article>
         <article class="card">
           <div class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 8H19m0 0-3-3m3 3-3 3M19.5 16H5m0 0 3-3m-3 3 3 3"/></svg></div>
@@ -560,9 +560,9 @@ details.cl-item:not([open])::details-content{block-size:0}
         <p class="sub">2026-10-27 ~ 11-26 真机实测；与 docs/BENCHMARK.md、benchmarks/results 同源，不挑选、不修饰。</p>
       </div>
       <div class="stats">
-        <div class="stat"><span class="v">268</span><span class="k">自动化单测 · 含双向 MCP、作用域过滤、规则编译与整端批量迁移</span></div>
+        <div class="stat"><span class="v">273</span><span class="k">自动化单测 · 含有界衰减、账本导出、备份校验与自更新</span></div>
         <div class="stat"><span class="v">-87<small>%</small></span><span class="k">千级快照索引体积（778.5 → 100.9 MiB）</span></div>
-        <div class="stat"><span class="v">1.0</span><span class="k">Ours Recall@5（162 题金标 · P95 &lt;1ms）</span></div>
+        <div class="stat"><span class="v">0.93</span><span class="k">Ours Recall@1（Recall@5 1.0 · P95 1.0ms）</span></div>
         <div class="stat"><span class="v">0.0</span><span class="k">过期记忆入侵率（双时态冲突覆盖）</span></div>
         <div class="stat"><span class="v">162</span><span class="k">金标评测题 · 五维度 + 抗噪 / 流式消融</span></div>
         <div class="stat"><span class="v">0</span><span class="k">第三方依赖 · 纯 Python 标准库</span></div>
@@ -581,15 +581,15 @@ details.cl-item:not([open])::details-content{block-size:0}
       </div>
       <div class="dl-card">
         <div class="dl-info">
-          <div class="dl-head">Windows 绿色托盘版（免装 Python，双击即用）<span class="dl-tag">v0.14.0 · 14.5 MB</span></div>
-          <p class="dl-desc">精简单文件可执行程序，内置热索引服务（<code>127.0.0.1:8791</code>，带安全响应头与写互斥锁）、<strong>原生免 Python 双向 MCP 服务（8 工具）</strong>、项目规则编译器、整端全量批量会话迁移、Skill 差异对比/安全移除/一键回滚、DeepSeek Harness / Antigravity 迁移与完整配置 zip 备份。</p>
+          <div class="dl-head">Windows 绿色托盘版（免装 Python，双击即用）<span class="dl-tag">v0.15.0 · 14.5 MB</span></div>
+          <p class="dl-desc">精简单文件可执行程序，内置热索引服务（<code>127.0.0.1:8791</code>，支持有界衰减/<code>no_decay</code>、账本 CSV/MD 导出与审计时间线）、<strong>原生免 Python 双向 MCP 服务（8 工具）</strong>、项目规则编译器、整端全量批量迁移、Skill 差异对比/回滚、全配置 zip 备份校验下载，以及 <strong>SHA-256 强制校验的托盘自动更新</strong>。</p>
         </div>
         <div class="dl-acts">
-          <a class="btn primary" href="https://github.com/nghqqa/context-vault/releases/download/v0.14.0/ContextVault.exe">
+          <a class="btn primary" href="https://github.com/nghqqa/context-vault/releases/download/v0.15.0/ContextVault.exe">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19.5h14"/></svg>
             下载 ContextVault.exe
           </a>
-          <a class="dl-sub" href="https://github.com/nghqqa/context-vault/releases/tag/v0.14.0">Release 说明 &amp; SHA256</a>
+          <a class="dl-sub" href="https://github.com/nghqqa/context-vault/releases/tag/v0.15.0">Release 说明 &amp; SHA256</a>
         </div>
       </div>
       <p class="term-label" style="margin-top:0">命令行安装（Windows / Linux / macOS，纯 Python 3.9+ 标准库零依赖）</p>
@@ -644,15 +644,46 @@ details.cl-item:not([open])::details-content{block-size:0}
           <button type="button" id="cl-toggle-all" class="cl-act" commandfor="cl-list" command="--toggle-all" aria-expanded="false">
             <span class="expand">全部展开</span><span class="collapse">全部收起</span>
           </button>
-          <span id="cl-count" class="cl-count" aria-live="polite">显示 13 / 13 个版本</span>
+          <span id="cl-count" class="cl-count" aria-live="polite">显示 14 / 14 个版本</span>
         </div>
       </div>
 
       <div id="cl-list" class="cl-list">
 
-        <details class="cl-item" id="v0.14.0" data-cats="retrieval ledger ui" open>
+        <details class="cl-item" id="v0.15.0" data-cats="retrieval ledger ui" open>
           <summary>
-            <span class="cl-ver latest">v0.14.0 <b>最新</b></span>
+            <span class="cl-ver latest">v0.15.0 <b>最新</b></span>
+            <span class="cl-title">有界分化时间衰减（Recall@1 0.93）· 账本 CSV/MD 导出 · 备份校验与审计 · 托盘自更新</span>
+            <span class="cl-tags"><span class="cl-tag">检索与记忆</span><span class="cl-tag">账本与 MCP</span><span class="cl-tag">界面与托盘</span></span>
+            <time datetime="2026-11-26">2026-11-26</time>
+          </summary>
+          <div class="cl-body">
+            <p class="cl-lead">聚焦<strong>检索精度跃升</strong>与<strong>运维产品化闭环</strong>：上线有界/分化时间衰减与 <code>no_decay</code> 开关，在 CodingVault-Bench 上将 <code>Ours Recall@1</code> 推高至 <b>0.9298</b>；补齐账本 CSV/Markdown 导出、备份完整性校验下载、审计时间线筛查及 Windows 托盘 SHA-256 自更新。</p>
+            <ul class="cl-pts">
+              <li><span class="cl-kind k-opt">优化</span><span><b>有界分化衰减与不衰减开关</b>（<code>cv_rank.py</code> / <code>cv_index.py</code> / <code>mcp_server.py</code> / <code>console_snapshots.js</code>）：自然语言保底 <code>0.65</code>、标识符/错误码/路径查询自动抬升至 <code>0.80</code>（支持 <code>CV_DECAY_FLOOR</code>），贯通 HTTP/MCP/语义重排与控制台「不衰减」按钮，冷/热三路严格等价；综合 <code>Recall@1</code> <code>0.807→0.930</code>，<code>temporal_update</code> <code>0.476→0.810</code>。</span></li>
+              <li><span class="cl-kind k-add">新增</span><span><b>用量账本 CSV / Markdown 导出</b>（<code>cv ledger export</code> / <code>GET /ledger/export</code> / <code>console_overview.js</code>）：支持 <code>5h</code>/<code>24h</code>/<code>7d</code>/<code>30d</code>/<code>all</code> 全窗口与按账号导出明细摘要表，概览配额区新增一键「导出 CSV」「导出 MD」。</span></li>
+              <li><span class="cl-kind k-add">新增</span><span><b>备份 CRC+SQLite 校验、安全下载与审计时间线</b>（<code>cv backup --list|--verify</code> / <code>/ops/backups</code> / <code>/audit</code> / <code>console_ops.js</code>）：支持 ZIP CRC-32 与临时解包 <code>PRAGMA quick_check(1)</code> 逐份核验（拒绝对 zip 二次 gzip 与路径穿越），SQL 预过滤审计状态并上线全宽「审计与运维时间线」卡片。</span></li>
+              <li><span class="cl-kind k-add">新增</span><span><b>Windows 托盘 SHA-256 自更新闭环</b>（<code>cv_ops.py</code> / <code>tray_app.py</code> / <code>build.py</code>）：构建产物同发 <code>SHA256SUMS.txt</code>，冻结托盘检测到新版本后弹窗确认、流式下载并强制核验 SHA-256，校验通过后自动替换重启。</span></li>
+            </ul>
+            <div class="cl-metrics">
+              <span class="cl-m">pytest 273 passed</span>
+              <span class="cl-m">Recall@1 0.807→0.930</span>
+              <span class="cl-m">Chromium 32/32 零溢出</span>
+              <span class="cl-m">Exe 14.47 MiB (15,170,917 B)</span>
+            </div>
+            <div class="cl-links">
+              <a href="https://github.com/nghqqa/context-vault/releases/tag/v0.15.0">GitHub Release</a>
+              <a href="https://github.com/nghqqa/context-vault/blob/main/docs/release-notes-v0.15.0.md">完整发布说明</a>
+              <a href="https://github.com/nghqqa/context-vault/compare/v0.14.0...v0.15.0">代码对比</a>
+              <a href="https://github.com/nghqqa/context-vault/releases/download/v0.15.0/ContextVault.exe">下载 .exe</a>
+              <button type="button" class="cl-copy-link" data-hash="#v0.15.0">复制版本链接</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="cl-item" id="v0.14.0" data-cats="retrieval ledger ui">
+          <summary>
+            <span class="cl-ver">v0.14.0</span>
             <span class="cl-title">双向 MCP 协作（8 工具）· 冷热三路作用域过滤 · 项目规则编译器</span>
             <span class="cl-tags"><span class="cl-tag">检索与记忆</span><span class="cl-tag">账本与 MCP</span><span class="cl-tag">界面与托盘</span></span>
             <time datetime="2026-11-26">2026-11-26</time>
@@ -1036,8 +1067,8 @@ details.cl-item:not([open])::details-content{block-size:0}
 
 <footer>
   <div class="wrap foot-in">
-    <div>Context Vault v0.14.0 · 完全免费 · 代码 MIT · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/snapshot-format.md">快照格式规范 CC-BY</a></div>
-    <div><a href="https://github.com/nghqqa/context-vault/releases/download/v0.14.0/ContextVault.exe">下载 Windows 托盘版</a> · <a href="#changelog">更新日志</a> · <a href="https://github.com/nghqqa/context-vault/releases.atom">Atom 订阅</a> · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.md">中文手册</a> · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.en.md">English Guide</a> · <a href="https://github.com/nghqqa/context-vault">GitHub</a> · <a href="https://github.com/nghqqa/context-vault/releases">Releases</a> · <a href="https://raw.githubusercontent.com/nghqqa/context-vault/main/llms.txt">llms.txt</a></div>
+    <div>Context Vault v0.15.0 · 完全免费 · 代码 MIT · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/snapshot-format.md">快照格式规范 CC-BY</a></div>
+    <div><a href="https://github.com/nghqqa/context-vault/releases/download/v0.15.0/ContextVault.exe">下载 Windows 托盘版</a> · <a href="#changelog">更新日志</a> · <a href="https://github.com/nghqqa/context-vault/releases.atom">Atom 订阅</a> · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.md">中文手册</a> · <a href="https://github.com/nghqqa/context-vault/blob/main/docs/USAGE.en.md">English Guide</a> · <a href="https://github.com/nghqqa/context-vault">GitHub</a> · <a href="https://github.com/nghqqa/context-vault/releases">Releases</a> · <a href="https://raw.githubusercontent.com/nghqqa/context-vault/main/llms.txt">llms.txt</a></div>
   </div>
 </footer>
 

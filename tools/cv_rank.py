@@ -241,6 +241,7 @@ DEFAULT_WEIGHTS = {
 UNIFORM = "uniform"            # 消融开关: 权重全 1.0 (vanilla BM25)
 IDENT_BOOST = 1.0              # 已废弃为 no-op (精确性移入 block_index_terms), 保留参数兼容
 DEFAULT_HALF_LIFE_DAYS = 90.0  # 时间衰减半衰期 (CV_DECAY_HALF_LIFE_DAYS 可覆盖)
+DEFAULT_DECAY_FLOOR = 0.65     # 有界衰减下界 (避免历史权威结论被衰减压死, CV_DECAY_FLOOR 可覆盖)
 
 
 def _weight_key(bt: str, role: str) -> str:
@@ -319,8 +320,32 @@ def default_half_life() -> float:
         return DEFAULT_HALF_LIFE_DAYS
 
 
-def decay_factor(created_at: str, now: float | None, half_life: float) -> float:
-    """时间衰减: 0.5 ** (age_days / half_life); 时间解析失败 = 1.0 (不惩罚)。"""
+def default_decay_floor() -> float:
+    try:
+        raw = os.environ.get("CV_DECAY_FLOOR", "").strip()
+        if not raw:
+            return DEFAULT_DECAY_FLOOR
+        return max(0.0, min(1.0, float(raw)))
+    except ValueError:
+        return DEFAULT_DECAY_FLOOR
+
+
+def query_decay_floor(query_terms: list, base_floor: float | None = None) -> float:
+    """精确标识符/长代码词查询适当抬高时间衰减下界, 避免历史专有结论被时间压死."""
+    fl = default_decay_floor() if base_floor is None else max(0.0, min(1.0, float(base_floor)))
+    for t in (query_terms or ()):
+        s = str(t or "")
+        if not s:
+            continue
+        if any(ch in s for ch in ("_", "-", "/", "\\", ".")) or (len(s) >= 8 and s.isascii()) \
+                or (any(c.isdigit() for c in s) and any(c.isalpha() for c in s)):
+            return max(fl, 0.80)
+    return fl
+
+
+def decay_factor(created_at: str, now: float | None, half_life: float,
+                 floor: float | None = None) -> float:
+    """有界时间衰减: floor + (1 - floor) * 0.5 ** (age_days / half_life); 解析失败或关闭 = 1.0."""
     if not created_at or not half_life or half_life <= 0:
         return 1.0
     ts = None
@@ -332,8 +357,9 @@ def decay_factor(created_at: str, now: float | None, half_life: float) -> float:
             continue
     if ts is None:
         return 1.0
+    fl = default_decay_floor() if floor is None else max(0.0, min(1.0, float(floor)))
     age_days = max((now if now is not None else time.time()) - ts, 0.0) / 86400.0
-    return 0.5 ** (age_days / half_life)
+    return fl + (1.0 - fl) * (0.5 ** (age_days / half_life))
 
 
 _REL_SINCE_RE = re.compile(r"^(\d+)([dh])$", re.IGNORECASE)
@@ -642,7 +668,8 @@ def snapshot_scores(ranked: list, doc_sid, sid_of) -> dict:
 
 
 def context_results(ranked: list, limit: int, doc_sid, sid_of, doc_bidx, root_of,
-                    meta_row, text_of, terms: list, now, half_life: float) -> list:
+                    meta_row, text_of, terms: list, now, half_life: float,
+                    decay: bool = True, decay_floor: float | None = None) -> list:
     """块级命中 → 每演进链一条摘录。契约字段: sid/block/role/score/excerpt/cwd (+versions)。"""
     out, seen_roots = [], set()
     first = terms[0].lower() if terms else ""
@@ -661,9 +688,12 @@ def context_results(ranked: list, limit: int, doc_sid, sid_of, doc_bidx, root_of
                     "excerpt": text[start:start + 400],
                     "versions": 0, "cwd": meta_row(sid).get("cwd"),
                     "_ts": meta_row(sid).get("created_at") or ""})
-    if out and half_life and half_life > 0:  # 摘录链时间衰减 (与 search 同半衰期)
+    if out and decay and half_life and half_life > 0:  # 摘录链时间衰减 (与 search 同半衰期与下界)
         for r in out:
-            r["score"] = round(r["score"] * decay_factor(r["_ts"], now, half_life), SCORE_DP)
+            r["score"] = round(
+                r["score"] * decay_factor(r["_ts"], now, half_life, floor=decay_floor),
+                SCORE_DP,
+            )
         out.sort(key=lambda r: (-r["score"], r["sid"], r["block"]))
     for r in out:
         r.pop("_ts", None)
@@ -802,8 +832,9 @@ class ColdRanker:
         return triples
 
     def search(self, limit: int, project: str | None = None, agent: str | None = None,
-               since: str | None = None) -> dict:
+               since: str | None = None, decay: bool | None = None) -> dict:
         since_iso = normalize_since(since, self.now)
+        use_decay = self.decay if decay is None else bool(decay)
         self._scan()
         empty = {"query": self.query, "terms": self.terms, "total": 0, "hits": []}
         if not self._ranked:
@@ -825,12 +856,13 @@ class ColdRanker:
                 if not scored:
                     return empty
             triples = self._sort3([(sc, s, 0) for s, sc in scored.items()])
+        d_floor = query_decay_floor(self.terms)
         hits = []
         for sc, sid, folded in triples:
             row = dict(self._rows.get(sid) or {})
-            if self.decay:
+            if use_decay:
                 sc = round(sc * decay_factor(row.get("created_at") or "", self.now,
-                                             self.half_life), SCORE_DP)
+                                             self.half_life, floor=d_floor), SCORE_DP)
             hits.append({"sid": sid, "score": sc, "folded": folded, **row})
         order = sort_hits([(h["score"], h["sid"], h.get("folded", 0)) for h in hits],
                           self._rows)
@@ -840,8 +872,9 @@ class ColdRanker:
                 "hits": hits[:limit]}
 
     def context(self, limit: int, project: str | None = None, agent: str | None = None,
-                since: str | None = None) -> dict:
+                since: str | None = None, decay: bool | None = None) -> dict:
         since_iso = normalize_since(since, self.now)
+        use_decay = self.decay if decay is None else bool(decay)
         self._scan()
         empty = {"query": self.query, "terms": self.terms, "total": 0, "results": []}
         if not self._ranked:
@@ -861,9 +894,12 @@ class ColdRanker:
             ]
             if not ranked:
                 return empty
+        d_floor = query_decay_floor(self.terms)
         results = context_results(ranked, limit, lambda d: d[0], self._sid_of,
                                   lambda d: d[1], self._root_of, self._rows.get,
-                                  self._text_of, self.terms, self.now, self.half_life)
+                                  self._text_of, self.terms, self.now,
+                                  self.half_life if use_decay else 0.0,
+                                  decay=use_decay, decay_floor=d_floor)
         for r in results:
             r["role"] = self._block_role(r["sid"], r["block"])
             if not r["versions"]:

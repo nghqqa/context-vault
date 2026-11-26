@@ -222,6 +222,7 @@ table.tbl-snap col.c-act{width:80px}
 .btn.danger{background:var(--bg-surface);border-color:var(--err-line);color:var(--err)}
 .btn.danger:hover{background:var(--err-bg);border-color:var(--err)}
 .btn.sm{height:27px;padding:0 9px;font-size:12px}
+.btn.xs{height:22px;padding:0 7px;font-size:11px;line-height:20px}
 .btn:disabled{opacity:.48;cursor:not-allowed;transform:none}
 .btn.on,.btn[aria-pressed="true"]{border-color:var(--line-strong);background:var(--bg-inset);color:var(--ink);font-weight:600}
 input[type=search],select{background:var(--bg-surface);border:1px solid var(--line);color:var(--ink);
@@ -713,6 +714,24 @@ dialog.cmdk::backdrop{background:rgba(0,0,0,.42);backdrop-filter:blur(2px)}
 .ops-mcp-more summary::before{content:"▸";font-size:11px;transition:transform .12s ease;display:inline-block}
 .ops-mcp-more[open] summary::before{transform:rotate(90deg)}
 .ops-mcp-more-body{padding-left:2px;margin-top:2px}
+.ops-audit-card{grid-column:1 / -1}
+.ops-audit-filters{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.ops-bk-more{margin-top:10px}
+.ops-bk-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 0;
+  border-bottom:1px solid var(--line-soft);flex-wrap:wrap}
+.ops-bk-row:last-child{border-bottom:none}
+.ops-bk-meta{font-family:var(--mono);font-size:11.5px;color:var(--ink-2);min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 180px}
+.ops-bk-acts{display:flex;align-items:center;gap:6px;flex:none}
+.ops-audit-sum{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;font-size:12px;color:var(--ink-2)}
+.ops-audit-day{margin-top:8px;border:1px solid var(--line-soft);border-radius:var(--rad-s);
+  background:var(--bg-subtle);padding:6px 10px}
+.ops-audit-day-h{font-family:var(--mono);font-size:11.5px;font-weight:600;color:var(--ink-2);margin-bottom:4px}
+.ops-audit-ev{display:flex;align-items:baseline;gap:8px;font-size:12px;padding:4px 0;
+  border-top:1px dashed var(--line-soft);flex-wrap:wrap}
+.ops-audit-ev:first-of-type{border-top:none}
+.ops-audit-ts{font-family:var(--mono);font-size:11px;color:var(--ink-3);white-space:nowrap}
+.ops-audit-detail{font-family:var(--mono);font-size:11.5px;color:var(--ink-2);min-width:0;word-break:break-word;flex:1 1 160px}
 @media(max-width:960px){
   .ops-grid{grid-template-columns:minmax(0,1fr)}
   .onboard-steps{grid-template-columns:minmax(0,1fr)}

@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-11-22T22:26:19",
+ "generated_at": "2026-11-26T19:06:08",
  "n_queries": 162,
  "search": [
   {
@@ -11,8 +11,8 @@
    "stale_version_intrusion": 0.5714,
    "abstention_accuracy": 0.4583,
    "index_size_mb": 0.0,
-   "latency_p50_ms": 83.3,
-   "latency_p95_ms": 90.8,
+   "latency_p50_ms": 89.7,
+   "latency_p95_ms": 127.6,
    "build_sec": 0.0,
    "diagnostic_profile": {
     "single_session": {
@@ -847,10 +847,10 @@
    "mrr_at_10": 0.7751,
    "stale_version_intrusion": 0.8571,
    "abstention_accuracy": 0.6667,
-   "index_size_mb": 0.25,
+   "index_size_mb": 0.27,
    "latency_p50_ms": 0.3,
    "latency_p95_ms": 0.5,
-   "build_sec": 0.14,
+   "build_sec": 0.17,
    "diagnostic_profile": {
     "single_session": {
      "n": 54,
@@ -1684,10 +1684,10 @@
    "mrr_at_10": 0.943,
    "stale_version_intrusion": 0.9524,
    "abstention_accuracy": 0.8333,
-   "index_size_mb": 0.26,
-   "latency_p50_ms": 0.4,
-   "latency_p95_ms": 0.6,
-   "build_sec": 0.25,
+   "index_size_mb": 0.28,
+   "latency_p50_ms": 0.5,
+   "latency_p95_ms": 0.7,
+   "build_sec": 0.27,
    "diagnostic_profile": {
     "single_session": {
      "n": 54,
@@ -2521,10 +2521,10 @@
    "mrr_at_10": 0.9509,
    "stale_version_intrusion": 0.0,
    "abstention_accuracy": 0.8333,
-   "index_size_mb": 0.26,
-   "latency_p50_ms": 0.5,
-   "latency_p95_ms": 0.7,
-   "build_sec": 0.26,
+   "index_size_mb": 0.28,
+   "latency_p50_ms": 0.6,
+   "latency_p95_ms": 0.8,
+   "build_sec": 0.27,
    "diagnostic_profile": {
     "single_session": {
      "n": 54,
@@ -3353,15 +3353,15 @@
   {
    "variant": "Ours",
    "panel": "search",
-   "recall_at_1": 0.807,
+   "recall_at_1": 0.9298,
    "recall_at_5": 1.0,
-   "mrr_at_10": 0.8711,
+   "mrr_at_10": 0.9509,
    "stale_version_intrusion": 0.0,
    "abstention_accuracy": 0.8333,
-   "index_size_mb": 0.26,
-   "latency_p50_ms": 0.6,
-   "latency_p95_ms": 0.9,
-   "build_sec": 0.25,
+   "index_size_mb": 0.28,
+   "latency_p50_ms": 0.7,
+   "latency_p95_ms": 1.0,
+   "build_sec": 0.28,
    "diagnostic_profile": {
     "single_session": {
      "n": 54,
@@ -3377,9 +3377,9 @@
     },
     "temporal_update": {
      "n": 42,
-     "recall_at_1": 0.4762,
+     "recall_at_1": 0.8095,
      "recall_at_5": 1.0,
-     "mrr_at_10": 0.65
+     "mrr_at_10": 0.8667
     },
     "abstention": {
      "n": 24,
@@ -3396,9 +3396,9 @@
     ],
     "ss-002": [
      "cv_bench_phoenix-relay-retry_v05",
+     "cv_bench_phoenix-sdk-client_v04",
      "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-idempotency_v05",
-     "cv_bench_phoenix-sdk-client_v04",
      "cv_bench_phoenix-rate-limiter_v04"
     ],
     "ss-003": [
@@ -3424,22 +3424,22 @@
     ],
     "ss-006": [
      "cv_bench_phoenix-refund-recon_v04",
-     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-relay-retry_v05",
+     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-idempotency_v05",
      "cv_bench_phoenix-rate-limiter_v04"
     ],
     "ss-007": [
      "cv_bench_phoenix-idempotency_v05",
-     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-webhook-sign_v04",
+     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-relay-retry_v05",
      "cv_bench_phoenix-rate-limiter_v04"
     ],
     "ss-008": [
      "cv_bench_phoenix-idempotency_v05",
-     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-relay-retry_v05",
+     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-rate-limiter_v04",
      "cv_bench_phoenix-refund-recon_v04"
     ],
@@ -3466,8 +3466,8 @@
     ],
     "ss-012": [
      "cv_bench_phoenix-rate-limiter_v04",
-     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-relay-retry_v05",
+     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-idempotency_v05",
      "cv_bench_phoenix-refund-recon_v04"
     ],
@@ -3480,8 +3480,8 @@
     ],
     "ss-014": [
      "cv_bench_phoenix-sdk-client_v04",
-     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-relay-retry_v05",
+     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-idempotency_v05",
      "cv_bench_phoenix-rate-limiter_v04"
     ],
@@ -3536,10 +3536,10 @@
     ],
     "ss-022": [
      "cv_bench_quartz-date-picker_v04",
+     "cv_bench_quartz-build-pipeline_v04",
      "cv_bench_quartz-form-validation_v05",
      "cv_bench_quartz-virtual-table_v05",
-     "cv_bench_quartz-websocket-feed_v05",
-     "cv_bench_quartz-build-pipeline_v04"
+     "cv_bench_quartz-websocket-feed_v05"
     ],
     "ss-023": [
      "cv_bench_quartz-websocket-feed_v05",
@@ -3573,8 +3573,8 @@
      "cv_bench_cobalt-conflict-resolve_v05",
      "cv_bench_cobalt-checkpoint-store_v04",
      "cv_bench_cobalt-schema-drift_v04",
-     "cv_bench_cobalt-batch-export_v05",
-     "cv_bench_cobalt-connector-auth_v04"
+     "cv_bench_cobalt-connector-auth_v04",
+     "cv_bench_cobalt-batch-export_v05"
     ],
     "ss-028": [
      "cv_bench_cobalt-conflict-resolve_v05",
@@ -3587,8 +3587,8 @@
      "cv_bench_cobalt-checkpoint-store_v04",
      "cv_bench_cobalt-conflict-resolve_v05",
      "cv_bench_cobalt-schema-drift_v04",
-     "cv_bench_cobalt-batch-export_v05",
-     "cv_bench_cobalt-connector-auth_v04"
+     "cv_bench_cobalt-connector-auth_v04",
+     "cv_bench_cobalt-batch-export_v05"
     ],
     "ss-030": [
      "cv_bench_cobalt-checkpoint-store_v04",
@@ -3662,8 +3662,8 @@
     ],
     "ss-040": [
      "cv_bench_phoenix-idempotency_v05",
-     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-webhook-sign_v04",
+     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-relay-retry_v05",
      "cv_bench_phoenix-rate-limiter_v04"
     ],
@@ -3734,15 +3734,15 @@
      "cv_bench_cobalt-conflict-resolve_v05",
      "cv_bench_cobalt-checkpoint-store_v04",
      "cv_bench_cobalt-schema-drift_v04",
-     "cv_bench_cobalt-batch-export_v05",
-     "cv_bench_cobalt-connector-auth_v04"
+     "cv_bench_cobalt-connector-auth_v04",
+     "cv_bench_cobalt-batch-export_v05"
     ],
     "ss-051": [
      "cv_bench_cobalt-checkpoint-store_v04",
      "cv_bench_cobalt-conflict-resolve_v05",
      "cv_bench_cobalt-schema-drift_v04",
-     "cv_bench_cobalt-batch-export_v05",
-     "cv_bench_cobalt-connector-auth_v04"
+     "cv_bench_cobalt-connector-auth_v04",
+     "cv_bench_cobalt-batch-export_v05"
     ],
     "ss-052": [
      "cv_bench_cobalt-schema-drift_v04",
@@ -3782,8 +3782,8 @@
     "ms-057": [
      "cv_bench_phoenix-idempotency_v05",
      "cv_bench_phoenix-refund-recon_v04",
-     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-webhook-sign_v04",
+     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-relay-retry_v05"
     ],
     "ms-058": [
@@ -3794,8 +3794,8 @@
      "cv_bench_phoenix-rate-limiter_v04"
     ],
     "ms-059": [
-     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-rate-limiter_v04",
+     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-idempotency_v05",
      "cv_bench_phoenix-relay-retry_v05",
      "cv_bench_phoenix-refund-recon_v04"
@@ -3822,8 +3822,8 @@
      "cv_bench_quartz-websocket-feed_v05"
     ],
     "ms-063": [
-     "cv_bench_quartz-form-validation_v05",
      "cv_bench_quartz-date-picker_v04",
+     "cv_bench_quartz-form-validation_v05",
      "cv_bench_quartz-virtual-table_v05",
      "cv_bench_quartz-websocket-feed_v05",
      "cv_bench_quartz-build-pipeline_v04"
@@ -3846,8 +3846,8 @@
      "cv_bench_cobalt-checkpoint-store_v04",
      "cv_bench_cobalt-conflict-resolve_v05",
      "cv_bench_cobalt-schema-drift_v04",
-     "cv_bench_cobalt-batch-export_v05",
-     "cv_bench_cobalt-connector-auth_v04"
+     "cv_bench_cobalt-connector-auth_v04",
+     "cv_bench_cobalt-batch-export_v05"
     ],
     "ms-067": [
      "cv_bench_cobalt-checkpoint-store_v04",
@@ -3875,7 +3875,7 @@
      "cv_bench_quartz-virtual-table_v05",
      "cv_bench_quartz-form-validation_v05",
      "cv_bench_quartz-websocket-feed_v05",
-     "cv_bench_phoenix-ledger-migration_v06"
+     "cv_bench_quartz-build-pipeline_v04"
     ],
     "ms-071": [
      "cv_bench_quartz-theme-tokens_v04",
@@ -3892,102 +3892,102 @@
      "cv_bench_quartz-websocket-feed_v05"
     ],
     "tp-073": [
-     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-relay-retry_v05",
-     "cv_bench_phoenix-idempotency_v05",
      "cv_bench_phoenix-refund-recon_v04",
+     "cv_bench_phoenix-ledger-migration_v06",
+     "cv_bench_phoenix-idempotency_v05",
      "cv_bench_phoenix-rate-limiter_v04"
     ],
     "tp-074": [
-     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-relay-retry_v05",
-     "cv_bench_phoenix-idempotency_v05",
      "cv_bench_phoenix-refund-recon_v04",
+     "cv_bench_phoenix-ledger-migration_v06",
+     "cv_bench_phoenix-idempotency_v05",
      "cv_bench_phoenix-rate-limiter_v04"
     ],
     "tp-075": [
-     "cv_bench_phoenix-ledger-migration_v06",
-     "cv_bench_phoenix-idempotency_v05",
-     "cv_bench_phoenix-relay-retry_v05",
      "cv_bench_phoenix-webhook-sign_v04",
-     "cv_bench_phoenix-refund-recon_v04"
+     "cv_bench_phoenix-ledger-migration_v06",
+     "cv_bench_phoenix-refund-recon_v04",
+     "cv_bench_phoenix-idempotency_v05",
+     "cv_bench_phoenix-relay-retry_v05"
     ],
     "tp-076": [
-     "cv_bench_phoenix-ledger-migration_v06",
-     "cv_bench_phoenix-idempotency_v05",
-     "cv_bench_phoenix-relay-retry_v05",
      "cv_bench_phoenix-webhook-sign_v04",
-     "cv_bench_phoenix-refund-recon_v04"
+     "cv_bench_phoenix-ledger-migration_v06",
+     "cv_bench_phoenix-refund-recon_v04",
+     "cv_bench_phoenix-idempotency_v05",
+     "cv_bench_phoenix-relay-retry_v05"
     ],
     "tp-077": [
+     "cv_bench_phoenix-refund-recon_v04",
      "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-idempotency_v05",
      "cv_bench_phoenix-relay-retry_v05",
-     "cv_bench_phoenix-refund-recon_v04",
      "cv_bench_phoenix-rate-limiter_v04"
     ],
     "tp-078": [
+     "cv_bench_phoenix-refund-recon_v04",
      "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-idempotency_v05",
      "cv_bench_phoenix-relay-retry_v05",
-     "cv_bench_phoenix-refund-recon_v04",
      "cv_bench_phoenix-rate-limiter_v04"
     ],
     "tp-079": [
-     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-idempotency_v05",
-     "cv_bench_phoenix-relay-retry_v05",
      "cv_bench_phoenix-refund-recon_v04",
+     "cv_bench_phoenix-ledger-migration_v06",
+     "cv_bench_phoenix-relay-retry_v05",
      "cv_bench_phoenix-rate-limiter_v04"
     ],
     "tp-080": [
-     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-idempotency_v05",
-     "cv_bench_phoenix-relay-retry_v05",
      "cv_bench_phoenix-refund-recon_v04",
+     "cv_bench_phoenix-ledger-migration_v06",
+     "cv_bench_phoenix-relay-retry_v05",
      "cv_bench_phoenix-rate-limiter_v04"
     ],
     "tp-081": [
      "cv_bench_phoenix-ledger-migration_v06",
+     "cv_bench_phoenix-refund-recon_v04",
      "cv_bench_phoenix-idempotency_v05",
      "cv_bench_phoenix-relay-retry_v05",
-     "cv_bench_phoenix-refund-recon_v04",
      "cv_bench_phoenix-rate-limiter_v04"
     ],
     "tp-082": [
      "cv_bench_phoenix-ledger-migration_v06",
+     "cv_bench_phoenix-refund-recon_v04",
      "cv_bench_phoenix-idempotency_v05",
      "cv_bench_phoenix-relay-retry_v05",
-     "cv_bench_phoenix-refund-recon_v04",
      "cv_bench_phoenix-rate-limiter_v04"
     ],
     "tp-083": [
+     "cv_bench_phoenix-rate-limiter_v04",
+     "cv_bench_phoenix-refund-recon_v04",
      "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-idempotency_v05",
-     "cv_bench_phoenix-relay-retry_v05",
-     "cv_bench_phoenix-rate-limiter_v04",
-     "cv_bench_phoenix-refund-recon_v04"
+     "cv_bench_phoenix-relay-retry_v05"
     ],
     "tp-084": [
+     "cv_bench_phoenix-rate-limiter_v04",
+     "cv_bench_phoenix-refund-recon_v04",
      "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-idempotency_v05",
-     "cv_bench_phoenix-relay-retry_v05",
-     "cv_bench_phoenix-rate-limiter_v04",
-     "cv_bench_phoenix-refund-recon_v04"
+     "cv_bench_phoenix-relay-retry_v05"
     ],
     "tp-085": [
+     "cv_bench_phoenix-sdk-client_v04",
+     "cv_bench_phoenix-refund-recon_v04",
      "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-idempotency_v05",
-     "cv_bench_phoenix-relay-retry_v05",
-     "cv_bench_phoenix-sdk-client_v04",
-     "cv_bench_phoenix-refund-recon_v04"
+     "cv_bench_phoenix-relay-retry_v05"
     ],
     "tp-086": [
+     "cv_bench_phoenix-sdk-client_v04",
+     "cv_bench_phoenix-refund-recon_v04",
      "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-idempotency_v05",
-     "cv_bench_phoenix-relay-retry_v05",
-     "cv_bench_phoenix-sdk-client_v04",
-     "cv_bench_phoenix-refund-recon_v04"
+     "cv_bench_phoenix-relay-retry_v05"
     ],
     "tp-087": [
      "cv_bench_quartz-virtual-table_v05",
@@ -4004,17 +4004,17 @@
      "cv_bench_quartz-date-picker_v04"
     ],
     "tp-089": [
+     "cv_bench_quartz-theme-tokens_v04",
      "cv_bench_quartz-form-validation_v05",
      "cv_bench_quartz-virtual-table_v05",
      "cv_bench_quartz-websocket-feed_v05",
-     "cv_bench_quartz-theme-tokens_v04",
      "cv_bench_quartz-build-pipeline_v04"
     ],
     "tp-090": [
+     "cv_bench_quartz-theme-tokens_v04",
      "cv_bench_quartz-form-validation_v05",
      "cv_bench_quartz-virtual-table_v05",
      "cv_bench_quartz-websocket-feed_v05",
-     "cv_bench_quartz-theme-tokens_v04",
      "cv_bench_quartz-build-pipeline_v04"
     ],
     "tp-091": [
@@ -4077,29 +4077,29 @@
      "cv_bench_cobalt-conflict-resolve_v05",
      "cv_bench_cobalt-checkpoint-store_v04",
      "cv_bench_cobalt-schema-drift_v04",
-     "cv_bench_cobalt-batch-export_v05",
-     "cv_bench_cobalt-connector-auth_v04"
+     "cv_bench_cobalt-connector-auth_v04",
+     "cv_bench_cobalt-batch-export_v05"
     ],
     "tp-100": [
      "cv_bench_cobalt-conflict-resolve_v05",
      "cv_bench_cobalt-checkpoint-store_v04",
      "cv_bench_cobalt-schema-drift_v04",
-     "cv_bench_cobalt-batch-export_v05",
-     "cv_bench_cobalt-connector-auth_v04"
+     "cv_bench_cobalt-connector-auth_v04",
+     "cv_bench_cobalt-batch-export_v05"
     ],
     "tp-101": [
      "cv_bench_cobalt-conflict-resolve_v05",
      "cv_bench_cobalt-checkpoint-store_v04",
      "cv_bench_cobalt-schema-drift_v04",
-     "cv_bench_cobalt-batch-export_v05",
-     "cv_bench_cobalt-connector-auth_v04"
+     "cv_bench_cobalt-connector-auth_v04",
+     "cv_bench_cobalt-batch-export_v05"
     ],
     "tp-102": [
      "cv_bench_cobalt-conflict-resolve_v05",
      "cv_bench_cobalt-checkpoint-store_v04",
      "cv_bench_cobalt-schema-drift_v04",
-     "cv_bench_cobalt-batch-export_v05",
-     "cv_bench_cobalt-connector-auth_v04"
+     "cv_bench_cobalt-connector-auth_v04",
+     "cv_bench_cobalt-batch-export_v05"
     ],
     "tp-103": [
      "cv_bench_cobalt-schema-drift_v04",
@@ -4117,36 +4117,36 @@
     ],
     "tp-105": [
      "cv_bench_cobalt-conflict-resolve_v05",
-     "cv_bench_cobalt-batch-export_v05",
      "cv_bench_cobalt-checkpoint-store_v04",
      "cv_bench_cobalt-schema-drift_v04",
+     "cv_bench_cobalt-batch-export_v05",
      "cv_bench_cobalt-connector-auth_v04"
     ],
     "tp-106": [
      "cv_bench_cobalt-conflict-resolve_v05",
-     "cv_bench_cobalt-batch-export_v05",
      "cv_bench_cobalt-checkpoint-store_v04",
      "cv_bench_cobalt-schema-drift_v04",
+     "cv_bench_cobalt-batch-export_v05",
      "cv_bench_cobalt-connector-auth_v04"
     ],
     "tp-107": [
      "cv_bench_cobalt-conflict-resolve_v05",
      "cv_bench_cobalt-checkpoint-store_v04",
      "cv_bench_cobalt-schema-drift_v04",
-     "cv_bench_cobalt-batch-export_v05",
-     "cv_bench_cobalt-connector-auth_v04"
+     "cv_bench_cobalt-connector-auth_v04",
+     "cv_bench_cobalt-batch-export_v05"
     ],
     "tp-108": [
      "cv_bench_cobalt-conflict-resolve_v05",
      "cv_bench_cobalt-checkpoint-store_v04",
      "cv_bench_cobalt-schema-drift_v04",
-     "cv_bench_cobalt-batch-export_v05",
-     "cv_bench_cobalt-connector-auth_v04"
+     "cv_bench_cobalt-connector-auth_v04",
+     "cv_bench_cobalt-batch-export_v05"
     ],
     "tp-109": [
      "cv_bench_phoenix-relay-retry_v05",
-     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-sdk-client_v04",
+     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-idempotency_v05",
      "cv_bench_phoenix-rate-limiter_v04"
     ],
@@ -4159,17 +4159,17 @@
     ],
     "tp-111": [
      "cv_bench_phoenix-refund-recon_v04",
-     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-idempotency_v05",
      "cv_bench_phoenix-sdk-client_v04",
-     "cv_bench_phoenix-webhook-sign_v04"
+     "cv_bench_phoenix-webhook-sign_v04",
+     "cv_bench_phoenix-ledger-migration_v06"
     ],
     "tp-112": [
      "cv_bench_phoenix-idempotency_v05",
-     "cv_bench_phoenix-ledger-migration_v06",
      "cv_bench_phoenix-refund-recon_v04",
      "cv_bench_phoenix-sdk-client_v04",
-     "cv_bench_phoenix-webhook-sign_v04"
+     "cv_bench_phoenix-webhook-sign_v04",
+     "cv_bench_phoenix-ledger-migration_v06"
     ],
     "tp-113": [
      "cv_bench_phoenix-ledger-migration_v06",
@@ -4259,17 +4259,17 @@
    "panel": "handoff",
    "file_recall_pass_rate": 1.0,
    "pitfall_recall_pass_rate": 1.0,
-   "compression_ratio": 0.4238
+   "compression_ratio": 0.2171
   }
  ],
  "noisy": [
   {
    "condition": "relevant",
-   "recall_at_1": 0.807,
+   "recall_at_1": 0.9298,
    "recall_at_5": 1.0,
-   "mrr_at_10": 0.8711,
+   "mrr_at_10": 0.9509,
    "abstention_accuracy": 0.8333,
-   "latency_p95_ms": 0.9
+   "latency_p95_ms": 1.0
   },
   {
    "condition": "noisy(+60)",
@@ -4277,12 +4277,12 @@
    "recall_at_5": 0.6842,
    "mrr_at_10": 0.6842,
    "abstention_accuracy": 1.0,
-   "latency_p95_ms": 1.6
+   "latency_p95_ms": 1.7
   }
  ],
  "streaming": {
   "total_steps": 99,
-  "avg_step_ms": 26.43,
+  "avg_step_ms": 27.09,
   "mid_stream_context_hit": 0.4,
   "final_active_recall": 0.9048,
   "final_stale_intrusion": 0.0

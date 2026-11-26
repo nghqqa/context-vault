@@ -1,6 +1,6 @@
 /* ================= 快照资产 & 项目树 ================= */
 const snapsSeq=seqGuard();
-let snapPage=0,snapAsc=false,snapMode="recent",snapQuery="",snapLeaves=true,snapTreeMode=false,snapMemMode=false,snapAgent="",snapInputTimer=null,treeTarget="antigravity",treeApply=false,treeAgent="zcode",treeArchived=false;
+let snapPage=0,snapAsc=false,snapMode="recent",snapQuery="",snapLeaves=true,snapNoDecay=false,snapTreeMode=false,snapMemMode=false,snapAgent="",snapInputTimer=null,treeTarget="antigravity",treeApply=false,treeAgent="zcode",treeArchived=false;
 function setSnapAgent(a){
   snapAgent=String(a||"");snapPage=0;snapMode="recent";
   $$("#snap-agent-bar .pill-btn").forEach(b=>b.classList.toggle("on",(b.dataset.a||"")===snapAgent));
@@ -14,9 +14,10 @@ function updateSnapTreeBtn(){
   if(b){b.setAttribute("aria-pressed",snapTreeMode?"true":"false");b.classList.toggle("on",snapTreeMode)}
   if(mbBtn){mbBtn.setAttribute("aria-pressed",snapMemMode?"true":"false");mbBtn.classList.toggle("on",snapMemMode)}
   if(lbBtn){lbBtn.setAttribute("aria-pressed",isList?"true":"false");lbBtn.classList.toggle("on",isList)}
-  const sb=$("#snap-sort"),lb=$("#snap-leaves"),ab=$("#snap-agent-bar");
+  const sb=$("#snap-sort"),lb=$("#snap-leaves"),ndb=$("#snap-nodecay"),ab=$("#snap-agent-bar");
   if(sb)sb.style.display=isList?"":"none";
   if(lb)lb.style.display=isList?"":"none";
+  if(ndb){ndb.style.display=isList?"":"none";ndb.setAttribute("aria-pressed",snapNoDecay?"true":"false");ndb.classList.toggle("on",snapNoDecay)}
   if(ab)ab.style.display=isList?"":"none";
   if(qEl){
     qEl.placeholder=snapMemMode?"检索跨会话记忆 — 历史决策、架构约定或用户偏好…"
@@ -55,6 +56,14 @@ function snapLeavesToggle(){
   if(snapMode==="search"){snapSearch();return}
   renderSnaps();
 }
+function snapNoDecayToggle(){
+  snapNoDecay=!snapNoDecay;snapPage=0;
+  const b=$("#snap-nodecay");
+  if(b){b.setAttribute("aria-pressed",snapNoDecay?"true":"false");b.classList.toggle("on",snapNoDecay)}
+  if(snapTreeMode||snapMemMode){snapTreeMode=false;snapMemMode=false;updateSnapTreeBtn()}
+  if(snapMode==="search"){snapSearch();return}
+  renderSnaps();
+}
 async function refreshSnaps(){
   if(snapMemMode){try{await loadMemoryView()}catch(e){}return}
   if(snapTreeMode){try{await loadProjectTree()}catch(e){}return}
@@ -84,7 +93,8 @@ async function snapSearch(keepPage){
   snapMode="search";snapQuery=q;
   $("#snap-list").innerHTML='<div class="skel" style="width:40%"></div><div class="skel" style="width:70%"></div>';
   try{
-    const d=await snapsSeq(()=>api("/search?q="+encodeURIComponent(q)+"&limit=50"));
+    const nd=snapNoDecay?"&no_decay=1":"";
+    const d=await snapsSeq(()=>api("/search?q="+encodeURIComponent(q)+"&limit=50"+nd));
     renderSnapTable(d.hits||[],{search:q,hits:d.total!=null?d.total:(d.hits?d.hits.length:0)});
   }catch(e){
     if(e&&e.stale)return;
