@@ -87,7 +87,7 @@ from cv_index import (  # noqa: F401 — re-exported as public engine API
 
 FORMAT_VERSION = "0.1"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # noconsole 进程 spawn 控制台程序不弹窗   # context-snapshot 格式版本
-VERSION = "0.15.1"  # 长项目路径防截断修复 / macOS CI 全绿 / 官网自动同步
+VERSION = "0.15.2"  # Vault Core 品牌图标 / 瑞士网格 UI 精修 / 纯本地运维日志 / POSIX Antigravity URI 修复
 TOOL_RESULT_LIMIT = 256 * 1024  # spec §8.2 裁决: 单块截断阈值 256KB
 HOME = Path.home()
 HEADROOM_DIR = HOME / ".headroom"

@@ -32,7 +32,7 @@ import urllib.request
 from pathlib import Path
 
 SERVER_NAME = "context-vault"
-SERVER_VERSION = "0.15.1"
+SERVER_VERSION = "0.15.2"
 PROTO = "2025-06-18"
 SEARCH_CONTEXT_CHARS = 400  # vault_context 每个命中块返回的摘录长度
 MAX_TEXT_LEN = 2000

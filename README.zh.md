@@ -43,11 +43,11 @@
 - **AML 标准 Add/Search 适配**——内置 `cv-aml` / [tools/aml_adapter.py](tools/aml_adapter.py)（及挂载于 `cv serve` 的 `/aml/add`、`/aml/search`），支持多租户隔离、`request_id` 幂等重放与 `409 Conflict` 冲突检测，附带零依赖 [Dockerfile.aml](Dockerfile.aml)。
 - **可选敏感信息脱敏**——`cv export --redact` 或 `CV_REDACT_SECRETS=1` 在入库前自动对常见 API Key / GitHub Token / AWS Key / JWT / PEM 私钥打码。
 - **可选本地语义增强（Ollama / LLM）**——`cv semantic`（及控制台「设置与运维」页）支持接入本地 Ollama 做向量混合重排、LLM 记忆精炼与自动会话标题；默认关闭零外发。
-- **开箱即用 Web 控制台**——支持 `Ctrl/Cmd+K` 全局联想、空库 3 步新手向导、快照「不衰减」开关、概览账本「导出 CSV/MD」、记忆手动置顶与项目规则一键编译、Markdown 预算简报一键复制、运维备份校验下载与审计时间线筛查，以及 SWR 异步秒开。
+- **开箱即用 Web 控制台**——支持 `Ctrl/Cmd+K` 全局联想、空库 3 步新手向导、快照「不衰减」开关、概览账本「导出 CSV/MD」、记忆手动置顶与项目规则一键编译、Markdown 预算简报一键复制、运维备份校验下载与纯本地运维日志筛查，以及 SWR 异步秒开。
 
 ## 🚀 快速开始
 
-> **Windows 绿色托盘版（免装 Python，14.5 MB 单文件双击即用）**：直接下载 [ContextVault.exe (v0.15.1)](https://github.com/nghqqa/context-vault/releases/download/v0.15.1/ContextVault.exe)（校验见 [Release 页](https://github.com/nghqqa/context-vault/releases/tag/v0.15.1)），内置 Web 控制台（`127.0.0.1:8791`）、**免 Python 原生 MCP 服务（`--mcp`）**、定时同步全端会话、每日自动备份与 SHA-256 自更新。
+> **Windows 绿色托盘版（免装 Python，17.5 MB 单文件双击即用）**：直接下载 [ContextVault.exe (v0.15.2)](https://github.com/nghqqa/context-vault/releases/download/v0.15.2/ContextVault.exe)（校验见 [Release 页](https://github.com/nghqqa/context-vault/releases/tag/v0.15.2)），内置 Web 控制台（`127.0.0.1:8791`）、**免 Python 原生 MCP 服务（`--mcp`）**、定时同步全端会话、每日自动备份与 SHA-256 自更新。
 
 ```bash
 pip install -e .                   # 可选：注册全局命令 cv / cv-mcp / cv-aml (零第三方依赖)

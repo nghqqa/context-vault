@@ -43,11 +43,11 @@ Your AI coding sessions are your most valuable work asset — yet they're locked
 - **AML Add/Search adapter** — `cv-aml` / `tools/aml_adapter.py` (and `/aml/add`, `/aml/search` mounted on `cv serve`) with tenant isolation, `request_id` idempotent replay & `409 Conflict` detection, plus a zero-dep `Dockerfile.aml`.
 - **Optional secret redaction** — `cv export --redact` or `CV_REDACT_SECRETS=1` masks common API keys, GitHub/AWS tokens, JWTs and PEM private keys before persisting snapshots.
 - **Optional local semantic layer (Ollama / LLM)** — `cv semantic` (and the Console **Settings & Ops** tab) configures local Ollama dense reranking, LLM memory distillation, and automatic session titles; off by default with zero outbound traffic.
-- **Instant local Web Console** — `Ctrl/Cmd+K` global palette, empty-vault 3-step onboarding, Snapshots `no_decay` toggle, Overview CSV/Markdown ledger export, manual memory pinning & rules compiler, budgeted Markdown brief 1-click copy, Ops backup verify/download & Audit timeline filter, selective MCP controls, and non-blocking SWR quota caching.
+- **Instant local Web Console** — `Ctrl/Cmd+K` global palette, empty-vault 3-step onboarding, Snapshots `no_decay` toggle, Overview CSV/Markdown ledger export, manual memory pinning & rules compiler, budgeted Markdown brief 1-click copy, Ops backup verify/download & local Ops log filter, selective MCP controls, and non-blocking SWR quota caching.
 
 ## 🚀 Quick Start
 
-> **Windows ready-to-run tray app (no Python required, 14.5 MB single binary)**: Download [ContextVault.exe (v0.15.1)](https://github.com/nghqqa/context-vault/releases/download/v0.15.1/ContextVault.exe) ([Release notes & SHA256](https://github.com/nghqqa/context-vault/releases/tag/v0.15.1)) and double-click to launch the resident Web Console (`127.0.0.1:8791`), **built-in zero-Python MCP server (`--mcp`)**, periodic sync, daily backups, and SHA-256 self-update checks.
+> **Windows ready-to-run tray app (no Python required, 17.5 MB single binary)**: Download [ContextVault.exe (v0.15.2)](https://github.com/nghqqa/context-vault/releases/download/v0.15.2/ContextVault.exe) ([Release notes & SHA256](https://github.com/nghqqa/context-vault/releases/tag/v0.15.2)) and double-click to launch the resident Web Console (`127.0.0.1:8791`), **built-in zero-Python MCP server (`--mcp`)**, periodic sync, daily backups, and SHA-256 self-update checks.
 
 ```bash
 pip install -e .                   # optional: installs global `cv`, `cv-mcp`, `cv-aml` commands (zero deps)
