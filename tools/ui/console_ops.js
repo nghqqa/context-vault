@@ -100,33 +100,41 @@ function renderOpsBackupsList(bk){
 function renderOpsAudit(audit){
   const box=$("#ops-audit-box");if(!box)return;
   $$("#ops-audit-filters button").forEach(b=>b.classList.toggle("on",(b.dataset.k||"all")===opsAuditKind));
-  if(!audit){box.innerHTML='<div class="hint">审计数据暂不可用</div>';return}
+  if(!audit){box.innerHTML='<div class="hint">本地运维日志暂不可用</div>';return}
   const s=audit.summary||{};
   const tl=Array.isArray(audit.timeline)?audit.timeline:[];
-  const stPill=st=>{
-    const v=String(st||"").toLowerCase();
-    if(v==="ok"||v==="prune")return '<span class="pill ok">'+esc(st)+'</span>';
-    if(v==="switch"||v==="warm")return '<span class="pill warn">'+esc(st)+'</span>';
-    return '<span class="pill err">'+esc(st||"error")+'</span>';
+  const kindMeta={
+    sync:["同步","ok"],
+    backup:["备份","muted"],
+    migrate:["迁移","warn"],
+    mcp:["MCP","muted"],
+    error:["失败","err"]
+  };
+  const kindPill=(k,st)=>{
+    if(String(st||"").toLowerCase()==="error"||k==="error")return '<span class="pill err">失败</span>';
+    const m=kindMeta[k];
+    if(m)return '<span class="pill '+m[1]+'">'+m[0]+'</span>';
+    return '<span class="pill muted">'+esc(k||"ops")+'</span>';
   };
   let html='<div class="ops-audit-sum">'+
-    '<span class="pill muted">总事件 '+num(audit.total_events||0)+'</span>'+
-    '<span class="pill ok">正常 '+num(s.ok_probes||0)+'</span>'+
-    '<span class="pill '+((s.abnormal||0)>0?"err":"muted")+'">异常 '+num(s.abnormal||0)+'</span>'+
-    '<span class="pill '+((s.switches||0)>0?"warn":"muted")+'">切换 '+num(s.switches||0)+'</span>'+
-    '<span class="pill '+((s.model_missing_events||0)>0?"warn":"muted")+'">模型缺失 '+num(s.model_missing_events||0)+'</span>'+
+    '<span class="pill muted">总记录 '+num(audit.total_events||0)+'</span>'+
+    '<span class="pill ok">同步 '+num(s.sync||0)+'</span>'+
+    '<span class="pill muted">备份/裁剪 '+num(s.backup||0)+'</span>'+
+    '<span class="pill '+((s.migrate||0)>0?"warn":"muted")+'">迁移 '+num(s.migrate||0)+'</span>'+
+    '<span class="pill muted">MCP '+num(s.mcp||0)+'</span>'+
+    '<span class="pill '+((s.error||0)>0?"err":"muted")+'">失败 '+num(s.error||0)+'</span>'+
     '</div>';
   if(!tl.length){
-    box.innerHTML=html+'<div class="hint">当前筛选条件暂无审计记录</div>';
+    box.innerHTML=html+'<div class="hint">暂无本地运维记录（执行同步、备份、迁移或 MCP 配置后将自动记录于此）</div>';
     return;
   }
   html+=tl.slice(0,7).map(day=>{
     const evs=(day.events||[]).slice(0,12).map(ev=>{
-      const detail=(ev.detail||(ev.missing_models&&ev.missing_models.length?("缺失模型: "+ev.missing_models.join(", ")):""))||"";
+      const detail=ev.detail||"";
       return '<div class="ops-audit-ev">'+
         '<span class="ops-audit-ts">'+esc(ev.ts||"")+'</span>'+
-        stPill(ev.status)+
-        (ev.profile?'<code>'+esc(ev.profile)+'</code>':"")+
+        kindPill(ev.kind,ev.status)+
+        (ev.action?'<code>'+esc(ev.action)+'</code>':"")+
         (detail?'<span class="ops-audit-detail">'+esc(detail)+'</span>':"")+
         '</div>';
     }).join("");
@@ -139,11 +147,11 @@ async function loadOpsAudit(kind){
   if(kind)opsAuditKind=kind;
   $$("#ops-audit-filters button").forEach(b=>b.classList.toggle("on",(b.dataset.k||"all")===opsAuditKind));
   try{
-    const audit=await api("/audit?limit=80&kind="+encodeURIComponent(opsAuditKind));
+    const audit=await api("/ops/log?limit=80&kind="+encodeURIComponent(opsAuditKind));
     renderOpsAudit(audit);
   }catch(e){
     const box=$("#ops-audit-box");
-    if(box)box.innerHTML='<div class="hint">审计时间线加载失败：'+esc((e&&e.message)||e)+'</div>';
+    if(box)box.innerHTML='<div class="hint">运维日志加载失败：'+esc((e&&e.message)||e)+'</div>';
   }
 }
 async function loadOps(probeSem){
@@ -152,7 +160,7 @@ async function loadOps(probeSem){
       api("/ops/mcp"),
       api("/ops/status"+(probeSem?"?probe=1":"")),
       api("/ops/backups").catch(()=>null),
-      api("/audit?limit=80&kind="+encodeURIComponent(opsAuditKind)).catch(()=>null),
+      api("/ops/log?limit=80&kind="+encodeURIComponent(opsAuditKind)).catch(()=>null),
     ]));
     renderMcpClients(mcp);
     const sb=$("#ops-sem-box");

@@ -355,6 +355,15 @@ def _get_audit(h, ctx: _ServerCtx, q: dict):
     ))
 
 
+def _get_ops_log(h, ctx: _ServerCtx, q: dict):
+    kind = (q.get("kind") or "all").strip().lower() or "all"
+    try:
+        limit = max(1, min(int(q.get("limit") or 80), 500))
+    except (ValueError, TypeError):
+        limit = 80
+    h._json(_cv().ops_log_summary_and_timeline(ctx.vault, kind=kind, limit=limit))
+
+
 def _get_ops_backups(h, ctx: _ServerCtx, q: dict):
     h._json(_cv().list_backups_api(ctx.vault))
 
@@ -879,6 +888,7 @@ GET_ROUTES = {
     "/skills/inspect": _get_skills_inspect,
     "/skills/backups": _get_skills_backups,
     "/ops/mcp": _get_ops_mcp,
+    "/ops/log": _get_ops_log,
     "/ops/status": _get_ops_status,
     "/ops/backups": _get_ops_backups,
     "/ops/backup/verify": _get_ops_backup_verify,
@@ -924,6 +934,8 @@ def _post_migrate(h, ctx: _ServerCtx, body: dict):
                 r = {**r, "content": dp.read_text(encoding="utf-8", errors="replace")}
         except OSError:
             pass
+    if bool(body.get("apply")):
+        _cv().record_ops_event(ctx.vault, "migrate", f"migrate→{body.get('target', 'codex')}", f"{mid} → {r.get('dest', '')}")
     h._json(r)
 
 
@@ -951,6 +963,8 @@ def _post_migrate_project(h, ctx: _ServerCtx, body: dict):
         return h._json({"error": str(e)}, 404)
     except _cv().BadMigrateTarget as e:
         return h._json({"error": str(e)}, 400)
+    if apply_flag:
+        _cv().record_ops_event(ctx.vault, "migrate", f"project→{target}", f"{proj} ({len(results)} 条)")
     h._json({
         "project": proj, "target": target, "applied": apply_flag,
         "count": len(results), "dest_dir": str(Path(results[0]["dest"]).parent),
@@ -970,6 +984,12 @@ def _post_sync(h, ctx: _ServerCtx, body: dict):
                 res["memories_total"] = mres["total"]
             except Exception:
                 res["memories_added"] = 0
+    _cv().record_ops_event(
+        ctx.vault,
+        "sync",
+        "vault-sync",
+        f"新增 {res.get('new', 0)} · 更新 {res.get('updated', 0)} · 共 {res.get('total', 0)} 快照",
+    )
     h._json(res)
 
 
@@ -1022,6 +1042,12 @@ def _post_memory_compile_rules(h, ctx: _ServerCtx, body: dict):
                     include_summary=bool(body.get("include_summary", False)),
                     apply=True,
                 )
+            _cv().record_ops_event(
+                ctx.vault,
+                "mcp",
+                "compile-rules",
+                f"{body.get('project', '') or 'all'} → {res.get('out_path', '')}",
+            )
         else:
             res = _cv().compile_project_rules(
                 ctx.vault,
@@ -1178,6 +1204,9 @@ def _post_migrate_batch(h, ctx: _ServerCtx, body: dict):
         return h._json({"error": str(e)}, 404)
     except (_cv().BadMigrateTarget, ValueError) as e:
         return h._json({"error": str(e)}, 400)
+    if apply_flag:
+        cnt = (res.get("counts") or {}).get("migrated", 0)
+        _cv().record_ops_event(ctx.vault, "migrate", f"batch→{target}", f"写入 {cnt} 条")
     h._json(res)
 
 
@@ -1236,6 +1265,9 @@ def _dispatch_ops_mcp_action(h, ctx: _ServerCtx, body: dict, api_fn, default_cli
             else:
                 cid = str(body.get("client") or default_client or "").strip()
                 res = api_fn(ctx.vault, client=cid)
+        act_name = "mcp-install" if api_fn is _cv().mcp_install_api else "mcp-uninstall"
+        cls_txt = ", ".join(str(x.get("client") or "") for x in (res.get("results") or []) if x.get("client"))
+        _cv().record_ops_event(ctx.vault, "mcp", act_name, cls_txt or "none")
         h._json(res)
     except ValueError as e:
         h._json({"error": str(e)}, 400)
@@ -1297,6 +1329,7 @@ def _post_ops_ledger_sync(h, ctx: _ServerCtx, body: dict):
         with ctx._write_lock:
             res = ctx.cv_ledger.sync_usage_events(ctx.vault)
             ctx.cache.clear()
+        _cv().record_ops_event(ctx.vault, "sync", "ledger-sync", str(res.get("message") or "")[:160])
         h._json({"ok": True, "added": res["added"], "skipped": res["skipped"],
                  "files_scanned": res["files_scanned"], "message": res["message"]})
     except (FileNotFoundError, ValueError) as e:
@@ -1325,6 +1358,9 @@ def _post_skills_migrate(h, ctx: _ServerCtx, body: dict):
                 vault=ctx.vault,
                 connected_only=bool(body.get("connected_only")),
             )
+        if bool(body.get("apply")):
+            cnt = (res.get("counts") or {}).get("migrated", 0)
+            _cv().record_ops_event(ctx.vault, "migrate", f"skills→{res.get('target', '')}", f"{res.get('source', '')} 写入 {cnt} 项")
         h._json(res)
     except ValueError as e:
         h._json({"error": str(e)}, 400)
@@ -1348,6 +1384,8 @@ def _post_skills_remove(h, ctx: _ServerCtx, body: dict):
                 apply=bool(body.get("apply")),
                 connected_only=bool(body.get("connected_only")),
             )
+        if bool(body.get("apply")):
+            _cv().record_ops_event(ctx.vault, "migrate", "skills-remove", f"{res.get('target', '')} 移除 {res.get('removed', 0)} 项")
         h._json(res)
     except ValueError as e:
         h._json({"error": str(e)}, 400)
@@ -1359,6 +1397,8 @@ def _post_skills_rollback(h, ctx: _ServerCtx, body: dict):
     try:
         with ctx._write_lock:
             res = _sk.rollback_skill_backup_api(ctx.vault, bid, apply=bool(body.get("apply")))
+        if bool(body.get("apply")):
+            _cv().record_ops_event(ctx.vault, "migrate", "skills-rollback", f"{bid} 恢复 {res.get('restored', 0)} 项")
         h._json(res)
     except ValueError as e:
         h._json({"error": str(e)}, 400)

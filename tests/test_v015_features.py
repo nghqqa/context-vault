@@ -421,6 +421,18 @@ def test_backup_list_verify_tamper_traversal_download_and_audit(tmp_path, capsys
         assert st_a1 == 200 and st_a2 == 200
         assert any(ev["profile"] == "p-err" for d in a_err["timeline"] for ev in d["events"])
         assert [ev["profile"] for d in a_sw["timeline"] for ev in d["events"]] == ["p-sw"]
+
+        # /ops/log 纯本地运维日志 (读取 ops_events + backups/zip + migrations.jsonl，屏蔽旧 probe_events)
+        cv.record_ops_event(vault, "sync", "vault-sync", status="ok", detail="同步 3 条测试快照")
+        st_o1, ops_all = _http_json(f"http://127.0.0.1:{port}/ops/log?kind=all&limit=10")
+        st_o2, ops_bk = _http_json(f"http://127.0.0.1:{port}/ops/log?kind=backup&limit=10")
+        assert st_o1 == 200 and st_o2 == 200
+        assert ops_all["summary"]["sync"] >= 1 and ops_all["summary"]["backup"] >= 1
+        all_actions = [ev.get("action") for d in ops_all["timeline"] for ev in d["events"]]
+        bk_actions = [ev.get("action") for d in ops_bk["timeline"] for ev in d["events"]]
+        assert "vault-sync" in all_actions and "vault-sync" not in bk_actions
+        assert any(a == "backup" for a in bk_actions)
+        assert not any("p-err" in str(ev) or "p-sw" in str(ev) for d in ops_all["timeline"] for ev in d["events"])
     finally:
         srv.shutdown()
         srv.server_close()

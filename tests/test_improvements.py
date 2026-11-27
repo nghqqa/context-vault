@@ -778,8 +778,8 @@ class TestProjectImprovements(unittest.TestCase):
         conn = cv.db(vault)
         conn.executescript(cv.SCHEMA)
         conn.execute(
-            "INSERT INTO probe_events(ts,profile,endpoint,status,http_code,latency_ms,models,missing_models)"
-            " VALUES('2026-11-24T00:00:00Z','<script>alert(1)</script>','http://x','err',500,10,'[]','<img src=x>')"
+            "INSERT INTO ops_events(ts,kind,action,status,detail)"
+            " VALUES('2026-11-24T00:00:00Z','sync','<script>alert(1)</script>','error','<img src=x>')"
         )
         conn.commit()
         conn.close()
@@ -791,6 +791,7 @@ class TestProjectImprovements(unittest.TestCase):
         html_txt = out_html.read_text(encoding="utf-8")
         self.assertNotIn("<script>alert(1)</script>", html_txt)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html_txt)
+        self.assertIn("&lt;img src=x&gt;", html_txt)
 
         with mock.patch("cv_ops.subprocess.run") as m_run:
             cv_ops.toast("T'&<x>", "M'&<y>")

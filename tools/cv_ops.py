@@ -289,11 +289,26 @@ def cmd_dashboard(args):
         m_txt = html.escape(str((r["m"] or "")[2:]))
         months.append(f'<div class="mcol"><div class="stick" style="height:{max(h,3)}%" title="{usd(r["c"] or 0)}"></div>'
                       f'<div class="lb">{m_txt}</div></div>')
-    for r in conn.execute("SELECT * FROM probe_events ORDER BY id DESC LIMIT 15"):
-        cls = {"ok": "ok", "warm": "warm"}.get(r["status"], "err")
-        detail = html.escape(str((r["missing_models"] or "") or (r["models"] or "")[:60]))
-        probews.append(f'<tr><td><span class="dot {cls}"></span></td><td>{html.escape(str(r["ts"] or "")[:19])}</td>'
-                       f'<td>{html.escape(str(r["profile"] or ""))}</td><td>{html.escape(str(r["status"] or ""))}</td><td>{detail}</td></tr>')
+    ops_rows = []
+    ops_data = ops_log_summary_and_timeline(vault, kind="all", limit=15)
+    kind_names = {"sync": "同步", "backup": "备份", "migrate": "迁移", "mcp": "MCP", "error": "失败"}
+    for day_blk in ops_data.get("timeline") or []:
+        day = str(day_blk.get("day") or "")
+        for ev in day_blk.get("events") or []:
+            st = str(ev.get("status") or "ok")
+            k = str(ev.get("kind") or "ops")
+            cls = "err" if st == "error" or k == "error" else "ok"
+            k_lbl = kind_names.get(k, k)
+            ops_rows.append(
+                f'<tr><td><span class="dot {cls}"></span></td>'
+                f'<td>{html.escape((day + " " + str(ev.get("ts") or "")).strip())}</td>'
+                f'<td>{html.escape(k_lbl)}</td>'
+                f'<td><code>{html.escape(str(ev.get("action") or ""))}</code></td>'
+                f'<td>{html.escape(str(ev.get("detail") or ""))}</td></tr>'
+            )
+    if not ops_rows:
+        ops_rows.append('<tr><td colspan="5" style="color:var(--ink-3)">暂无本地运维记录</td></tr>')
+    ops_html = "".join(ops_rows)
     for r in conn.execute("SELECT * FROM snapshots ORDER BY created_at DESC LIMIT 20"):
         snaps.append(f'<tr><td>{html.escape(str(r["id"] or ""))}</td><td>{html.escape(str(r["agent"] or ""))}</td><td>{r["blocks_total"]}</td>'
                      f'<td>{r["tokens_in"]:,}</td><td>{r["cache_read"]:,}</td>'
@@ -303,7 +318,8 @@ def cmd_dashboard(args):
                 .replace("__BYMODEL__", "".join(bymodel) or '<div class="sub">明细为空</div>')
                 .replace("__MONTHS__", str(len(months)))
                 .replace("__TIMELINE__", "".join(months))
-                .replace("__PROBE__", "".join(probews))
+                .replace("__OPS__", ops_html)
+                .replace("__PROBE__", ops_html)
                 .replace("__NSNAP__", str(len(snaps)))
                 .replace("__SNAPS__", "".join(snaps)))
     out = Path(args.out) if args.out else vault / "dashboard.html"
@@ -603,6 +619,175 @@ def audit_summary_and_timeline(vault: Path, since: str, kind: str, limit: int = 
     }
 
 
+def record_ops_event(vault: Path, kind: str, action: str, detail: str = "", status: str = "ok") -> None:
+    """Best-effort 写入纯本地运维事件到 vault.db/ops_events (不抛异常打断主流程)。"""
+    try:
+        c = _cv()
+        conn = c.db(vault)
+        try:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS ops_events("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, kind TEXT, action TEXT, status TEXT, detail TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO ops_events(ts,kind,action,status,detail) VALUES(?,?,?,?,?)",
+                (
+                    c.now_iso(),
+                    str(kind or "ops").strip().lower(),
+                    str(action or "").strip(),
+                    str(status or "ok").strip().lower(),
+                    str(detail or "")[:300],
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def _backup_zip_ts(path: Path) -> str:
+    m = re.search(r"cv-backup-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})", path.name)
+    if m:
+        y, mo, d, hh, mm, ss = m.groups()
+        return f"{y}-{mo}-{d}T{hh}:{mm}:{ss}"
+    try:
+        return dt.datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(timespec="seconds")
+    except OSError:
+        return ""
+
+
+def ops_log_summary_and_timeline(vault: Path, kind: str = "all", limit: int = 80) -> dict:
+    """汇总纯本地运维日志 (ops_events + 本地 backups/zip + migrations.jsonl)，完全不读取 probe_events。"""
+    c = _cv()
+    merged: list[dict] = []
+    seen_backup_names: set[str] = set()
+    seen_mig_sigs: set[tuple[str, str]] = set()
+    db_path = vault / "vault.db"
+    if db_path.exists():
+        conn = c.db(vault)
+        try:
+            rows = conn.execute(
+                "SELECT id, ts, kind, action, status, detail FROM ops_events ORDER BY id DESC LIMIT 1000"
+            ).fetchall()
+            for r in rows:
+                ev = {
+                    "ts_full": str(r["ts"] or ""),
+                    "kind": str(r["kind"] or "ops").lower(),
+                    "action": str(r["action"] or ""),
+                    "status": str(r["status"] or "ok").lower(),
+                    "detail": str(r["detail"] or ""),
+                    "_seq": int(r["id"] or 0),
+                }
+                merged.append(ev)
+                if ev["kind"] == "backup":
+                    bm = re.search(r"(cv-backup-[^ ·\s]+\.zip)", ev["detail"])
+                    if bm:
+                        seen_backup_names.add(bm.group(1))
+                elif ev["kind"] == "migrate":
+                    sm = re.search(r"(cv_[0-9a-f]{8,64})", ev["detail"])
+                    if sm:
+                        seen_mig_sigs.add((ev["ts_full"][:16], sm.group(1)))
+        except sqlite3.OperationalError:
+            pass
+        finally:
+            conn.close()
+
+    bk_dir = vault / "backups"
+    if bk_dir.is_dir():
+        for idx, bp in enumerate(sorted(bk_dir.glob("cv-backup-*.zip"), reverse=True)[:40]):
+            if bp.name in seen_backup_names:
+                continue
+            try:
+                sz_mb = bp.stat().st_size / 1048576.0
+            except OSError:
+                sz_mb = 0.0
+            merged.append({
+                "ts_full": _backup_zip_ts(bp),
+                "kind": "backup",
+                "action": "backup",
+                "status": "ok",
+                "detail": f"{bp.name} ({sz_mb:.1f} MB)",
+                "_seq": -100 - idx,
+            })
+
+    mig_file = vault / "migrations.jsonl"
+    if mig_file.is_file():
+        try:
+            lines = [ln for ln in mig_file.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
+            for idx, ln in enumerate(lines[-60:]):
+                try:
+                    rec = json.loads(ln)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                ts_val = str(rec.get("at") or rec.get("created_at") or "")
+                src = str(rec.get("source") or rec.get("source_sid") or "")
+                tgt = str(rec.get("target") or "")
+                dest = str(rec.get("dest") or "")
+                if not tgt and dest:
+                    low = dest.lower()
+                    if ".codex" in low:
+                        tgt = "codex"
+                    elif ".claude" in low:
+                        tgt = "claude"
+                    elif ".gemini" in low or "antigravity" in low:
+                        tgt = "antigravity"
+                    elif ".dsh" in low:
+                        tgt = "dsh"
+                    elif ".zcode" in low:
+                        tgt = "zcode"
+                    else:
+                        tgt = Path(dest).name
+                if src and (ts_val[:16], src) in seen_mig_sigs:
+                    continue
+                detail = f"{src} → {tgt}".strip(" →") if (src or tgt) else Path(dest).name
+                merged.append({
+                    "ts_full": ts_val,
+                    "kind": "migrate",
+                    "action": f"migrate→{tgt}" if tgt else "migrate",
+                    "status": "ok",
+                    "detail": detail[:300],
+                    "_seq": -1000 - idx,
+                })
+        except OSError:
+            pass
+
+    merged.sort(key=lambda e: (e["ts_full"], e["_seq"]), reverse=True)
+    summary = {"sync": 0, "backup": 0, "migrate": 0, "mcp": 0, "error": 0}
+    for e in merged:
+        k = e["kind"]
+        if k in summary and k != "error":
+            summary[k] += 1
+        if e["status"] == "error" or k == "error":
+            summary["error"] += 1
+
+    qf = str(kind or "all").strip().lower() or "all"
+    if qf == "error":
+        filtered = [e for e in merged if e["status"] == "error" or e["kind"] == "error"]
+    elif qf != "all":
+        filtered = [e for e in merged if e["kind"] == qf]
+    else:
+        filtered = merged
+
+    shown = filtered[:max(1, min(int(limit or 80), 500))]
+    by_day: dict[str, list[dict]] = {}
+    for e in shown:
+        ts_val = e["ts_full"]
+        day = ts_val[:10] if len(ts_val) >= 10 else "未知日期"
+        hm = ts_val[11:19] if len(ts_val) >= 19 else ts_val[:8]
+        by_day.setdefault(day, []).append({
+            "ts": hm,
+            "kind": e["kind"],
+            "action": e["action"],
+            "status": e["status"],
+            "detail": e["detail"],
+        })
+    timeline = [{"day": d, "events": by_day[d]} for d in by_day]
+    return {"total_events": len(merged), "summary": summary, "timeline": timeline}
+
+
 def cmd_audit(args):
     c = _cv()
     vault = c.vault_dir(args)
@@ -665,6 +850,7 @@ def backup_vault_api(vault: Path, keep: int = 10, out_dir: Path | None = None) -
     backups = sorted(dest_dir.glob("cv-backup-*.zip"))
     size_mb = out.stat().st_size / 1048576
     msg = f"备份完成: {out} ({n_snap} 快照, {size_mb:.1f} MB, 留存 {len(backups)}/{keep_n} 份)"
+    record_ops_event(vault, "backup", "backup", f"{out.name} · {n_snap} 快照 · {size_mb:.1f} MB")
     logs = [msg, "  恢复: 解压到空目录, 以 --vault 指向它 (vault.db + snapshots/ 完整可用)"]
     return {
         "ok": True,
@@ -778,6 +964,8 @@ def prune_snapshots_api(vault: Path, apply: bool = False) -> dict:
                          "kept": kept_cnt, "backup": "vault/backups 最新一份"}, ensure_ascii=False), None),
         )
         conn.commit()
+        if removed > 0:
+            record_ops_event(vault, "backup", "prune", f"回收 {removed} 版 / {reclaim/1e6:.1f} MB · 保留 {kept_cnt} 版")
         done_msg = (
             f"已回收 {removed} 版 / {reclaim/1e6:.0f} MB"
             + (f" ({len(drop) - removed} 版因文件被占用跳过, 下次 prune 再试)" if removed != len(drop) else "")

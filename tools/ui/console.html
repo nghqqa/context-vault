@@ -433,12 +433,14 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
       </div>
       <div class="card ops-audit-card">
         <div class="card-h">
-          <span class="ch-l">审计与运维时间线</span>
-          <div class="ops-audit-filters" id="ops-audit-filters" role="group" aria-label="审计事件筛选">
+          <span class="ch-l">本地运维日志</span>
+          <div class="ops-audit-filters" id="ops-audit-filters" role="group" aria-label="运维日志筛选">
             <button class="btn xs on" type="button" data-k="all" onclick="loadOpsAudit('all')">全部</button>
-            <button class="btn xs" type="button" data-k="error" onclick="loadOpsAudit('error')">异常/失败</button>
-            <button class="btn xs" type="button" data-k="switch" onclick="loadOpsAudit('switch')">模型切换</button>
-            <button class="btn xs" type="button" data-k="ok" onclick="loadOpsAudit('ok')">正常探测</button>
+            <button class="btn xs" type="button" data-k="sync" onclick="loadOpsAudit('sync')">同步</button>
+            <button class="btn xs" type="button" data-k="backup" onclick="loadOpsAudit('backup')">备份/裁剪</button>
+            <button class="btn xs" type="button" data-k="migrate" onclick="loadOpsAudit('migrate')">迁移</button>
+            <button class="btn xs" type="button" data-k="mcp" onclick="loadOpsAudit('mcp')">MCP</button>
+            <button class="btn xs" type="button" data-k="error" onclick="loadOpsAudit('error')">失败</button>
           </div>
         </div>
         <div class="card-b" id="ops-audit-box"><div class="skel" style="width:70%"></div></div>

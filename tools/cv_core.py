@@ -31,11 +31,15 @@ CREATE TABLE IF NOT EXISTS ledger_events(
 CREATE TABLE IF NOT EXISTS probe_events(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, profile TEXT, endpoint TEXT,
   status TEXT, http_code INTEGER, latency_ms INTEGER, models TEXT, missing_models TEXT);
+CREATE TABLE IF NOT EXISTS ops_events(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, kind TEXT, action TEXT, status TEXT, detail TEXT);
 CREATE INDEX IF NOT EXISTS idx_ledger_ts ON ledger_events(occurred_at);
 CREATE INDEX IF NOT EXISTS idx_snapshots_parent ON snapshots(parent_snapshot);
 CREATE INDEX IF NOT EXISTS idx_snapshots_agent_ref ON snapshots(agent, session_ref);
 CREATE INDEX IF NOT EXISTS idx_probe_status_id ON probe_events(status, id);
 CREATE INDEX IF NOT EXISTS idx_probe_ts ON probe_events(ts);
+CREATE INDEX IF NOT EXISTS idx_ops_ts ON ops_events(ts);
+CREATE INDEX IF NOT EXISTS idx_ops_kind ON ops_events(kind);
 CREATE TABLE IF NOT EXISTS vault_meta(key TEXT PRIMARY KEY, value TEXT);
 """
 
