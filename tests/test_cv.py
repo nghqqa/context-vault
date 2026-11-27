@@ -2040,6 +2040,57 @@ def test_antigravity_set_workspace_protobuf_and_project_id(tmp_path, monkeypatch
     assert parsed[18] == proj_id.encode("ascii")
 
 
+def test_antigravity_posix_workspace_uris_no_quad_slash(tmp_path, monkeypatch):
+    """回归: Linux/macOS POSIX 路径必须生成三斜杠 file:///home/... (禁止 file://// 四斜杠)。"""
+    import sqlite3 as _s
+    import cv_antigravity_pb
+    assert cv._antigravity_ws_uris("/home/alice/my proj/") == (
+        "file:///home/alice/my proj",
+        "file:///home/alice/my%20proj",
+    )
+    assert cv._antigravity_ws_uris("/") == ("file:///", "file:///")
+    assert cv._antigravity_ws_uris("D:\\goai\\") == ("file:///d:/goai", "file:///d%3A/goai")
+    assert cv._antigravity_ws_uris("") == ("", "")
+    assert cv_antigravity_pb._agv_uri_to_cwd("file:///home/alice/my%20proj") == "/home/alice/my proj"
+    assert cv_antigravity_pb._agv_uri_to_cwd("file:///") == "/"
+
+    monkeypatch.setattr(cv, "HOME", tmp_path)
+    proj_id = "8c2f4f7e-4b3b-4c5c-9c71-222222222222"
+    pdir = tmp_path / ".gemini" / "config" / "projects"
+    pdir.mkdir(parents=True)
+    (pdir / f"{proj_id}.json").write_text(json.dumps({
+        "id": proj_id,
+        "name": "my proj",
+        "projectResources": {"resources": [{"folderUri": "file:///home/alice/my%20proj"}]},
+    }), encoding="utf-8")
+
+    dbp = tmp_path / "linux_conv.db"
+    conn = _s.connect(dbp)
+    conn.execute("CREATE TABLE trajectory_metadata_blob(id TEXT PRIMARY KEY, data BLOB)")
+    init_blob = cv._pb_len(6, b"sess-linux") + cv._pb_len(18, b"outside-of-project")
+    conn.execute("INSERT INTO trajectory_metadata_blob VALUES('main', ?)", (init_blob,))
+    conn.commit()
+    conn.close()
+
+    assert cv._antigravity_set_workspace(dbp, "/home/alice/my proj", 1794794528) is True
+
+    conn = _s.connect(dbp)
+    out = conn.execute("SELECT data FROM trajectory_metadata_blob WHERE id='main'").fetchone()[0]
+    conn.close()
+
+    parsed = {}
+    i = 0
+    while i < len(out):
+        k, i = cv._rd_varint(out, i)
+        ln, i = cv._rd_varint(out, i)
+        parsed[k >> 3] = out[i:i + ln]
+        i += ln
+    assert b"file:////" not in out
+    assert b"file:///home/alice/my proj" in parsed[1]
+    assert parsed[7] == b"file:///home/alice/my%20proj"
+    assert parsed[18] == proj_id.encode("ascii")
+
+
 def test_antigravity_fill_steps_payload_and_apply(isolated, tmp_path, monkeypatch):
     """验证 step_payload Field 5 与 steps.metadata 对齐原生格式，source=1 与 --apply 落盘。"""
     import sqlite3 as _s

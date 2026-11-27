@@ -536,7 +536,6 @@ def _antigravity_set_workspace(db_path: Path, ws_folder: str, last_epoch: int, c
                                create_project: bool = True) -> bool:
     """标准化 trajectory_meta (source=1) 并将源项目目录、f3 UUID 与 project_id 写入
     trajectory_metadata_blob.main — 对齐原生结构，避免启动重整时清空元数据并归回底部未分组。"""
-    from urllib.parse import quote as _q
     conn = sqlite3.connect(db_path, timeout=15)
     has_tm = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='trajectory_meta'").fetchone())
     if has_tm:
@@ -556,12 +555,8 @@ def _antigravity_set_workspace(db_path: Path, ws_folder: str, last_epoch: int, c
         fields[(3, 2)] = [str(uuid.uuid5(uuid.NAMESPACE_URL, f"{eff_cascade}:meta")).encode("ascii")]
     elif (3, 2) not in fields:
         fields[(3, 2)] = [str(uuid.uuid4()).encode("ascii")]
-    if ws_folder:
-        posix = ws_folder.replace("\\", "/")
-        if len(posix) >= 2 and posix[1] == ":":
-            posix = posix[0].lower() + posix[1:]  # 原生形态: 盘符小写 (file:///d:/GBM-DRACI)
-        ws_raw = "file:///" + posix
-        enc = "file:///" + _q(posix, safe="/")  # file:///d%3A/GBM-DRACI
+    ws_raw, enc = _antigravity_ws_uris(ws_folder)
+    if ws_raw:
         fields[(1, 2)] = [b"\n" + _varint(len(ws_raw.encode("utf-8"))) + ws_raw.encode("utf-8") + b"\x1a\x00"]
         fields[(7, 2)] = [enc.encode("utf-8")]
         proj_id = _antigravity_resolve_project_id(ws_folder, enc, create=create_project)
@@ -580,14 +575,17 @@ def _antigravity_set_workspace(db_path: Path, ws_folder: str, last_epoch: int, c
 # ------------------------------------------------- antigravity 索引行登记 (导入可见性)
 
 def _antigravity_ws_uris(cwd: str) -> tuple[str, str]:
-    """与 _antigravity_set_workspace 同规则: 盘符小写原始形态 + %3A 编码形态。"""
+    """统一构造 Windows 与 POSIX 工作区的三斜杠 file:/// URI (原始形态 + URL 编码形态)。"""
     from urllib.parse import quote as _q
-    posix = (cwd or "").replace("\\", "/").rstrip("/")
+    posix = (cwd or "").strip().replace("\\", "/")
     if not posix:
         return "", ""
+    if posix != "/":
+        posix = posix.rstrip("/") or ("/" if posix.startswith("/") else "")
     if len(posix) >= 2 and posix[1] == ":":
         posix = posix[0].lower() + posix[1:]
-    return "file:///" + posix, "file:///" + _q(posix, safe="/")
+    rel = posix.lstrip("/")
+    return "file:///" + rel, "file:///" + _q(rel, safe="/")
 
 
 def _antigravity_first_user_text(env: dict) -> str:
