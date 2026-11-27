@@ -682,17 +682,21 @@ def test_agv_hub_discovery_and_path_a(env, monkeypatch):
     (daemon / "hub_13802.json").write_text(json.dumps(
         {"pid": 42424, "httpsPort": 13801, "httpPort": 13802, "lsVersion": "2.34.0",
          "csrfToken": "live-token-bbbbbbbb"}), encoding="utf-8")
+    base_now = dt.datetime.now(dt.timezone.utc)
+    ts_5h = (base_now + dt.timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts_5h_b = (base_now + dt.timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts_weekly = (base_now + dt.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
     STATUS_RESP = {"userStatus": {
         "userTier": {"id": "g1-pro-tier", "name": "Google AI Pro"},
         "cascadeModelConfigData": {"clientModelConfigs": [
             {"label": "Gemini 4 Neon (High)",
-             "quotaInfo": {"remainingFraction": 1, "resetTime": "2026-11-21T15:11:29Z"}},
+             "quotaInfo": {"remainingFraction": 1, "resetTime": ts_5h}},
             {"label": "Gemini 4 Neon (Medium)",
-             "quotaInfo": {"remainingFraction": 1, "resetTime": "2026-11-21T15:11:29Z"}},
+             "quotaInfo": {"remainingFraction": 1, "resetTime": ts_5h}},
             {"label": "Gemini 4 Argon (High)",
-             "quotaInfo": {"remainingFraction": 0.8598132, "resetTime": "2026-11-28T08:55:05Z"}},
+             "quotaInfo": {"remainingFraction": 0.8598132, "resetTime": ts_weekly}},
             {"label": "Claude 4.5 Sonnet",
-             "quotaInfo": {"remainingFraction": 0.5, "resetTime": "2026-11-21T16:00:00Z"}},
+             "quotaInfo": {"remainingFraction": 0.5, "resetTime": ts_5h_b}},
             {"label": "Legacy Model", "modelOrAlias": {"model": "M_OLD"}},  # 无 quotaInfo
         ]}}}
     calls = []
